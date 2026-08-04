@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "difmapy"
+version = "0.1.0"
+description = "Modern in-memory reimplementation of Difmap for VLBI imaging and self-calibration"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "astropy>=6.0",
+]
+
+[project.optional-dependencies]
+ms = ["casatools"]
+plot = ["pyqtgraph>=0.13", "PySide6"]
+
+[tool.maturin]
+manifest-path = "crates/difmap-py/Cargo.toml"
+python-source = "python"
+module-name = "difmapy._core"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
