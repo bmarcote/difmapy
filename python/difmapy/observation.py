@@ -388,6 +388,53 @@ class Observation:
         return self
 
     # ------------------------------------------------------------------
+    # editing / flagging
+    # ------------------------------------------------------------------
+
+    def _ant_index(self, name) -> int:
+        names = [n.upper() for n in self._core.antenna_names]
+        key = str(name).upper()
+        if key not in names:
+            raise ValueError(f"unknown antenna {name!r}; have {self._core.antenna_names}")
+        return names.index(key)
+
+    def _edit(self, flag, baseline=None, station=None, tmin=None, tmax=None,
+              subarray=None, if_index=None, selected_channels_only=False):
+        bl = None
+        if baseline is not None:
+            a, b = baseline
+            bl = (self._ant_index(a), self._ant_index(b))
+        st = self._ant_index(station) if station is not None else None
+        return self._core.edit(
+            bool(flag),
+            tmin=None if tmin is None else float(tmin),
+            tmax=None if tmax is None else float(tmax),
+            baseline=bl,
+            station=st,
+            subarray=subarray,
+            if_index=if_index,
+            sel_chan=bool(selected_channels_only),
+        )
+
+    def flag(self, baseline=None, station=None, tmin=None, tmax=None,
+             subarray=None, if_index=None, selected_channels_only=False):
+        """Flag visibilities (difmap flag). Restrict by baseline
+        (name pair), station name, time range (seconds since the
+        reference day), subarray or IF. Returns #rows affected."""
+        n = self._edit(True, baseline, station, tmin, tmax, subarray,
+                       if_index, selected_channels_only)
+        self._dirty()
+        return n
+
+    def unflag(self, baseline=None, station=None, tmin=None, tmax=None,
+               subarray=None, if_index=None, selected_channels_only=False):
+        """Unflag visibilities (difmap unflag)."""
+        n = self._edit(False, baseline, station, tmin, tmax, subarray,
+                       if_index, selected_channels_only)
+        self._dirty()
+        return n
+
+    # ------------------------------------------------------------------
     # file output (difmap wmap/wbeam/wmodel/wwins ...)
     # ------------------------------------------------------------------
 

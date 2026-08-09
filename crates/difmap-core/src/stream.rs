@@ -40,6 +40,8 @@ pub struct Stream {
     pub polop: PolOp,
     /// Selected global channel ranges (inclusive, sorted, merged).
     pub chlist: Vec<ChanRange>,
+    /// Per-IF selected channel ranges (IF-local indices).
+    pub if_ranges: Vec<Vec<ChanRange>>,
     /// Uncalibrated selected visibilities `[nrow * nif]`.
     pub raw: Vec<Cvis>,
     /// Calibrated visibilities `[nrow * nif]`.
@@ -134,58 +136,14 @@ impl Stream {
         let nrow = ob.nrow;
         let mut raw = vec![Cvis::default(); nrow * nif];
         raw.par_chunks_mut(nif).enumerate().for_each(|(row, out)| {
-            for (cif, band) in ob.ifs.iter().enumerate() {
-                if if_ranges[cif].is_empty() {
-                    continue;
-                }
-                let mut sum_re = 0.0f32;
-                let mut sum_im = 0.0f32;
-                let mut var_sum = 0.0f32; // sum of 1/wt
-                let mut npts = 0u32;
-                let mut flagged = false;
-                let mut deleted = false;
-                'ranges: for &(ca, cb) in &if_ranges[cif] {
-                    for ch in ca..=cb {
-                        let mut cur = polop.get(ob.pvis(row, band.coff + ch));
-                        if cur.wt == 0.0 {
-                            deleted = true;
-                            break 'ranges;
-                        }
-                        if cur.wt < 0.0 {
-                            flagged = true;
-                            cur.wt = -cur.wt;
-                        }
-                        npts += 1;
-                        sum_re += cur.re;
-                        sum_im += cur.im;
-                        var_sum += 1.0 / cur.wt;
-                    }
-                }
-                out[cif] = if deleted || var_sum == 0.0 || npts == 0 {
-                    Cvis::default()
-                } else {
-                    let n = npts as f32;
-                    let re = sum_re / n;
-                    let im = sum_im / n;
-                    if re == 0.0 && im == 0.0 {
-                        // difmap treats identically-zero visibilities as deleted
-                        Cvis::default()
-                    } else {
-                        let wt = n * n / var_sum;
-                        Cvis {
-                            re,
-                            im,
-                            wt: if flagged { -wt } else { wt },
-                        }
-                    }
-                };
-            }
+            average_row(ob, polop, &if_ranges, row, out);
         });
 
         let mut stream = Stream {
             stokes,
             polop,
             chlist,
+            if_ranges,
             vis: raw.clone(),
             raw,
             model: vec![(0.0, 0.0); nrow * nif],
@@ -196,49 +154,137 @@ impl Stream {
         Ok(stream)
     }
 
+    /// Re-average and re-calibrate the given rows from the raw cube
+    /// (used after editing/flagging raw data).
+    pub fn rebuild_rows(&mut self, ob: &Observation, rows: &[usize]) {
+        let nif = ob.nif();
+        for &row in rows {
+            let out = &mut self.raw[row * nif..(row + 1) * nif];
+            average_row(ob, self.polop, &self.if_ranges, row, out);
+        }
+        self.apply_calibration_rows(ob, Some(rows));
+    }
+
     /// (Re-)apply the observation's gain table to produce `vis` from
     /// `raw`. Port of app_Telcor() semantics (telcor.c):
     /// amp *= Aa*Ab; phs += pa-pb; wt /= (Aa*Ab)^2; flagged if either
     /// gain is marked bad.
     pub fn apply_calibration(&mut self, ob: &Observation) {
+        self.apply_calibration_rows(ob, None);
+    }
+
+    /// Apply calibration to a subset of rows (None = all rows).
+    pub fn apply_calibration_rows(&mut self, ob: &Observation, rows: Option<&[usize]>) {
         let nif = ob.nif();
         let gains = &ob.gains;
-        self.vis
-            .par_chunks_mut(nif)
-            .zip(self.raw.par_chunks(nif))
-            .enumerate()
-            .for_each(|(row, (vis, raw))| {
-                let it = ob.time_idx[row] as usize;
-                let (a1, a2) = (ob.ant1[row] as usize, ob.ant2[row] as usize);
-                for cif in 0..nif {
-                    let mut v = raw[cif];
-                    if v.wt == 0.0 {
-                        vis[cif] = v;
-                        continue;
-                    }
-                    let ia = gains.idx(it, cif, a1);
-                    let ib = gains.idx(it, cif, a2);
-                    let ampcor = gains.amp[ia] * gains.amp[ib];
-                    let phscor = gains.phs[ia] - gains.phs[ib];
-                    if ampcor != 1.0 || phscor != 0.0 {
-                        let (s, c) = phscor.sin_cos();
-                        let (re, im) = (v.re, v.im);
-                        v.re = ampcor * (re * c - im * s);
-                        v.im = ampcor * (re * s + im * c);
-                        v.wt /= ampcor * ampcor;
-                    }
-                    // Bad gain solutions flag the visibility (difmap
-                    // FLAG_TA/FLAG_TB).
-                    if (gains.bad[ia] || gains.bad[ib]) && v.wt > 0.0 {
-                        v.wt = -v.wt;
-                    }
+        let cal_row = |row: usize, vis: &mut [Cvis], raw: &[Cvis]| {
+            let it = ob.time_idx[row] as usize;
+            let (a1, a2) = (ob.ant1[row] as usize, ob.ant2[row] as usize);
+            for cif in 0..nif {
+                let mut v = raw[cif];
+                if v.wt == 0.0 {
                     vis[cif] = v;
+                    continue;
                 }
-            });
+                let ia = gains.idx(it, cif, a1);
+                let ib = gains.idx(it, cif, a2);
+                let ampcor = gains.amp[ia] * gains.amp[ib];
+                let phscor = gains.phs[ia] - gains.phs[ib];
+                if ampcor != 1.0 || phscor != 0.0 {
+                    let (s, c) = phscor.sin_cos();
+                    let (re, im) = (v.re, v.im);
+                    v.re = ampcor * (re * c - im * s);
+                    v.im = ampcor * (re * s + im * c);
+                    v.wt /= ampcor * ampcor;
+                }
+                // Bad gain solutions flag the visibility (difmap
+                // FLAG_TA/FLAG_TB).
+                if (gains.bad[ia] || gains.bad[ib]) && v.wt > 0.0 {
+                    v.wt = -v.wt;
+                }
+                vis[cif] = v;
+            }
+        };
+        match rows {
+            None => {
+                self.vis
+                    .par_chunks_mut(nif)
+                    .zip(self.raw.par_chunks(nif))
+                    .enumerate()
+                    .for_each(|(row, (vis, raw))| cal_row(row, vis, raw));
+            }
+            Some(rows) => {
+                for &row in rows {
+                    let raw = &self.raw[row * nif..(row + 1) * nif];
+                    // Safe split: vis and raw are distinct fields, but
+                    // the closure borrows raw by slice; copy locally.
+                    let raw_copy: Vec<Cvis> = raw.to_vec();
+                    let vis = &mut self.vis[row * nif..(row + 1) * nif];
+                    cal_row(row, vis, &raw_copy);
+                }
+            }
+        }
     }
 
     #[inline]
     pub fn nif(&self) -> usize {
         self.if_used.len()
+    }
+}
+
+/// Channel-average and polarization-combine one row into `out[nif]`
+/// (the inner loop of ob_select(); see the module docs for semantics).
+fn average_row(
+    ob: &Observation,
+    polop: PolOp,
+    if_ranges: &[Vec<ChanRange>],
+    row: usize,
+    out: &mut [Cvis],
+) {
+    for (cif, band) in ob.ifs.iter().enumerate() {
+        if if_ranges[cif].is_empty() {
+            continue;
+        }
+        let mut sum_re = 0.0f32;
+        let mut sum_im = 0.0f32;
+        let mut var_sum = 0.0f32; // sum of 1/wt
+        let mut npts = 0u32;
+        let mut flagged = false;
+        let mut deleted = false;
+        'ranges: for &(ca, cb) in &if_ranges[cif] {
+            for ch in ca..=cb {
+                let mut cur = polop.get(ob.pvis(row, band.coff + ch));
+                if cur.wt == 0.0 {
+                    deleted = true;
+                    break 'ranges;
+                }
+                if cur.wt < 0.0 {
+                    flagged = true;
+                    cur.wt = -cur.wt;
+                }
+                npts += 1;
+                sum_re += cur.re;
+                sum_im += cur.im;
+                var_sum += 1.0 / cur.wt;
+            }
+        }
+        out[cif] = if deleted || var_sum == 0.0 || npts == 0 {
+            Cvis::default()
+        } else {
+            let n = npts as f32;
+            let re = sum_re / n;
+            let im = sum_im / n;
+            if re == 0.0 && im == 0.0 {
+                // difmap treats identically-zero visibilities as deleted
+                Cvis::default()
+            } else {
+                let wt = n * n / var_sum;
+                Cvis {
+                    re,
+                    im,
+                    wt: if flagged { -wt } else { wt },
+                }
+            }
+        };
     }
 }

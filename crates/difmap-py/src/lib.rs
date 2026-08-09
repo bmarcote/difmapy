@@ -6,6 +6,7 @@
 //! wraps this in a friendlier high-level API.
 
 use difmap_core::clean::{clean, map_stats, restore, Window};
+use difmap_core::edit::{edit, edit_rows, EditSelection};
 use difmap_core::grid::{invert, InvertPars, MapBeam, MapGeom};
 use difmap_core::model::{
     add_to_stream_model, clear_models, merge_model, recompute_stream_model, CmpType, ModComp,
@@ -647,6 +648,62 @@ impl CoreObservation {
             self.ob.stream = stream;
         });
         self.mb = None;
+    }
+
+    // ---------------- editing / flagging ----------------
+
+    /// Flag or unflag visibilities matching the given criteria
+    /// (difmap flag/unflag). Antenna indices are global; time range in
+    /// seconds since ref_mjd. Returns the number of rows affected.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (flag, tmin=None, tmax=None, baseline=None, station=None,
+                        subarray=None, if_index=None, sel_chan=false))]
+    fn edit(
+        &mut self,
+        py: Python<'_>,
+        flag: bool,
+        tmin: Option<f64>,
+        tmax: Option<f64>,
+        baseline: Option<(u32, u32)>,
+        station: Option<u32>,
+        subarray: Option<u32>,
+        if_index: Option<usize>,
+        sel_chan: bool,
+    ) -> usize {
+        let sel = EditSelection {
+            time_range: match (tmin, tmax) {
+                (None, None) => None,
+                (a, b) => Some((a.unwrap_or(f64::MIN), b.unwrap_or(f64::MAX))),
+            },
+            baseline,
+            station,
+            subarray,
+            if_index,
+            sel_chan,
+        };
+        let n = py.detach(|| edit(&mut self.ob, &sel, flag));
+        if n > 0 {
+            self.mb = None;
+        }
+        n
+    }
+
+    /// Flag or unflag explicit row indices (interactive plot editing).
+    #[pyo3(signature = (rows, flag, if_index=None, sel_chan=false))]
+    fn edit_rows(
+        &mut self,
+        py: Python<'_>,
+        rows: Vec<usize>,
+        flag: bool,
+        if_index: Option<usize>,
+        sel_chan: bool,
+    ) -> PyResult<()> {
+        if rows.iter().any(|&r| r >= self.ob.nrow) {
+            return Err(PyValueError::new_err("row index out of range"));
+        }
+        py.detach(|| edit_rows(&mut self.ob, &rows, if_index, sel_chan, flag));
+        self.mb = None;
+        Ok(())
     }
 
     /// Gain table (amp[nt, nif, nant], phs, bad) copies.
