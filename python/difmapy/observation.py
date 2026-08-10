@@ -435,6 +435,40 @@ class Observation:
         return n
 
     # ------------------------------------------------------------------
+    # interactive plots (pyqtgraph; require the [plot] extra)
+    # ------------------------------------------------------------------
+
+    def radplot(self, quantity="amp", block=None):
+        """Amplitude/phase vs UV radius with interactive flagging."""
+        from difmapy.plots import radplot
+
+        return radplot(self, quantity=quantity, block=block)
+
+    def projplot(self, angle=0.0, quantity="amp", block=None):
+        """Amp/phase vs projected UV distance (difmap projplot)."""
+        from difmapy.plots import projplot
+
+        return projplot(self, angle_deg=angle, quantity=quantity, block=block)
+
+    def uvplot(self, block=None):
+        """UV coverage with interactive flagging."""
+        from difmapy.plots import uvplot
+
+        return uvplot(self, block=block)
+
+    def vplot(self, reftel=None, quantity="amp", block=None):
+        """Visibilities vs time for one telescope's baselines."""
+        from difmapy.plots import vplot
+
+        return vplot(self, reftel=reftel, quantity=quantity, block=block)
+
+    def mapplot(self, what="map", block=None, **clean_args):
+        """Interactive map/beam display with CLEAN window editing."""
+        from difmapy.plots import mapplot
+
+        return mapplot(self, what=what, block=block, **clean_args)
+
+    # ------------------------------------------------------------------
     # file output (difmap wmap/wbeam/wmodel/wwins ...)
     # ------------------------------------------------------------------
 
