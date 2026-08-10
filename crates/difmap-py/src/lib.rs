@@ -15,7 +15,7 @@ use difmap_core::obs::{Antenna, IfBand, Observation, Source};
 use difmap_core::selfcal::{selfcal, SelfcalPars};
 use difmap_core::stokes::{Cvis, Stokes};
 use difmap_core::stream::Stream;
-use numpy::{PyArrayMethods, 
+use numpy::{PyArray3, PyArrayMethods, 
     Complex32, IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2,
     PyReadonlyArray3,
 };
@@ -249,6 +249,14 @@ impl CoreObservation {
     #[getter]
     fn antenna_subarrays(&self) -> Vec<u32> {
         self.ob.antennas.iter().map(|a| a.subarray).collect()
+    }
+    #[getter]
+    fn antenna_xyz<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let mut xyz = Vec::with_capacity(self.ob.antennas.len() * 3);
+        for a in &self.ob.antennas {
+            xyz.extend_from_slice(&a.xyz);
+        }
+        Ok(PyArray1::from_vec(py, xyz).reshape([self.ob.antennas.len(), 3])?)
     }
 
     /// Per-IF (freq of first channel, channel width, nchan).
@@ -704,6 +712,73 @@ impl CoreObservation {
         py.detach(|| edit_rows(&mut self.ob, &rows, if_index, sel_chan, flag));
         self.mb = None;
         Ok(())
+    }
+
+    /// Integration times per row (seconds).
+    fn inttimes<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        PyArray1::from_slice(py, &self.ob.inttime)
+    }
+
+    /// The full raw cube with the current calibrations applied:
+    /// (vis[nrow, nctotal, npol] complex64, wt[nrow, nctotal, npol]).
+    /// Flag state is preserved in the weight signs. Used by writers.
+    fn calibrated_cube<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(
+        Bound<'py, PyArray3<Complex32>>,
+        Bound<'py, PyArray3<f32>>,
+    )> {
+        let ob = &self.ob;
+        let (nrow, nctotal, npol) = (ob.nrow, ob.nctotal, ob.npol());
+        let n = nrow * nctotal * npol;
+        let mut vis: Vec<Complex32> = Vec::with_capacity(n);
+        let mut wt: Vec<f32> = Vec::with_capacity(n);
+        // Global channel -> IF index map.
+        let mut chan_if = vec![0usize; nctotal];
+        for (cif, band) in ob.ifs.iter().enumerate() {
+            for c in band.coff..band.coff + band.nchan {
+                chan_if[c] = cif;
+            }
+        }
+        py.detach(|| {
+            let gains = &ob.gains;
+            for row in 0..nrow {
+                let it = ob.time_idx[row] as usize;
+                let (a1, a2) = (ob.ant1[row] as usize, ob.ant2[row] as usize);
+                for gc in 0..nctotal {
+                    let cif = chan_if[gc];
+                    let ia = gains.idx(it, cif, a1);
+                    let ib = gains.idx(it, cif, a2);
+                    let ampcor = gains.amp[ia] * gains.amp[ib];
+                    let phscor = gains.phs[ia] - gains.phs[ib];
+                    let bad = gains.bad[ia] || gains.bad[ib];
+                    let (s, c) = phscor.sin_cos();
+                    for p in 0..npol {
+                        let v = ob.vis[(row * nctotal + gc) * npol + p];
+                        let mut w = v.wt;
+                        let (re, im) = if w != 0.0 && (ampcor != 1.0 || phscor != 0.0) {
+                            w /= ampcor * ampcor;
+                            (
+                                ampcor * (v.re * c - v.im * s),
+                                ampcor * (v.re * s + v.im * c),
+                            )
+                        } else {
+                            (v.re, v.im)
+                        };
+                        if bad && w > 0.0 {
+                            w = -w;
+                        }
+                        vis.push(Complex32::new(re, im));
+                        wt.push(w);
+                    }
+                }
+            }
+        });
+        Ok((
+            PyArray1::from_vec(py, vis).reshape([nrow, nctotal, npol])?,
+            PyArray1::from_vec(py, wt).reshape([nrow, nctotal, npol])?,
+        ))
     }
 
     /// Gain table (amp[nt, nif, nant], phs, bad) copies.

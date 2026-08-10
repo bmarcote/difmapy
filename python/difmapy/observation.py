@@ -564,6 +564,64 @@ class Observation:
                             phi=phi, freq0=freq0, spcind=spcind)
         return self
 
+    def wobs(self, path, overwrite=True):
+        """Write the (calibrated, edited) UV data to a random-groups
+        UVFITS file (difmap wobs)."""
+        from difmapy.io.uvfits import save_uvfits
+
+        save_uvfits(self._core, path, overwrite=overwrite)
+
+    def save(self, prefix):
+        """Save UV data, model, windows and imaging parameters with a
+        common prefix (difmap save)."""
+        import json
+
+        self.wobs(f"{prefix}.uvf")
+        self.wmodel(f"{prefix}.mod")
+        self.wwins(f"{prefix}.win")
+        sel = None
+        try:
+            s = self._core.selection()
+            sel = {"stokes": s["stokes"], "chlist": [list(r) for r in s["chlist"]]}
+        except RuntimeError:
+            pass
+        pars = {
+            "select": sel,
+            "mapsize": [self._nx, self._xinc / MAS, self._ny, self._yinc / MAS],
+            "uvweight": [self._binwid, self._errpow, self._dorad],
+            "uvtaper": [self._gauval, self._gaurad],
+            "uvrange": [self._uvmin, self._uvmax],
+            "uvzero": list(self._uvzero),
+        }
+        with open(f"{prefix}.par.json", "w") as f:
+            json.dump(pars, f, indent=1)
+
+    @classmethod
+    def get(cls, prefix) -> "Observation":
+        """Restore a session saved with save() (difmap get)."""
+        import json
+        import os
+
+        obs = cls.from_uvfits(f"{prefix}.uvf")
+        if os.path.exists(f"{prefix}.par.json"):
+            with open(f"{prefix}.par.json") as f:
+                pars = json.load(f)
+            if pars.get("select"):
+                obs.select(pars["select"]["stokes"],
+                           channels=[tuple(r) for r in pars["select"]["chlist"]])
+            nx, cell, ny, ycell = pars["mapsize"]
+            obs.mapsize(nx, cell, ny, ycell)
+            obs.uvweight(*pars["uvweight"])
+            obs.uvtaper(*pars["uvtaper"])
+            obs.uvrange(*pars["uvrange"])
+            obs.uvzero(*pars["uvzero"])
+        if os.path.exists(f"{prefix}.mod"):
+            obs.rmodel(f"{prefix}.mod")
+            obs.keep()
+        if os.path.exists(f"{prefix}.win"):
+            obs.rwins(f"{prefix}.win")
+        return obs
+
     def wwins(self, path):
         """Write CLEAN windows (mas) to a difmap .win file."""
         with open(path, "w") as f:

@@ -12,7 +12,7 @@ from astropy.io import fits
 
 from difmapy._core import CoreObservation
 
-__all__ = ["load_uvfits"]
+__all__ = ["load_uvfits", "save_uvfits"]
 
 
 def _group_parameter(hdu, names):
@@ -221,3 +221,139 @@ def load_uvfits(path, wtscale=1.0):
             np.ascontiguousarray(wt),
             float(ref_mjd),
         )
+
+
+def save_uvfits(core, path, overwrite=True):
+    """Write a CoreObservation to a random-groups UVFITS file
+    (difmap wobs). The accumulated calibrations are applied to the
+    data (like difmap's corrected output); flags are preserved as
+    negative weights.
+    """
+    vis, wt = core.calibrated_cube()
+    time, ant1, ant2, us, vs, ws = core.rows()
+    inttim = core.inttimes()
+    ifs = core.ifs
+    nif = len(ifs)
+    nchan = max(n for (_, _, n) in ifs)
+    npol = core.npol
+    nrow = core.nrow
+
+    pols = core.pols
+    if len(pols) > 1:
+        steps = np.diff(pols)
+        if not np.all(steps == steps[0]):
+            raise ValueError(f"cannot express polarizations {pols} on a FITS axis")
+        cdelt_s = int(steps[0])
+    else:
+        cdelt_s = -1 if pols[0] < 0 else 1
+
+    # Data cube [ngroups, 1, 1, nif, nchan, npol, 3]; IFs with fewer
+    # channels than nchan are padded with zero-weight visibilities.
+    gdata = np.zeros((nrow, 1, 1, nif, nchan, npol, 3), dtype=np.float32)
+    for i, (freq, df, nch) in enumerate(ifs):
+        coff = sum(n for (_, _, n) in ifs[:i])
+        block = vis[:, coff : coff + nch, :]
+        gdata[:, 0, 0, i, :nch, :, 0] = block.real
+        gdata[:, 0, 0, i, :nch, :, 1] = block.imag
+        gdata[:, 0, 0, i, :nch, :, 2] = wt[:, coff : coff + nch, :]
+
+    # Antennas: renumber per subarray (1-based NOSTA).
+    names = core.antenna_names
+    subs = core.antenna_subarrays
+    nsub = max(subs) + 1
+    # Global index -> (subarray, station number)
+    nosta_of = {}
+    per_sub = [[] for _ in range(nsub)]
+    for g, (name, s) in enumerate(zip(names, subs)):
+        per_sub[s].append(g)
+        nosta_of[g] = (s, len(per_sub[s]))
+
+    bl = np.zeros(nrow)
+    for k in range(nrow):
+        s1, n1 = nosta_of[int(ant1[k])]
+        s2, n2 = nosta_of[int(ant2[k])]
+        bl[k] = 256 * n1 + n2 + 0.01 * s1
+
+    jd0 = core.ref_mjd + 2400000.5
+    pdata = [
+        us,
+        vs,
+        ws,
+        bl,
+        np.full(nrow, jd0),
+        time / 86400.0,
+        np.asarray(inttim, dtype=np.float64),
+    ]
+    parnames = ["UU", "VV", "WW", "BASELINE", "DATE", "DATE", "INTTIM"]
+    groups = fits.GroupData(gdata, parnames=parnames, pardata=pdata, bitpix=-32)
+    ghdu = fits.GroupsHDU(groups)
+    hdr = ghdu.header
+    hdr["OBJECT"] = core.source_name
+    hdr["EQUINOX"] = 2000.0
+    hdr["BUNIT"] = "JY"
+    hdr["OBSRA"] = np.rad2deg(core.ra)
+    hdr["OBSDEC"] = np.rad2deg(core.dec)
+    hdr["ORIGIN"] = "difmapy"
+    for i, (ctype, crval, cdelt) in enumerate(
+        [
+            ("COMPLEX", 1.0, 1.0),
+            ("STOKES", float(pols[0]), float(cdelt_s)),
+            ("FREQ", ifs[0][0], ifs[0][1]),
+            ("IF", 1.0, 1.0),
+            ("RA", np.rad2deg(core.ra), 1.0),
+            ("DEC", np.rad2deg(core.dec), 1.0),
+        ],
+        start=2,
+    ):
+        hdr[f"CTYPE{i}"] = ctype
+        hdr[f"CRVAL{i}"] = crval
+        hdr[f"CRPIX{i}"] = 1.0
+        hdr[f"CDELT{i}"] = cdelt
+
+    hdus = [ghdu]
+    ant_xyz = np.asarray(core.antenna_xyz)
+    for s in range(nsub):
+        idx = per_sub[s]
+        an = fits.BinTableHDU.from_columns(
+            [
+                fits.Column(name="ANNAME", format="8A",
+                            array=np.array([names[g] for g in idx])),
+                fits.Column(name="STABXYZ", format="3D", unit="METERS",
+                            array=ant_xyz[idx]),
+                fits.Column(name="NOSTA", format="1J",
+                            array=np.arange(1, len(idx) + 1, dtype=np.int32)),
+                fits.Column(name="MNTSTA", format="1J",
+                            array=np.zeros(len(idx), dtype=np.int32)),
+            ]
+        )
+        an.name = "AIPS AN"
+        an.header["EXTVER"] = s + 1
+        an.header["ARRAYX"] = 0.0
+        an.header["ARRAYY"] = 0.0
+        an.header["ARRAYZ"] = 0.0
+        an.header["FREQ"] = ifs[0][0]
+        hdus.append(an)
+
+    fq = fits.BinTableHDU.from_columns(
+        [
+            fits.Column(name="FRQSEL", format="1J",
+                        array=np.array([1], dtype=np.int32)),
+            fits.Column(name="IF FREQ", format=f"{nif}D", unit="HZ",
+                        array=np.array([[f - ifs[0][0] for (f, _, _) in ifs]])),
+            fits.Column(name="CH WIDTH", format=f"{nif}E", unit="HZ",
+                        array=np.array([[df for (_, df, _) in ifs]],
+                                       dtype=np.float32)),
+            fits.Column(name="TOTAL BANDWIDTH", format=f"{nif}E", unit="HZ",
+                        array=np.array([[abs(df) * n for (_, df, n) in ifs]],
+                                       dtype=np.float32)),
+            fits.Column(name="SIDEBAND", format=f"{nif}J",
+                        array=np.array([[1 if df >= 0 else -1
+                                         for (_, df, _) in ifs]],
+                                       dtype=np.int32)),
+        ]
+    )
+    fq.name = "AIPS FQ"
+    fq.header["NO_IF"] = nif
+    hdus.append(fq)
+
+    fits.HDUList(hdus).writeto(path, overwrite=overwrite)
