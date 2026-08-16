@@ -7,3 +7,5 @@ dist/
 *.egg-info/
 .venv/
 difmap-master/
+tests/rsm07_3C345.ms/
+tests/rsm07_3C345.uvfits

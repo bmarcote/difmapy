@@ -144,6 +144,13 @@ def load_uvfits(path, wtscale=1.0):
         a1n = ibl // 256
         a2n = ibl % 256
 
+        # Drop autocorrelations (difmap uses cross-correlations only).
+        cross = a1n != a2n
+        if not cross.all():
+            uu, vv, ww = uu[cross], vv[cross], ww[cross]
+            jd, inttim = jd[cross], inttim[cross]
+            a1n, a2n, sub0 = a1n[cross], a2n[cross], sub0[cross]
+
         mjd = jd - 2400000.5
         ref_mjd = np.floor(mjd.min())
         tsec = (mjd - ref_mjd) * 86400.0
@@ -152,6 +159,8 @@ def load_uvfits(path, wtscale=1.0):
         # Group data shape: (ngroups, ..., IF, FREQ, STOKES, COMPLEX);
         # reshape to [ngroups, nif*nchan, npol, >=2].
         gdata = ghdu.data.data
+        if not cross.all():
+            gdata = gdata[cross]
         ngroups = gdata.shape[0]
         ncplx = gdata.shape[-1]
         gdata = gdata.reshape(ngroups, nif, nchan, npol, ncplx)
