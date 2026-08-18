@@ -30,7 +30,9 @@ fn run_err<E: std::fmt::Display>(e: E) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
-#[pyclass]
+/// `dict` lets the Python layer attach provenance (e.g. which MS the
+/// data came from, for writing flags back).
+#[pyclass(dict)]
 struct CoreObservation {
     ob: Observation,
     mb: Option<MapBeam>,
@@ -96,7 +98,7 @@ impl CoreObservation {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (source_name, ra, dec, epoch, ant_names, ant_xyz, ant_subarray,
                         if_freq, if_df, if_nchan, pols, time, inttime, ant1, ant2,
-                        uvw, vis, wt, ref_mjd))]
+                        uvw, vis, wt, ref_mjd, flag=None))]
     fn new(
         source_name: &str,
         ra: f64,
@@ -117,6 +119,7 @@ impl CoreObservation {
         vis: PyReadonlyArray3<Complex32>,
         wt: PyReadonlyArray3<f32>,
         ref_mjd: f64,
+        flag: Option<PyReadonlyArray3<bool>>,
     ) -> PyResult<Self> {
         let xyz = ant_xyz.as_array();
         if xyz.shape() != [ant_names.len(), 3] {
@@ -174,6 +177,18 @@ impl CoreObservation {
                 wt: *w,
             });
         }
+        // Explicit FLAG column; if absent, negative weights are taken
+        // to mean "flagged" (legacy difmap/UVFITS convention).
+        let flags: Vec<bool> = match &flag {
+            None => Vec::new(),
+            Some(f) => {
+                let f = f.as_array();
+                if f.shape() != visarr.shape() {
+                    return Err(PyValueError::new_err("flag shape differs from vis"));
+                }
+                f.iter().cloned().collect()
+            }
+        };
         let ob = Observation::new(
             Source {
                 name: source_name.to_string(),
@@ -190,6 +205,7 @@ impl CoreObservation {
             ant2.as_array().to_vec(),
             uvw.as_array().iter().cloned().collect(),
             cvis,
+            flags,
             ref_mjd,
         )
         .map_err(val_err)?;
@@ -719,6 +735,49 @@ impl CoreObservation {
         PyArray1::from_slice(py, &self.ob.inttime)
     }
 
+    /// The FLAG column as a bool array [nrow, nctotal, npol]
+    /// (MS convention: true = flagged). Written back by save_flags().
+    fn flags<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<bool>>> {
+        let (nrow, nctotal, npol) = (self.ob.nrow, self.ob.nctotal, self.ob.npol());
+        Ok(PyArray1::from_slice(py, &self.ob.flag).reshape([nrow, nctotal, npol])?)
+    }
+
+    /// Replace the FLAG column wholesale (shape [nrow, nctotal, npol]).
+    fn set_flags(&mut self, py: Python<'_>, flag: PyReadonlyArray3<bool>) -> PyResult<()> {
+        let f = flag.as_array();
+        let (nrow, nctotal, npol) = (self.ob.nrow, self.ob.nctotal, self.ob.npol());
+        if f.shape() != [nrow, nctotal, npol] {
+            return Err(PyValueError::new_err(format!(
+                "flag shape {:?} != [{nrow}, {nctotal}, {npol}]",
+                f.shape()
+            )));
+        }
+        py.detach(|| {
+            for (dst, src) in self.ob.flag.iter_mut().zip(f.iter()) {
+                *dst = *src;
+            }
+        });
+        // Deleted data (zero weight) stays flagged.
+        for (i, v) in self.ob.vis.iter().enumerate() {
+            if v.wt == 0.0 {
+                self.ob.flag[i] = true;
+            }
+        }
+        if let Some(mut stream) = self.ob.stream.take() {
+            let rows: Vec<usize> = (0..nrow).collect();
+            stream.rebuild_rows(&self.ob, &rows);
+            self.ob.stream = Some(stream);
+        }
+        self.mb = None;
+        Ok(())
+    }
+
+    /// Number of flagged visibilities in the FLAG column.
+    #[getter]
+    fn nflagged(&self) -> usize {
+        self.ob.flag.iter().filter(|&&f| f).count()
+    }
+
     /// The full raw cube with the current calibrations applied:
     /// (vis[nrow, nctotal, npol] complex64, wt[nrow, nctotal, npol]).
     /// Flag state is preserved in the weight signs. Used by writers.
@@ -755,7 +814,8 @@ impl CoreObservation {
                     let bad = gains.bad[ia] || gains.bad[ib];
                     let (s, c) = phscor.sin_cos();
                     for p in 0..npol {
-                        let v = ob.vis[(row * nctotal + gc) * npol + p];
+                        let k = (row * nctotal + gc) * npol + p;
+                        let v = ob.vis[k];
                         let mut w = v.wt;
                         let (re, im) = if w != 0.0 && (ampcor != 1.0 || phscor != 0.0) {
                             w /= ampcor * ampcor;
@@ -766,11 +826,9 @@ impl CoreObservation {
                         } else {
                             (v.re, v.im)
                         };
-                        if bad && w > 0.0 {
-                            w = -w;
-                        }
                         vis.push(Complex32::new(re, im));
-                        wt.push(w);
+                        // Writers use the signed-weight convention.
+                        wt.push(if ob.flag[k] || bad { -w } else { w });
                     }
                 }
             }

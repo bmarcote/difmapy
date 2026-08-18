@@ -13,8 +13,13 @@
 //!   channel-averaged, polarization-combined, calibrated visibilities
 //!   that all interactive operations work from.
 //!
-//! Flags are encoded in the sign of the weights, following the difmap
-//! convention: wt > 0 good, wt < 0 flagged, wt == 0 deleted/absent.
+//! Unlike the original difmap (which encoded flags in the sign of the
+//! weights), the raw store keeps an explicit boolean FLAG array like a
+//! Measurement Set FLAG column: weights are always >= 0, flagging
+//! never modifies data or weights, and flags can be written back to an
+//! MS. Weight == 0 marks deleted/absent data (difmap FLAG_DEL).
+//! The *derived* stream still uses difmap's signed-weight convention
+//! internally as a compact per-point display state.
 
 use crate::model::ModComp;
 use crate::stokes::Cvis;
@@ -143,8 +148,11 @@ pub struct Observation {
     /// UVW coordinates in light-seconds, `[nrow * 3]`.
     /// Multiply by frequency (Hz) to get wavelengths.
     pub uvw: Vec<f64>,
-    /// Raw visibilities `[nrow * nctotal * npol]` as (re, im, wt).
+    /// Raw visibilities `[nrow * nctotal * npol]` as (re, im, wt),
+    /// with wt >= 0 (0 = deleted/absent).
     pub vis: Vec<Cvis>,
+    /// The FLAG column: true = flagged, `[nrow * nctotal * npol]`.
+    pub flag: Vec<bool>,
 
     // ---- integration (unique time) index ----
     pub ntimes: usize,
@@ -182,8 +190,9 @@ pub enum ObsError {
 impl Observation {
     /// Assemble an observation from loader-provided arrays.
     ///
-    /// `vis` must be `[nrow, nctotal, npol]` flattened; rows must be
-    /// time-sorted. Weights: >0 good, <0 flagged, 0 deleted.
+    /// `vis` must be `[nrow, nctotal, npol]` flattened with wt >= 0
+    /// (0 = deleted); `flag` is the matching FLAG column. Rows must be
+    /// time-sorted.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         source: Source,
@@ -195,7 +204,8 @@ impl Observation {
         ant1: Vec<u32>,
         ant2: Vec<u32>,
         uvw: Vec<f64>,
-        vis: Vec<Cvis>,
+        mut vis: Vec<Cvis>,
+        mut flag: Vec<bool>,
         ref_mjd: f64,
     ) -> Result<Observation, ObsError> {
         let nrow = time.len();
@@ -234,6 +244,20 @@ impl Observation {
                 npol
             )));
         }
+        if flag.is_empty() {
+            flag = vec![false; vis.len()];
+        } else if flag.len() != vis.len() {
+            return Err(ObsError::Shape("flag array length mismatch".into()));
+        }
+        // Enforce non-negative weights; a deleted point is also flagged.
+        for (v, f) in vis.iter_mut().zip(flag.iter_mut()) {
+            if v.wt < 0.0 {
+                v.wt = -v.wt;
+                *f = true;
+            } else if v.wt == 0.0 {
+                *f = true;
+            }
+        }
         let nant = antennas.len() as u32;
         for (i, (&a1, &a2)) in ant1.iter().zip(ant2.iter()).enumerate() {
             if a1 >= nant || a2 >= nant {
@@ -268,6 +292,7 @@ impl Observation {
             ant2,
             uvw,
             vis,
+            flag,
             ntimes,
             times,
             time_idx,
@@ -289,11 +314,19 @@ impl Observation {
         self.pols.len()
     }
 
-    /// The `npol` recorded visibilities of (row, global channel).
+    /// The `npol` recorded visibilities of (row, global channel), in
+    /// difmap's signed-weight form (wt < 0 where the FLAG column is
+    /// set), as expected by the polarization combiners.
     #[inline]
-    pub fn pvis(&self, row: usize, gchan: usize) -> &[Cvis] {
+    pub fn pvis(&self, row: usize, gchan: usize, out: &mut [Cvis]) {
         let npol = self.pols.len();
         let base = (row * self.nctotal + gchan) * npol;
-        &self.vis[base..base + npol]
+        for p in 0..npol {
+            let mut v = self.vis[base + p];
+            if self.flag[base + p] {
+                v.wt = -v.wt;
+            }
+            out[p] = v;
+        }
     }
 }

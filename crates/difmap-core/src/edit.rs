@@ -1,9 +1,10 @@
 //! Visibility editing (flagging/unflagging).
 //!
 //! The equivalent of difmap's obedit.c, radically simplified by the
-//! in-RAM design: edits are applied immediately to the raw visibility
-//! cube (weight-sign convention) and the affected stream rows are
-//! re-averaged. No deferred-edit lists or scratch-file paging needed.
+//! in-RAM design: edits toggle bits in the explicit FLAG column (the
+//! Measurement-Set convention; data and weights are never modified)
+//! and the affected stream rows are re-averaged immediately. No
+//! deferred-edit lists or scratch-file paging needed.
 
 use crate::obs::Observation;
 
@@ -63,8 +64,12 @@ pub fn edit_rows(
         for &(ca, cb) in &spans {
             for gc in ca..=cb {
                 for p in 0..npol {
-                    let wt = &mut ob.vis[base + gc * npol + p].wt;
-                    *wt = if flag { -wt.abs() } else { wt.abs() };
+                    let k = base + gc * npol + p;
+                    // Deleted data (zero weight) stays flagged forever
+                    // (difmap FLAG_DEL).
+                    if flag || ob.vis[k].wt != 0.0 {
+                        ob.flag[k] = flag;
+                    }
                 }
             }
         }
@@ -110,8 +115,12 @@ pub fn edit(ob: &mut Observation, sel: &EditSelection, flag: bool) -> usize {
             let base = row * nctotal * npol;
             for gc in ca..=cb {
                 for p in 0..npol {
-                    let wt = &mut ob.vis[base + gc * npol + p].wt;
-                    *wt = if flag { -wt.abs() } else { wt.abs() };
+                    let k = base + gc * npol + p;
+                    // Deleted data (zero weight) stays flagged forever
+                    // (difmap FLAG_DEL).
+                    if flag || ob.vis[k].wt != 0.0 {
+                        ob.flag[k] = flag;
+                    }
                 }
             }
         }

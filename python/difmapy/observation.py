@@ -434,6 +434,32 @@ class Observation:
         self._dirty()
         return n
 
+    @property
+    def flags(self) -> np.ndarray:
+        """The FLAG column, [nrow, nchan_total, npol] (True = flagged)."""
+        return self._core.flags()
+
+    @flags.setter
+    def flags(self, value):
+        self._core.set_flags(np.ascontiguousarray(value, dtype=bool))
+        self._dirty()
+
+    @property
+    def flagged_fraction(self) -> float:
+        c = self._core
+        return c.nflagged / (c.nrow * c.nctotal * c.npol)
+
+    def save_flags(self, path=None, flag_row=True):
+        """Write the FLAG column back to the source Measurement Set.
+
+        This is the standard MS way of persisting flags: only FLAG (and
+        FLAG_ROW) are modified, leaving data and weights untouched.
+        Requires that the observation was loaded from an MS.
+        """
+        from difmapy.io.ms import save_flags
+
+        return save_flags(self._core, path=path, flag_row=flag_row)
+
     # ------------------------------------------------------------------
     # interactive plots (pyqtgraph; require the [plot] extra)
     # ------------------------------------------------------------------

@@ -116,6 +116,7 @@ fn synthetic_obs_with_gains(
         ant2,
         uvw,
         vis,
+        Vec::new(), // no flags initially
         60000.0,
     )
     .expect("valid synthetic observation")
@@ -189,18 +190,18 @@ fn point_source_invert() {
 #[test]
 fn flagged_channels_average() {
     let mut ob = synthetic_obs(1.0, 0.0, 0.0);
-    // Flag one channel of the first row (both pols): the average of
-    // the remaining channels must still be good.
+    // Flag one channel of the first row (both pols) via the FLAG
+    // column: the average of the remaining channels must still be good.
     let npol = ob.npol();
     for p in 0..npol {
-        ob.vis[p].wt = -1.0; // row 0, gchan 0
+        ob.flag[p] = true; // row 0, gchan 0
     }
     let stream = Stream::select(&ob, Stokes::I, &[]).expect("select I");
     // Row 0 IF 0 is flagged (one flagged channel flags the average, as
     // in difmap); IF 1 is unaffected.
     assert!(stream.vis[0].wt < 0.0);
     assert!(stream.vis[1].wt > 0.0);
-    // A deleted channel deletes the whole averaged visibility.
+    // A deleted channel (zero weight) deletes the averaged visibility.
     for p in 0..npol {
         ob.vis[npol + p].wt = 0.0; // row 0, gchan 1
     }

@@ -241,6 +241,8 @@ fn average_row(
     row: usize,
     out: &mut [Cvis],
 ) {
+    let mut pvis = [Cvis::default(); 8];
+    let pvis = &mut pvis[..ob.npol().min(8)];
     for (cif, band) in ob.ifs.iter().enumerate() {
         if if_ranges[cif].is_empty() {
             continue;
@@ -253,7 +255,8 @@ fn average_row(
         let mut deleted = false;
         'ranges: for &(ca, cb) in &if_ranges[cif] {
             for ch in ca..=cb {
-                let mut cur = polop.get(ob.pvis(row, band.coff + ch));
+                ob.pvis(row, band.coff + ch, pvis);
+                let mut cur = polop.get(pvis);
                 if cur.wt == 0.0 {
                     deleted = true;
                     break 'ranges;

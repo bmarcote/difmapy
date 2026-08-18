@@ -199,6 +199,10 @@ def load_uvfits(path, wtscale=1.0):
 
         vis = (re + 1j * im).astype(np.complex64).reshape(ngroups, nif * nchan, npol)
         wt = wt.reshape(ngroups, nif * nchan, npol)
+        # UVFITS encodes flags as negative weights; convert to an
+        # explicit FLAG column (MS convention) and keep weights >= 0.
+        flag = wt <= 0.0
+        wt = np.abs(wt)
         uvw = np.column_stack([uu, vv, ww]).astype(np.float64)
 
         # ---- source ----
@@ -229,6 +233,7 @@ def load_uvfits(path, wtscale=1.0):
             np.ascontiguousarray(vis),
             np.ascontiguousarray(wt),
             float(ref_mjd),
+            flag=np.ascontiguousarray(flag),
         )
 
 

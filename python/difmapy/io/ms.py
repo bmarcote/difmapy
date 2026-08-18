@@ -8,11 +8,13 @@ single visibility row covering all IFs, as difmap does for UVFITS.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from difmapy._core import CoreObservation
 
-__all__ = ["load_ms"]
+__all__ = ["load_ms", "save_flags"]
 
 C = 299792458.0
 
@@ -103,6 +105,7 @@ def load_ms(path, field=None, data_column="DATA", wtscale=1.0):
         tb.close()
         raise ValueError("no cross-correlation rows for the selected field")
 
+    ms_rownr = np.asarray(sel.rownumbers(), dtype=np.int64)
     time = sel.getcol("TIME")  # seconds (MJD epoch)
     a1 = sel.getcol("ANTENNA1").astype(int)
     a2 = sel.getcol("ANTENNA2").astype(int)
@@ -133,6 +136,7 @@ def load_ms(path, field=None, data_column="DATA", wtscale=1.0):
         if_df.append(float(width[0] if len(freqs) < 2 else freqs[1] - freqs[0]))
         if_nchan.append(len(freqs))
     nctotal = int(np.sum(if_nchan))
+    nif = len(if_nchan)
 
     # ---- merge rows of the same (time, array, baseline) ----
     key = np.rec.fromarrays([time, arr, a1, a2], names="t,s,a,b")
@@ -172,6 +176,10 @@ def load_ms(path, field=None, data_column="DATA", wtscale=1.0):
 
     vis = np.zeros((nrow, nctotal, npol), dtype=np.complex64)
     wt = np.zeros((nrow, nctotal, npol), dtype=np.float32)  # 0 = absent
+    flag = np.ones((nrow, nctotal, npol), dtype=bool)  # absent = flagged
+    # Provenance for writing flags back: MS main-table row number of
+    # each (merged row, IF), or -1 where the IF was not observed.
+    ms_row = np.full((nrow, nif), -1, dtype=np.int64)
 
     # ---- per-DDID bulk reads ----
     for d in used_dd:
@@ -199,20 +207,21 @@ def load_ms(path, field=None, data_column="DATA", wtscale=1.0):
 
         data = np.transpose(data, (2, 1, 0))  # [n, nchan, ncorr]
         flags = np.transpose(flags, (2, 1, 0))
-        w = np.transpose(w, (2, 1, 0)).astype(np.float32)
+        w = np.abs(np.transpose(w, (2, 1, 0)).astype(np.float32))
         if wtscale != 1.0:
             w = w * np.float32(wtscale)
-        # difmap convention: flagged = negative weight; deleted = 0.
-        w = np.abs(w)
+        # The FLAG column is carried through as-is (FLAG_ROW folded in);
+        # weights stay non-negative.
         allflag = flags | flag_row[dmask][:, np.newaxis, np.newaxis]
-        w[allflag] *= -1.0
         c0 = coff[int(d)]
         nch = data.shape[1]
         vis[rows_d, c0 : c0 + nch, :] = data.astype(np.complex64)
         wt[rows_d, c0 : c0 + nch, :] = w
+        flag[rows_d, c0 : c0 + nch, :] = allflag
+        ms_row[rows_d, int(np.nonzero(used_dd == d)[0][0])] = ms_rownr[dmask]
     tb.close()
 
-    return CoreObservation(
+    core = CoreObservation(
         source,
         ra,
         dec,
@@ -232,4 +241,96 @@ def load_ms(path, field=None, data_column="DATA", wtscale=1.0):
         np.ascontiguousarray(vis),
         np.ascontiguousarray(wt),
         ref_mjd,
+        flag=np.ascontiguousarray(flag),
     )
+    # Provenance needed to write the FLAG column back (save_flags).
+    core._ms_origin = {
+        "path": path,
+        "data_column": data_column,
+        "ms_row": ms_row,
+        "if_nchan": list(if_nchan),
+    }
+    return core
+
+
+def save_flags(core, path=None, flag_row=True):
+    """Write difmapy's FLAG column back into a Measurement Set.
+
+    This is the standard MS way of recording flags (as opposed to
+    difmap's practice of writing a new UV file). Only the FLAG (and
+    optionally FLAG_ROW) column is modified; data and weights are left
+    untouched.
+
+    Parameters
+    ----------
+    core : CoreObservation
+        Observation loaded from an MS (or `path` must be given).
+    path : str | None
+        Target MS; defaults to the MS the data were loaded from.
+    flag_row : bool
+        Also update FLAG_ROW (set when every correlation of a row is
+        flagged), which many CASA tasks use as a fast path.
+    """
+    try:
+        import casatools
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("writing MS flags requires casatools") from exc
+
+    origin = getattr(core, "_ms_origin", None)
+    if origin is None:
+        raise ValueError(
+            "this observation was not loaded from a Measurement Set; "
+            "use wobs() to write UVFITS instead"
+        )
+    if path is not None and os.path.abspath(path) != os.path.abspath(origin["path"]):
+        raise ValueError(
+            f"flags can only be written back to the originating MS "
+            f"({origin['path']}); got {path}"
+        )
+    target = origin["path"]
+
+    flags = np.asarray(core.flags())  # [nrow, nctotal, npol]
+    ms_row = origin["ms_row"]  # [nrow, nif]
+    if_nchan = origin["if_nchan"]
+    nrow, nif = ms_row.shape
+
+    tb = casatools.table()
+    tb.open(target, nomodify=False)
+    try:
+        nwritten = 0
+        coff = 0
+        for i, nch in enumerate(if_nchan):
+            rows = ms_row[:, i]
+            valid = rows >= 0
+            if not valid.any():
+                coff += nch
+                continue
+            r = rows[valid]
+            # [n, nchan, npol] -> MS cell order [npol, nchan]
+            block = flags[valid, coff : coff + nch, :]
+            cells = np.transpose(block, (0, 2, 1))
+            order = np.argsort(r)
+            r_sorted = r[order]
+            cells = cells[order]
+            # Contiguous runs can be written in one putcol call.
+            breaks = np.nonzero(np.diff(r_sorted) != 1)[0] + 1
+            for chunk_r, chunk_c in zip(
+                np.split(r_sorted, breaks), np.split(cells, breaks)
+            ):
+                # chunk_c is [n, npol, nchan]; the MS column wants
+                # [npol, nchan, n].
+                arr = np.ascontiguousarray(np.transpose(chunk_c, (1, 2, 0)))
+                tb.putcol("FLAG", arr, startrow=int(chunk_r[0]), nrow=len(chunk_r))
+                if flag_row:
+                    tb.putcol(
+                        "FLAG_ROW",
+                        chunk_c.all(axis=(1, 2)),
+                        startrow=int(chunk_r[0]),
+                        nrow=len(chunk_r),
+                    )
+                nwritten += len(chunk_r)
+            coff += nch
+        tb.flush()
+    finally:
+        tb.close()
+    return nwritten
