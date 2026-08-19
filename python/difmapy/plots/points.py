@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import numpy as np
-import pyqtgraph as pg
 
-from difmapy.plots.base import FlagScatterPlot, IF_COLORS, run_if_needed
+from difmapy.plots.base import FlagScatterPlot, run_if_needed
 
 
 def _stream_arrays(obs):
@@ -13,7 +12,7 @@ def _stream_arrays(obs):
     wavelengths, row and IF indices, times."""
     core = obs._core
     vis, wt = core.stream_vis()
-    time, a1, a2, us, vs, ws = core.rows()
+    time, a1, a2, us, vs, _ = core.rows()
     sel = core.selection()
     freq = np.asarray(sel["if_freq"])  # [nif]
     nrow, nif = vis.shape

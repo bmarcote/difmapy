@@ -237,13 +237,16 @@ def load_uvfits(path, wtscale=1.0):
         )
 
 
-def save_uvfits(core, path, overwrite=True):
+def save_uvfits(core, path, overwrite=True, freeze_shift=False):
     """Write a CoreObservation to a random-groups UVFITS file
-    (difmap wobs). The accumulated calibrations are applied to the
-    data (like difmap's corrected output); flags are preserved as
-    negative weights.
+    (difmap wobs). Antenna gains and baseline corrections are applied
+    to the data; flags are preserved as negative weights.
+
+    As in difmap, accumulated phase-center shifts are *not* written
+    unless `freeze_shift` is true - `Observation.save()` instead records
+    the shift so that `get()` re-applies it.
     """
-    vis, wt = core.calibrated_cube()
+    vis, wt = core.calibrated_cube(apply_shift=freeze_shift)
     time, ant1, ant2, us, vs, ws = core.rows()
     inttim = core.inttimes()
     ifs = core.ifs
@@ -275,7 +278,7 @@ def save_uvfits(core, path, overwrite=True):
     # Data cube [ngroups, 1, 1, nif, nchan, npol, 3]; IFs with fewer
     # channels than nchan are padded with zero-weight visibilities.
     gdata = np.zeros((nrow, 1, 1, nif, nchan, npol, 3), dtype=np.float32)
-    for i, (freq, df, nch) in enumerate(ifs):
+    for i, (_, _, nch) in enumerate(ifs):
         coff = sum(n for (_, _, n) in ifs[:i])
         block = vis[:, coff : coff + nch, :]
         gdata[:, 0, 0, i, :nch, :, 0] = block.real
@@ -289,14 +292,14 @@ def save_uvfits(core, path, overwrite=True):
     # Global index -> (subarray, station number)
     nosta_of = {}
     per_sub = [[] for _ in range(nsub)]
-    for g, (name, s) in enumerate(zip(names, subs)):
+    for g, s in enumerate(subs):
         per_sub[s].append(g)
         nosta_of[g] = (s, len(per_sub[s]))
 
     bl = np.zeros(nrow)
     for k in range(nrow):
         s1, n1 = nosta_of[int(ant1[k])]
-        s2, n2 = nosta_of[int(ant2[k])]
+        _, n2 = nosta_of[int(ant2[k])]
         bl[k] = 256 * n1 + n2 + 0.01 * s1
 
     jd0 = core.ref_mjd + 2400000.5

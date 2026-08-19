@@ -1,7 +1,7 @@
 """UVFITS writer (wobs) and save/get roundtrip tests."""
 
 import numpy as np
-import pytest
+
 
 import difmapy
 from conftest import FLUX, X0_MAS, Y0_MAS
@@ -35,7 +35,7 @@ def test_wobs_roundtrip(uvfits_file, tmp_path):
 
 
 def test_wobs_applies_calibration(corrupted_uvfits_file, tmp_path):
-    path_in, gerr = corrupted_uvfits_file
+    path_in, _ = corrupted_uvfits_file
     o = difmapy.load(path_in)
     o.select("I")
     o.addcmp(FLUX, X0_MAS, Y0_MAS)

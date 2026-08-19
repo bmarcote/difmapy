@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtWidgets
 
 from difmapy.plots.base import IF_COLORS, ensure_app, run_if_needed
 
@@ -123,7 +123,7 @@ class TPlot(QtWidgets.QMainWindow):
         p = self.glw.addPlot()
         p.setLabel("bottom", "Time (hours)")
         p.setLabel("left", "Antenna")
-        for ia, name in enumerate(names):
+        for ia in range(len(names)):
             good = samp[:, ia] > 0
             if not good.any():
                 continue

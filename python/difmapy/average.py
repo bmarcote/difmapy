@@ -30,7 +30,9 @@ def uvaver(core: CoreObservation, aver_time: float, doscatter: bool = False):
     if aver_time <= 0:
         raise ValueError("aver_time must be positive")
 
-    vis, wt = core.calibrated_cube()  # signed weights: <0 flagged
+    # Average what the user currently sees: gains, baseline corrections
+    # and any accumulated shift are all applied.
+    vis, wt = core.calibrated_cube(apply_shift=True)  # signed wt: <0 flagged
     vis = np.asarray(vis)
     wt = np.asarray(wt)
     good = wt > 0
@@ -62,14 +64,18 @@ def uvaver(core: CoreObservation, aver_time: float, doscatter: bool = False):
     time_s = time[order]
     it_s = inttime[order]
 
-    shape = (ngroup,) + vis.shape[1:]
-    sum_wv = np.zeros(shape, dtype=np.complex128)
-    sum_w = np.zeros(shape, dtype=np.float64)
-    sum_n = np.zeros(shape, dtype=np.int64)
-    # Weighted vector average per (channel, pol).
-    np.add.at(sum_wv, gidx, w_s * vis_s)
-    np.add.at(sum_w, gidx, w_s)
-    np.add.at(sum_n, gidx, good_s.astype(np.int64))
+    # The rows are sorted into group order, so all the group sums are
+    # segmented reductions. reduceat costs about the same time as
+    # np.add.at here (sorting the cube dominates) but avoids its
+    # float64 upcast, halving the peak temporary.
+    starts = np.nonzero(new_group)[0]
+
+    def _sum(arr):
+        return np.add.reduceat(arr, starts, axis=0)
+
+    sum_w = _sum(w_s)
+    sum_n = _sum(good_s.astype(np.int32))
+    sum_wv = _sum(w_s.astype(np.float32) * vis_s)  # complex64 temporary
 
     with np.errstate(invalid="ignore", divide="ignore"):
         avg = np.where(sum_w > 0, sum_wv / np.maximum(sum_w, 1e-300), 0.0)
@@ -78,9 +84,8 @@ def uvaver(core: CoreObservation, aver_time: float, doscatter: bool = False):
 
     if doscatter:
         # Weight from the scatter about the mean: wt = n / variance.
-        sum_sq = np.zeros(shape, dtype=np.float64)
-        resid = np.abs(vis_s - avg[gidx]) ** 2
-        np.add.at(sum_sq, gidx, np.where(good_s, resid, 0.0))
+        resid = np.abs(vis_s - avg[gidx].astype(np.complex64)) ** 2
+        sum_sq = _sum(np.where(good_s, resid, 0.0))
         with np.errstate(invalid="ignore", divide="ignore"):
             var = np.where(sum_n > 1, sum_sq / np.maximum(sum_n - 1, 1), np.nan)
             out_wt = np.where(
@@ -90,30 +95,20 @@ def uvaver(core: CoreObservation, aver_time: float, doscatter: bool = False):
         out_wt = sum_w  # sum of input weights (difmap default)
     out_wt = np.where(out_flag, 0.0, out_wt).astype(np.float32)
 
-    # Row metadata: mean uvw/time weighted by data weight (falling back
-    # to a plain mean where everything was flagged).
+    # Row metadata: uvw and time are averaged with the row's total data
+    # weight, falling back to a plain mean for fully flagged groups.
     rw = np.maximum(w_s.sum(axis=(1, 2)), 0.0)
-    sum_rw = np.zeros(ngroup)
-    np.add.at(sum_rw, gidx, rw)
-    sum_cnt = np.zeros(ngroup)
-    np.add.at(sum_cnt, gidx, 1.0)
-
-    def _avg(col, weights):
-        acc = np.zeros((ngroup,) + col.shape[1:], dtype=np.float64)
-        np.add.at(acc, gidx, col * weights.reshape((-1,) + (1,) * (col.ndim - 1)))
-        return acc
-
+    sum_rw = _sum(rw)
+    sum_cnt = _sum(np.ones(len(rw)))
     wsum = np.where(sum_rw > 0, sum_rw, sum_cnt)
     wcol = np.where(rw > 0, rw, np.where(sum_rw[gidx] > 0, 0.0, 1.0))
-    out_uvw = _avg(uvw_s, wcol) / wsum[:, None]
-    out_time = _avg(time_s, wcol) / wsum
-    out_int = np.zeros(ngroup)
-    np.add.at(out_int, gidx, it_s)  # integration times add
+    out_uvw = _sum(uvw_s * wcol[:, None]) / wsum[:, None]
+    out_time = _sum(time_s * wcol) / wsum
+    out_int = _sum(it_s)  # integration times add
 
     # Antennas of each group, from its first row.
-    first = np.nonzero(new_group)[0]
-    out_a1 = np.asarray(a1)[order][first].astype(np.uint32)
-    out_a2 = np.asarray(a2)[order][first].astype(np.uint32)
+    out_a1 = np.asarray(a1)[order][starts].astype(np.uint32)
+    out_a2 = np.asarray(a2)[order][starts].astype(np.uint32)
 
     # Sort the output rows by time (the core requires time-sorted rows).
     rorder = np.lexsort((out_a2, out_a1, out_time))

@@ -67,7 +67,6 @@ class MapPlot(QtWidgets.QMainWindow):
 
     def refresh(self):
         data = self._image_data()
-        ny, nx = data.shape
         ex, _, _, ey = (abs(v) for v in (
             self.obs.extent[0], self.obs.extent[1],
             self.obs.extent[2], self.obs.extent[3],

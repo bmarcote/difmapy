@@ -558,8 +558,10 @@ impl CoreObservation {
     }
 
     /// Add a component to the tentative model (difmap addcmp).
+    /// `freepar` is the bitmask of parameters that modelfit may vary.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (ctype, flux, x, y, major=0.0, ratio=1.0, phi=0.0, freq0=0.0, spcind=0.0))]
+    #[pyo3(signature = (ctype, flux, x, y, major=0.0, ratio=1.0, phi=0.0, freq0=0.0,
+                        spcind=0.0, freepar=0))]
     fn add_component(
         &mut self,
         ctype: i32,
@@ -571,11 +573,18 @@ impl CoreObservation {
         phi: f32,
         freq0: f32,
         spcind: f32,
+        freepar: u32,
     ) -> PyResult<()> {
-        self.ob
-            .newmod
-            .push(comp_from_args(ctype, flux, x, y, major, ratio, phi, freq0, spcind)?);
+        let mut c = comp_from_args(ctype, flux, x, y, major, ratio, phi, freq0, spcind)?;
+        c.freepar = freepar;
+        self.ob.newmod.push(c);
         Ok(())
+    }
+
+    /// The free-parameter bitmask of each tentative model component.
+    #[getter]
+    fn tentative_freepars(&self) -> Vec<u32> {
+        self.ob.newmod.iter().map(|c| c.freepar).collect()
     }
 
     /// Establish the tentative model (difmap keep).
@@ -838,9 +847,19 @@ impl CoreObservation {
     /// The full raw cube with the current calibrations applied:
     /// (vis[nrow, nctotal, npol] complex64, wt[nrow, nctotal, npol]).
     /// Flag state is preserved in the weight signs. Used by writers.
+    ///
+    /// Antenna gains and baseline (resoff) corrections are always
+    /// applied. The accumulated phase-center shift is applied only if
+    /// `apply_shift` is true; difmap's `wobs` likewise excludes shifts
+    /// by default and re-applies them on reading a saved session.
+    ///
+    /// Note the shift is evaluated at each channel's own frequency,
+    /// whereas the stream applies it at the IF's effective frequency.
+    #[pyo3(signature = (apply_shift=false))]
     fn calibrated_cube<'py>(
         &self,
         py: Python<'py>,
+        apply_shift: bool,
     ) -> PyResult<(
         Bound<'py, PyArray3<Complex32>>,
         Bound<'py, PyArray3<f32>>,
@@ -850,24 +869,45 @@ impl CoreObservation {
         let n = nrow * nctotal * npol;
         let mut vis: Vec<Complex32> = Vec::with_capacity(n);
         let mut wt: Vec<f32> = Vec::with_capacity(n);
-        // Global channel -> IF index map.
+        // Global channel -> (IF index, frequency).
         let mut chan_if = vec![0usize; nctotal];
+        let mut chan_freq = vec![0.0f64; nctotal];
         for (cif, band) in ob.ifs.iter().enumerate() {
-            for c in band.coff..band.coff + band.nchan {
-                chan_if[c] = cif;
+            for ch in 0..band.nchan {
+                chan_if[band.coff + ch] = cif;
+                chan_freq[band.coff + ch] = band.chan_freq(ch);
             }
         }
+        let (east, north) = if apply_shift {
+            (ob.geom.east, ob.geom.north)
+        } else {
+            (0.0, 0.0)
+        };
+        let doshift = east != 0.0 || north != 0.0;
+        let bcor = ob.bcor.as_ref().filter(|b| !b.is_identity());
         py.detach(|| {
             let gains = &ob.gains;
             for row in 0..nrow {
                 let it = ob.time_idx[row] as usize;
                 let (a1, a2) = (ob.ant1[row] as usize, ob.ant2[row] as usize);
+                let (us, vs) = (ob.uvw[row * 3], ob.uvw[row * 3 + 1]);
                 for gc in 0..nctotal {
                     let cif = chan_if[gc];
                     let ia = gains.idx(it, cif, a1);
                     let ib = gains.idx(it, cif, a2);
-                    let ampcor = gains.amp[ia] * gains.amp[ib];
-                    let phscor = gains.phs[ia] - gains.phs[ib];
+                    let mut ampcor = gains.amp[ia] * gains.amp[ib];
+                    let mut phscor = gains.phs[ia] - gains.phs[ib];
+                    if let Some(bc) = bcor {
+                        if let Some(k) = bc.index(ob.ant1[row], ob.ant2[row], cif) {
+                            ampcor *= bc.amp[k];
+                            phscor += bc.phs[k];
+                        }
+                    }
+                    if doshift {
+                        let f = chan_freq[gc];
+                        phscor +=
+                            (std::f64::consts::TAU * (us * f * east + vs * f * north)) as f32;
+                    }
                     let bad = gains.bad[ia] || gains.bad[ib];
                     let (s, c) = phscor.sin_cos();
                     for p in 0..npol {

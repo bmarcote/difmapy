@@ -84,8 +84,21 @@ print(obs.flagged_fraction)
 obs.save_flags()        # write FLAG (+FLAG_ROW) back into the source MS
 ```
 
-Interactive flagging (`radplot`, `uvplot`, `vplot`): Shift+drag flags a
-box, Ctrl+drag unflags, `f`/`u` act on the nearest point.
+Interactive flagging (`radplot`, `uvplot`, `vplot`): **Shift+drag**
+sweeps a box to flag, **Ctrl+drag** unflags, `f`/`u` act on the nearest
+point, `x` toggles display of flagged points. Plain drag/wheel keep
+pyqtgraph's pan/zoom.
+
+Data that are absent from the file (zero weight) count as permanently
+flagged and cannot be unflagged, matching difmap's deleted-data flag.
+
+### What gets written out
+
+`wobs` applies the antenna gains and baseline corrections to the data
+it writes. Following difmap, accumulated `shift`s are *not* frozen in
+unless you ask (`wobs(..., freeze_shift=True)`); `save()` records the
+shift in its parameter file and `get()` re-applies it, so a saved
+session round-trips exactly.
 
 ### Model fitting
 
@@ -95,6 +108,12 @@ obs.addcmp(1.5, 2.0, -1.0, type="gauss", major=3.0, ratio=0.7, phi=30,
 res = obs.modelfit(niter=50)
 print(res["rchisq"], obs.model, res["errors"])
 ```
+
+Like difmap's, this is a local optimizer: it converges from a sensible
+starting guess but can settle in a local minimum from a far-off one, so
+start from something like the map peak. The reported `errors` are
+first-order estimates from the inverse Hessian and ignore parameter
+covariances.
 
 ### Other commands
 
@@ -138,16 +157,19 @@ The test suite checks against analytic ground truth and real data:
 ## Performance
 
 Release build, 16.6M visibilities (10 antennas, 12 h, 8 IFs x 32
-channels x 2 pols, 1024² maps):
+channels x 2 pols, 1024² maps), best of three runs on one desktop:
 
 | operation | time |
 |---|---|
-| select (average 46M vis) | 21 ms |
-| invert 1024² | 72 ms |
-| clean 100 iterations | 77 ms |
-| selfcal (phase) | 30 ms |
-| flag/unflag a station | 18 ms |
-| restore | 66 ms |
+| select (average 16.6M vis to 259k) | 8 ms |
+| invert 1024² | 40 ms |
+| clean 100 iterations | 43 ms |
+| selfcal (phase, per integration) | 15 ms |
+| flag/unflag a station | 13 ms |
+| restore | 39 ms |
+
+Bulk operations are slower but one-shot: loading the data and
+`uvaver` are dominated by moving the full cube (~0.9 s each here).
 
 ## Testing
 

@@ -292,7 +292,6 @@ def save_flags(core, path=None, flag_row=True):
     flags = np.asarray(core.flags())  # [nrow, nctotal, npol]
     ms_row = origin["ms_row"]  # [nrow, nif]
     if_nchan = origin["if_nchan"]
-    nrow, nif = ms_row.shape
 
     tb = casatools.table()
     tb.open(target, nomodify=False)

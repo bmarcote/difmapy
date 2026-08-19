@@ -92,9 +92,6 @@ class Observation:
         self._invert_result = None
         self._restored = None
         self._restore_beam = None
-        # Free-parameter bitmasks of the tentative model components,
-        # used by modelfit (parallel to the tentative component list).
-        self._freepars: list[int] = []
 
     # ------------------------------------------------------------------
     # constructors
@@ -305,14 +302,11 @@ class Observation:
     def keep(self):
         """Establish the tentative model (difmap keep)."""
         self._core.keep()
-        self._freepars.clear()
         return self
 
     def clrmod(self, old=True, new=True):
         """Discard models (difmap clrmod)."""
         self._core.clear_models(old, new)
-        if new:
-            self._freepars.clear()
         self._dirty()
         return self
 
@@ -388,8 +382,8 @@ class Observation:
             float(phi) * DEG,
             float(freq0),
             float(spcind),
+            freepar=_free_mask(free),
         )
-        self._freepars.append(_free_mask(free))
         return self
 
     def modelfit(self, niter=10, free=None, uvmin=0.0, uvmax=0.0):
@@ -410,9 +404,8 @@ class Observation:
         if ncmp == 0:
             raise RuntimeError("no tentative model to fit; use addcmp() first")
         if free is None:
-            masks = list(self._freepars[:ncmp])
-            if len(masks) < ncmp:
-                masks += [0] * (ncmp - len(masks))
+            # Use the per-component masks recorded by addcmp().
+            masks = list(self._core.tentative_freepars)
         elif isinstance(free, (list, tuple)) and free and isinstance(
             free[0], (list, tuple, int)
         ):
@@ -446,7 +439,6 @@ class Observation:
             }
             for e in res["errors"]
         ]
-        self._freepars = list(masks)
         self._dirty()
         return res
 
@@ -553,15 +545,25 @@ class Observation:
 
     def shift(self, east, north):
         """Shift the phase center by (east, north) in mas: the map
-        contents move by the same amount and the model follows
-        (difmap shift)."""
-        self._core.shift(float(east) * MAS, float(north) * MAS)
+        contents move by the same amount, and the model components and
+        CLEAN windows follow (difmap shift)."""
+        east, north = float(east), float(north)
+        self._core.shift(east * MAS, north * MAS)
+        self.windows[:] = [
+            (x0 + east, x1 + east, y0 + north, y1 + north)
+            for (x0, x1, y0, y1) in self.windows
+        ]
         self._dirty()
         return self
 
     def unshift(self):
         """Undo all accumulated shifts (difmap unshift)."""
+        east, north = self.total_shift
         self._core.unshift()
+        self.windows[:] = [
+            (x0 - east, x1 - east, y0 - north, y1 - north)
+            for (x0, x1, y0, y1) in self.windows
+        ]
         self._dirty()
         return self
 
@@ -741,7 +743,11 @@ class Observation:
         return self._core.closure_phases(triangle=idx, if_index=if_index)
 
     def spectrum(self, baseline=None, tmin=None, tmax=None):
-        """Time-averaged spectrum of the current polarization selection."""
+        """Time-averaged spectrum of the current polarization selection.
+
+        Covers all channels (not only the selected ones), so it can be
+        used to decide which channels to select.
+        """
         bl = None
         if baseline is not None:
             bl = (self._ant_index(baseline[0]), self._ant_index(baseline[1]))
@@ -843,12 +849,18 @@ class Observation:
                             phi=phi, freq0=freq0, spcind=spcind)
         return self
 
-    def wobs(self, path, overwrite=True):
-        """Write the (calibrated, edited) UV data to a random-groups
-        UVFITS file (difmap wobs)."""
+    def wobs(self, path, overwrite=True, freeze_shift=False):
+        """Write the calibrated, edited UV data to a random-groups
+        UVFITS file (difmap wobs).
+
+        Antenna gains and baseline corrections are applied. Accumulated
+        phase-center shifts are excluded unless `freeze_shift=True`
+        (difmap's default too); `save()` records the shift separately.
+        """
         from difmapy.io.uvfits import save_uvfits
 
-        save_uvfits(self._core, path, overwrite=overwrite)
+        save_uvfits(self._core, path, overwrite=overwrite,
+                    freeze_shift=freeze_shift)
 
     def save(self, prefix):
         """Save UV data, model, windows and imaging parameters with a
@@ -871,6 +883,9 @@ class Observation:
             "uvtaper": [self._gauval, self._gaurad],
             "uvrange": [self._uvmin, self._uvmax],
             "uvzero": list(self._uvzero),
+            # The shift is not frozen into the .uvf (difmap behaviour),
+            # so record it here and re-apply it in get().
+            "shift": list(self.total_shift),
         }
         with open(f"{prefix}.par.json", "w") as f:
             json.dump(pars, f, indent=1)
@@ -894,6 +909,12 @@ class Observation:
             obs.uvtaper(*pars["uvtaper"])
             obs.uvrange(*pars["uvrange"])
             obs.uvzero(*pars["uvzero"])
+            # The saved .uvf holds unshifted data, so re-apply the
+            # shift before loading the model and windows, whose
+            # coordinates are relative to the shifted phase center.
+            east, north = pars.get("shift", (0.0, 0.0))
+            if east or north:
+                obs.shift(east, north)
         if os.path.exists(f"{prefix}.mod"):
             obs.rmodel(f"{prefix}.mod")
             obs.keep()

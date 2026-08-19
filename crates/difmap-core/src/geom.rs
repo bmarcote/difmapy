@@ -35,11 +35,12 @@ pub struct BaselineCor {
 impl BaselineCor {
     /// Build an identity correction table for the baselines present.
     pub fn new(ob: &Observation) -> BaselineCor {
+        let mut seen = std::collections::HashSet::new();
         let mut keys: Vec<(u32, u32)> = Vec::new();
         for row in 0..ob.nrow {
             let (a, b) = (ob.ant1[row], ob.ant2[row]);
             let key = (a.min(b), a.max(b));
-            if !keys.contains(&key) {
+            if seen.insert(key) {
                 keys.push(key);
             }
         }

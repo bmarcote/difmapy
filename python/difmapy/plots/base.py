@@ -23,6 +23,7 @@ IF_COLORS = [
     (23, 190, 207), (214, 39, 40),
 ]
 FLAG_COLOR = (220, 40, 40)
+UNFLAG_COLOR = (40, 160, 40)
 
 
 def ensure_app():
@@ -32,23 +33,93 @@ def ensure_app():
     return app
 
 
+class SelectViewBox(pg.ViewBox):
+    """A ViewBox that reports Shift/Ctrl rubber-band drags.
+
+    Plain drags keep pyqtgraph's usual pan/zoom behaviour; holding
+    Shift (flag) or Ctrl (unflag) instead sweeps out a selection box
+    and emits `sigSelected(x0, x1, y0, y1, flag)` on release.
+    """
+
+    sigSelected = QtCore.Signal(float, float, float, float, bool)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._sel_origin = None
+        self._sel_flag = True
+        self._sel_rect = None
+
+    def mouseDragEvent(self, ev, axis=None):
+        mods = ev.modifiers()
+        shift = bool(mods & QtCore.Qt.KeyboardModifier.ShiftModifier)
+        ctrl = bool(mods & QtCore.Qt.KeyboardModifier.ControlModifier)
+        if not (shift or ctrl):
+            self._clear_rect()
+            return super().mouseDragEvent(ev, axis=axis)
+
+        ev.accept()
+        pos = self.mapToView(ev.pos())
+        if ev.isStart():
+            self._sel_origin = (pos.x(), pos.y())
+            self._sel_flag = shift
+            self._sel_rect = QtWidgets.QGraphicsRectItem()
+            self._sel_rect.setPen(
+                pg.mkPen(
+                    FLAG_COLOR if shift else UNFLAG_COLOR,
+                    style=QtCore.Qt.PenStyle.DashLine,
+                )
+            )
+            self.addItem(self._sel_rect, ignoreBounds=True)
+        if self._sel_origin is None:
+            return
+        x0, y0 = self._sel_origin
+        x1, y1 = pos.x(), pos.y()
+        if self._sel_rect is not None:
+            self._sel_rect.setRect(
+                QtCore.QRectF(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0))
+            )
+        if ev.isFinish():
+            flag = self._sel_flag
+            self._clear_rect()
+            self._sel_origin = None
+            self.sigSelected.emit(
+                min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1), flag
+            )
+
+    def _clear_rect(self):
+        if self._sel_rect is not None:
+            self.removeItem(self._sel_rect)
+            self._sel_rect = None
+
+
 def run_if_needed(widget, block):
-    """Show the widget; run the Qt loop when none is running."""
+    """Show the widget, entering the Qt event loop if nothing else is
+    driving it.
+
+    In a plain script the loop must be run or the window would vanish
+    immediately; under IPython/Jupyter with the Qt event loop hook
+    enabled (``%gui qt``) it must *not* be run, or the session would
+    freeze. Pass `block` explicitly to override the detection.
+    """
     widget.show()
     if block is None:
-        # Block only when no event loop is pumping (plain scripts).
-        block = not _loop_running()
+        block = not _qt_loop_hooked()
     if block:
         pg.exec()
 
 
-def _loop_running() -> bool:
-    app = QtWidgets.QApplication.instance()
-    if app is None:
+def _qt_loop_hooked() -> bool:
+    """True if an interactive shell is already pumping Qt events."""
+    try:
+        from IPython import get_ipython
+    except ImportError:
         return False
-    # IPython %gui qt integrates the loop; heuristics: an app with
-    # visible top-level windows processing events.
-    return bool(getattr(app, "_in_event_loop", False)) or hasattr(app, "_ipython_kernel")
+    shell = get_ipython()
+    if shell is None:
+        return False
+    # IPython records the active GUI integration here ("qt", "qt5"...).
+    gui = getattr(shell, "active_eventloop", None)
+    return bool(gui) and str(gui).startswith("qt")
 
 
 class FlagScatterPlot(QtWidgets.QMainWindow):
@@ -64,7 +135,8 @@ class FlagScatterPlot(QtWidgets.QMainWindow):
         super().__init__()
         self.obs = obs
         self.setWindowTitle(title)
-        self.pw = pg.PlotWidget()
+        self.vb = SelectViewBox()
+        self.pw = pg.PlotWidget(viewBox=self.vb)
         self.setCentralWidget(self.pw)
         self.pw.setBackground("w")
         self._show_flagged = True
@@ -75,12 +147,10 @@ class FlagScatterPlot(QtWidgets.QMainWindow):
             slot=self._mouse_moved,
         )
         self._mouse_pos = None
-        self._rubber_origin = None
-        self._rubber = None
-        self._rubber_flag = True
-        self.pw.scene().sigMouseClicked.connect(self._mouse_clicked)
+        self.vb.sigSelected.connect(self._on_selected)
         self.statusBar().showMessage(
-            "Shift+drag: flag box | Ctrl+drag: unflag box | f/u: nearest | x: toggle flagged"
+            "Shift+drag: flag box | Ctrl+drag: unflag box | f/u: nearest | "
+            "x: toggle flagged | drag: pan, wheel: zoom"
         )
         self.refresh()
 
@@ -125,38 +195,12 @@ class FlagScatterPlot(QtWidgets.QMainWindow):
 
     def _mouse_moved(self, evt):
         self._mouse_pos = evt[0]
-        if self._rubber is not None and self._rubber_origin is not None:
-            x0, y0 = self._rubber_origin
-            x1, y1 = self._view_coords(self._mouse_pos)
-            self._rubber.setRect(
-                QtCore.QRectF(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0))
-            )
 
-    def _mouse_clicked(self, ev):
-        mods = ev.modifiers()
-        shift = bool(mods & QtCore.Qt.KeyboardModifier.ShiftModifier)
-        ctrl = bool(mods & QtCore.Qt.KeyboardModifier.ControlModifier)
-        if not (shift or ctrl):
-            return
-        if self._rubber is None:
-            # Start the rubber band.
-            self._rubber_origin = self._view_coords(ev.scenePos())
-            self._rubber_flag = shift
-            self._rubber = QtWidgets.QGraphicsRectItem()
-            self._rubber.setPen(pg.mkPen(FLAG_COLOR if shift else (40, 160, 40),
-                                         style=QtCore.Qt.PenStyle.DashLine))
-            self.pw.getPlotItem().vb.addItem(self._rubber)
-            ev.accept()
-        else:
-            # Finish: apply to points inside.
-            x0, y0 = self._rubber_origin
-            x1, y1 = self._view_coords(ev.scenePos())
-            self.pw.getPlotItem().vb.removeItem(self._rubber)
-            self._rubber = None
-            self._rubber_origin = None
-            self._apply_box(min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1),
-                            self._rubber_flag)
-            ev.accept()
+    def _on_selected(self, x0, x1, y0, y1, flag):
+        n = self._apply_box(x0, x1, y0, y1, flag)
+        self.statusBar().showMessage(
+            f"{'flagged' if flag else 'unflagged'} {n} points"
+        )
 
     def keyPressEvent(self, ev):
         key = ev.text().lower()
@@ -171,14 +215,16 @@ class FlagScatterPlot(QtWidgets.QMainWindow):
 
     # ---- flagging ----
 
-    def _apply_box(self, x0, x1, y0, y1, flag):
+    def _apply_box(self, x0, x1, y0, y1, flag) -> int:
+        """Flag/unflag the points inside a box; returns how many."""
         d = self._data
         inside = (d["x"] >= x0) & (d["x"] <= x1) & (d["y"] >= y0) & (d["y"] <= y1)
         # Flag only currently-good points; unflag only flagged ones.
         inside &= (d["wt"] > 0) if flag else (d["wt"] < 0)
-        if not inside.any():
-            return
-        self._edit_points(np.nonzero(inside)[0], flag)
+        n = int(inside.sum())
+        if n:
+            self._edit_points(np.nonzero(inside)[0], flag)
+        return n
 
     def _flag_nearest(self, x, y, flag):
         d = self._data

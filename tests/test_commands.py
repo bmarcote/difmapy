@@ -127,7 +127,7 @@ def test_startmod(uvfits_file):
     # The starting model is discarded afterwards.
     assert o.model == []
     # Gains were modified.
-    amp, phs, _ = o._core.gains()
+    _, phs, _ = o._core.gains()
     assert not np.allclose(np.asarray(phs), 0.0)
 
 

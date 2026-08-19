@@ -122,7 +122,7 @@ def test_selfcal(corrupted_uvfits_file):
     assert mismatch < 0.01 * FLUX
 
     # Amplitude corrections approximate the inverse gain errors.
-    amp, phs, bad = o._core.gains()
+    amp, phs, _ = o._core.gains()
     nant = len(o.antennas)
     amp = amp.reshape(o._core.ntimes, o.nif, nant)
     for ia, (aerr, _) in enumerate(gerr):
@@ -131,7 +131,7 @@ def test_selfcal(corrupted_uvfits_file):
 
     # uncalib restores the corrupted data.
     o.uncalib()
-    amp, phs, bad = o._core.gains()
+    amp, phs, _ = o._core.gains()
     assert np.allclose(amp, 1.0) and np.allclose(phs, 0.0)
 
 

@@ -35,7 +35,7 @@ def test_flag_baseline_time_range(obs):
     tmid = np.median(t)
     n = obs.flag(baseline=("AN0", "AN1"), tmax=tmid)
     assert 0 < n < obs._core.nrow
-    vis, wt = obs._core.stream_vis()
+    _, wt = obs._core.stream_vis()
     _, a1, a2, *_ = obs._core.rows()
     mask = ((a1 == 0) & (a2 == 1)) & (t <= tmid)
     assert (wt[mask] < 0).all()
@@ -44,7 +44,7 @@ def test_flag_baseline_time_range(obs):
 
 def test_flag_single_if(obs):
     obs.flag(station="AN0", if_index=1)
-    vis, wt = obs._core.stream_vis()
+    _, wt = obs._core.stream_vis()
     _, a1, a2, *_ = obs._core.rows()
     mask = (a1 == 0) | (a2 == 0)
     assert (wt[mask, 1] < 0).all()

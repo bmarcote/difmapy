@@ -43,11 +43,16 @@ pub fn closure_phases(
     let nif = ob.nif();
     let nant = ob.antennas.len();
 
-    // Index the rows of each integration by baseline.
-    // rows_by_time[itime] = list of (row, a1, a2)
-    let mut rows_by_time: Vec<Vec<(usize, u32, u32)>> = vec![Vec::new(); ob.ntimes];
+    // Index the rows of each integration by baseline, so that looking
+    // up the three baselines of a triangle is O(1) rather than a scan
+    // (which would make many-antenna arrays impractically slow).
+    // Key: (a_lo, a_hi) -> (row, stored as (a_lo, a_hi)?)
+    let mut rows_by_time: Vec<std::collections::HashMap<(u32, u32), (usize, bool)>> =
+        vec![std::collections::HashMap::new(); ob.ntimes];
     for row in 0..ob.nrow {
-        rows_by_time[ob.time_idx[row] as usize].push((row, ob.ant1[row], ob.ant2[row]));
+        let (x, y) = (ob.ant1[row], ob.ant2[row]);
+        rows_by_time[ob.time_idx[row] as usize]
+            .insert((x.min(y), x.max(y)), (row, x < y));
     }
 
     // Enumerate the requested triangles.
@@ -94,27 +99,20 @@ pub fn closure_phases(
                 cif,
             };
             for it in 0..ob.ntimes {
-                // Find the three baselines in this integration.
-                let mut r_ab = None;
-                let mut r_bc = None;
-                let mut r_ca = None;
-                for &(row, x, y) in &rows_by_time[it] {
-                    let pair = (x.min(y), x.max(y));
-                    // Sign: +1 if stored as (lo, hi) matching the
-                    // triangle direction, -1 if conjugated.
-                    if pair == (a, b) {
-                        r_ab = Some((row, x == a));
-                    } else if pair == (b, c) {
-                        r_bc = Some((row, x == b));
-                    } else if pair == (a, c) {
-                        r_ca = Some((row, x == c));
-                    }
-                }
-                let (Some((row_ab, fwd_ab)), Some((row_bc, fwd_bc)), Some((row_ca, fwd_ca))) =
-                    (r_ab, r_bc, r_ca)
+                // Look up the three baselines of the triangle. `fwd`
+                // records whether the stored visibility runs in the
+                // direction the closure sum needs (a->b, b->c, c->a);
+                // a >= b >= c ordering means the third leg is stored
+                // as (a, c) and therefore always needs conjugating.
+                let idx = &rows_by_time[it];
+                let (Some(&(row_ab, fwd_ab)), Some(&(row_bc, fwd_bc)), Some(&(row_ac, fwd_ac))) =
+                    (idx.get(&(a, b)), idx.get(&(b, c)), idx.get(&(a, c)))
                 else {
                     continue;
                 };
+                // V_ca = conj(V_ac), so invert the stored direction.
+                let fwd_ca = !fwd_ac;
+                let row_ca = row_ac;
                 let v_ab = stream.vis[row_ab * nif + cif];
                 let v_bc = stream.vis[row_bc * nif + cif];
                 let v_ca = stream.vis[row_ca * nif + cif];
@@ -187,6 +185,11 @@ pub struct Spectrum {
 
 /// Time-average the raw (channel-resolved) visibilities of the current
 /// polarization selection into a spectrum (difmap `specplot` data).
+///
+/// Note this deliberately covers *all* channels, not just the ones in
+/// the current channel selection: the point of a spectrum is to show
+/// what the unselected channels look like too. Only the polarization
+/// combination of the selection is applied.
 ///
 /// `baseline` optionally restricts to one baseline (global antenna
 /// indices, unordered); `time_range` restricts the averaging window.

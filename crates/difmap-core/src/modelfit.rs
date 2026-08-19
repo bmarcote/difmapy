@@ -145,16 +145,22 @@ fn get_free(comps: &[ModComp], maps: &[CompMap], uvrmax: f64, pars: &mut [f64]) 
         }
         if m.freepar & (M_MAJOR | M_RATIO | M_PHI) != 0 {
             let anorm = c.major as f64 * uvrmax;
-            let half_aa = 0.5 * anorm * anorm;
-            let gg = (c.ratio as f64) * (c.ratio as f64);
             if m.freepar & M_RATIO != 0 {
+                let half_aa = 0.5 * anorm * anorm;
+                let gg = (c.ratio as f64) * (c.ratio as f64);
                 let s = half_aa * (1.0 - gg);
                 pars[k] = s * (2.0 * c.phi as f64).cos();
                 pars[k + 1] = s * (2.0 * c.phi as f64).sin();
-                k += 2;
+                pars[k + 2] = half_aa * (1.0 + gg);
+                k += 3;
+            } else {
+                // Circular case: only the major axis varies, so Z is
+                // simply a^2. (difmap packs 0.5*a^2*(1+ratio^2) here
+                // but unpacks sqrt(Z), which only round-trips for
+                // ratio == 1; we keep the two consistent instead.)
+                pars[k] = anorm * anorm;
+                k += 1;
             }
-            pars[k] = half_aa * (1.0 + gg);
-            k += 1;
         }
         if m.freepar & M_SPCIND != 0 {
             pars[k] = c.spcind as f64;
@@ -202,6 +208,7 @@ fn set_free(comps: &mut [ModComp], maps: &[CompMap], uvrmax: f64, pars: &[f64]) 
                 };
                 k += 3;
             } else {
+                // Circular case: Z == a^2 (see get_free).
                 let z = pars[k] / renorm;
                 c.major = z.abs().sqrt() as f32;
                 k += 1;
@@ -211,6 +218,30 @@ fn set_free(comps: &mut [ModComp], maps: &[CompMap], uvrmax: f64, pars: &[f64]) 
             c.spcind = pars[k] as f32;
         }
     }
+}
+
+/// The unit-flux visibility amplitude of a component at elliptically
+/// stretched UV radius `uvrad` (the type-specific factor of
+/// getmodvis()). Rectangular components are not supported by modelfit,
+/// as in difmap.
+fn shape_factor(c: &ModComp, uvrad: f64) -> Result<f64, FitError> {
+    Ok(match c.ctype {
+        CmpType::Delta => 1.0,
+        CmpType::Gaussian => {
+            if uvrad < 12.0 {
+                (-0.3606737602 * uvrad * uvrad).exp()
+            } else {
+                0.0
+            }
+        }
+        CmpType::Disk => 2.0 * besj1(uvrad) / uvrad,
+        CmpType::Ellipse => {
+            3.0 * (uvrad.sin() - uvrad * uvrad.cos()) / (uvrad * uvrad * uvrad)
+        }
+        CmpType::Ring => besj0(uvrad),
+        CmpType::Sz => (if uvrad < 50.0 { (-uvrad).exp() } else { 0.0 }) / uvrad,
+        CmpType::Rectangle => return Err(FitError::BadType),
+    })
 }
 
 /// Model visibility and its derivatives wrt the free parameters at one
@@ -243,23 +274,7 @@ fn model_and_grad(
             (v.freq / c.freq0 as f64).powf(c.spcind as f64)
         };
         let flux = c.flux as f64 * si;
-        let cmpamp = match c.ctype {
-            CmpType::Delta => flux,
-            CmpType::Gaussian => {
-                flux * if uvrad < 12.0 {
-                    (-0.3606737602 * uvrad * uvrad).exp()
-                } else {
-                    0.0
-                }
-            }
-            CmpType::Disk => 2.0 * flux * besj1(uvrad) / uvrad,
-            CmpType::Ellipse => {
-                3.0 * flux * (uvrad.sin() - uvrad * uvrad.cos()) / (uvrad * uvrad * uvrad)
-            }
-            CmpType::Ring => flux * besj0(uvrad),
-            CmpType::Sz => flux * if uvrad < 50.0 { (-uvrad).exp() } else { 0.0 } / uvrad,
-            CmpType::Rectangle => return Err(FitError::BadType),
-        };
+        let cmpamp = flux * shape_factor(c, uvrad)?;
         let (s, cph) = cmpphs.sin_cos();
         let cmpre = cmpamp * cph;
         let cmpim = cmpamp * s;
@@ -268,16 +283,17 @@ fn model_and_grad(
 
         let mut k = m.off;
         if m.freepar & M_FLUX != 0 {
-            // d/dflux is the component divided by its flux.
-            if c.flux != 0.0 {
-                dre[k] = cmpre / c.flux as f64;
-                dim[k] = cmpim / c.flux as f64;
+            // The visibility is linear in flux, so d/dflux is the
+            // component evaluated at unit flux. Dividing by flux is
+            // exact and cheap, but undefined at flux == 0, where the
+            // shape factor must be recomputed instead.
+            let unit_amp = if c.flux != 0.0 {
+                cmpamp / c.flux as f64
             } else {
-                // Flux is zero: derivative is the unit-flux component.
-                let unit = if cmpamp == 0.0 { si } else { cmpamp };
-                dre[k] = unit * cph;
-                dim[k] = unit * s;
-            }
+                shape_factor(c, uvrad)? * si
+            };
+            dre[k] = unit_amp * cph;
+            dim[k] = unit_amp * s;
             k += 1;
         }
         if m.freepar & M_CENT != 0 {
@@ -664,8 +680,10 @@ pub fn fit_uvmodel(
             if m.freepar & (M_MAJOR | M_RATIO | M_PHI) != 0 {
                 let renorm = uvrmax * uvrmax;
                 if m.freepar & M_RATIO != 0 {
-                    // Propagate (X, Y, Z) errors to (major, ratio, phi)
-                    // ignoring covariances, as difmap does.
+                    // Propagate the (X, Y, Z) errors to
+                    // (major, ratio, phi). These are first-order
+                    // estimates that ignore the parameter covariances,
+                    // so treat them as indicative only.
                     let (ex, ey, ez) = (sd(k) / renorm, sd(k + 1) / renorm, sd(k + 2) / renorm);
                     let a = c.major as f64;
                     let r = c.ratio as f64;

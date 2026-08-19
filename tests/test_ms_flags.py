@@ -124,14 +124,18 @@ def test_flags_setter_and_imaging(ms_copy):
     n0 = o.invert()["nused"]
 
     flags = np.asarray(o.flags).copy()
-    flags[:] = True
-    with pytest.raises(RuntimeError):
-        o.flags = flags  # everything flagged -> nothing to invert
+    o.flags = np.ones_like(flags)  # flag everything
+    assert o.flagged_fraction == 1.0
+    with pytest.raises(RuntimeError, match="no data"):
         o.invert()
 
     o.flags = np.zeros_like(flags)  # unflag everything
     n1 = o.invert()["nused"]
     assert n1 > n0
+    # Deleted (zero weight) data must remain flagged regardless.
+    _, wt = o._core.calibrated_cube()
+    deleted = np.asarray(wt) == 0
+    assert np.asarray(o.flags)[deleted].all()
 
 
 def test_save_flags_requires_ms_origin(uvfits_file):
