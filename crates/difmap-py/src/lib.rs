@@ -11,6 +11,7 @@ use difmap_core::grid::{invert, InvertPars, MapBeam, MapGeom};
 use difmap_core::model::{
     add_to_stream_model, clear_models, merge_model, recompute_stream_model, CmpType, ModComp,
 };
+use difmap_core::modelfit::fit_uvmodel;
 use difmap_core::obs::{Antenna, IfBand, Observation, Source};
 use difmap_core::selfcal::{selfcal, SelfcalPars};
 use difmap_core::stokes::{Cvis, Stokes};
@@ -584,6 +585,60 @@ impl CoreObservation {
     #[pyo3(signature = (do_old=true, do_new=true))]
     fn clear_models(&mut self, py: Python<'_>, do_old: bool, do_new: bool) {
         py.detach(|| clear_models(&mut self.ob, do_old, do_new));
+    }
+
+    /// Fit the free parameters of the tentative model to the residual
+    /// visibilities (difmap modelfit). Components are taken from the
+    /// tentative model (`newmod`); their `freepar` bitmasks are given
+    /// in `freepars` (one per component, same order as get_models()[1]).
+    /// Returns a summary dict including per-component uncertainties.
+    #[pyo3(signature = (niter=10, freepars=vec![], uvmin=0.0, uvmax=0.0))]
+    fn modelfit<'py>(
+        &mut self,
+        py: Python<'py>,
+        niter: usize,
+        freepars: Vec<u32>,
+        uvmin: f32,
+        uvmax: f32,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        if self.ob.newmod.is_empty() {
+            return Err(PyRuntimeError::new_err(
+                "no tentative model components to fit; use add_component()",
+            ));
+        }
+        if !freepars.is_empty() && freepars.len() != self.ob.newmod.len() {
+            return Err(PyValueError::new_err(format!(
+                "freepars has {} entries for {} components",
+                freepars.len(),
+                self.ob.newmod.len()
+            )));
+        }
+        let mut comps = std::mem::take(&mut self.ob.newmod);
+        for (i, c) in comps.iter_mut().enumerate() {
+            if let Some(&fp) = freepars.get(i) {
+                c.freepar = fp;
+            }
+        }
+        let res = py.detach(|| fit_uvmodel(&self.ob, &mut comps, niter, uvmin, uvmax));
+        // Always restore the (possibly updated) components.
+        self.ob.newmod = comps;
+        let res = res.map_err(run_err)?;
+        self.mb = None;
+        let d = PyDict::new(py);
+        d.set_item("rchisq", res.rchisq)?;
+        d.set_item("chisq", res.chisq)?;
+        d.set_item("ndfree", res.ndfree)?;
+        d.set_item("nvis", res.nvis)?;
+        d.set_item("nfree", res.nfree)?;
+        d.set_item("niter_better", res.nbetter)?;
+        let errs = PyList::new(
+            py,
+            res.errors.iter().map(|e| {
+                (e.flux, e.x, e.y, e.major, e.ratio, e.phi, e.spcind)
+            }),
+        )?;
+        d.set_item("errors", errs)?;
+        Ok(d)
     }
 
     /// Replace the established model with the given components and

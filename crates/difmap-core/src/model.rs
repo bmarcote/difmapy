@@ -254,6 +254,45 @@ pub fn besj0(x: f64) -> f64 {
     }
 }
 
+/// J2(x) via the upward recurrence for x > 2, and Miller's downward
+/// recurrence below that (port of c_besj2()).
+pub fn besj2(x: f64) -> f64 {
+    let x = x.abs();
+    if x == 0.0 {
+        return 0.0;
+    }
+    if x > 2.0 {
+        return 2.0 * besj1(x) / x - besj0(x);
+    }
+    const LARGE: f64 = 1.0e10;
+    let recfac = 2.0 / x;
+    let mut bjpp = 0.0f64; // J(n+2)
+    let mut bjp = 1.0f64; // J(n+1)
+    let mut normsum = 0.0f64; // J0 + 2*(J2 + J4 + ...)
+    let mut retval = 0.0f64;
+    for order in (2..=10).rev() {
+        let mut bj = recfac * (order + 1) as f64 * bjp - bjpp;
+        bjpp = bjp;
+        bjp = bj;
+        if bj > LARGE {
+            bj /= LARGE;
+            bjp /= LARGE;
+            bjpp /= LARGE;
+            retval /= LARGE;
+        }
+        if order % 2 == 0 {
+            normsum += 2.0 * bj;
+        }
+        if order == 2 {
+            retval = bj;
+        }
+    }
+    if normsum != 0.0 {
+        retval /= normsum;
+    }
+    retval
+}
+
 pub fn besj1(x: f64) -> f64 {
     let ax = x.abs();
     if ax < 8.0 {

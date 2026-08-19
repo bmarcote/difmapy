@@ -29,6 +29,48 @@ DEG = np.pi / 180.0
 CMP_TYPES = {0: "delta", 1: "gauss", 2: "disk", 3: "ellipse", 4: "ring", 5: "rect", 6: "sz"}
 CMP_CODES = {v: k for k, v in CMP_TYPES.items()}
 
+# Free-parameter bits for modelfit (difmap M_FLUX etc.).
+FREE_BITS = {
+    "flux": 1,
+    "pos": 2,      # x and y together
+    "major": 4,
+    "ratio": 8,
+    "phi": 16,
+    "spcind": 32,
+}
+# Fitting a non-circular shape requires all three shape parameters,
+# because they are fitted through the (X, Y, Z) parameterization.
+SHAPE_BITS = FREE_BITS["major"] | FREE_BITS["ratio"] | FREE_BITS["phi"]
+
+
+def _free_mask(free) -> int:
+    """Translate a free-parameter spec into difmap's bitmask."""
+    if free is None:
+        return 0
+    if isinstance(free, int):
+        return free
+    if isinstance(free, str):
+        free = [free]
+    mask = 0
+    for name in free:
+        key = str(name).lower()
+        if key in ("xy", "x", "y", "position"):
+            key = "pos"
+        if key == "shape":
+            mask |= SHAPE_BITS
+            continue
+        if key not in FREE_BITS:
+            raise ValueError(
+                f"unknown free parameter {name!r}; use "
+                f"{sorted(FREE_BITS) + ['shape']}"
+            )
+        mask |= FREE_BITS[key]
+    # ratio/phi cannot be fitted without major (shared X,Y,Z parameters).
+    if mask & (FREE_BITS["ratio"] | FREE_BITS["phi"]):
+        mask |= SHAPE_BITS
+    return mask
+
+
 __all__ = ["Observation", "load"]
 
 
@@ -50,6 +92,9 @@ class Observation:
         self._invert_result = None
         self._restored = None
         self._restore_beam = None
+        # Free-parameter bitmasks of the tentative model components,
+        # used by modelfit (parallel to the tentative component list).
+        self._freepars: list[int] = []
 
     # ------------------------------------------------------------------
     # constructors
@@ -260,11 +305,14 @@ class Observation:
     def keep(self):
         """Establish the tentative model (difmap keep)."""
         self._core.keep()
+        self._freepars.clear()
         return self
 
     def clrmod(self, old=True, new=True):
         """Discard models (difmap clrmod)."""
         self._core.clear_models(old, new)
+        if new:
+            self._freepars.clear()
         self._dirty()
         return self
 
@@ -323,9 +371,13 @@ class Observation:
         return float(sum(c["flux"] for c in self.model))
 
     def addcmp(self, flux, x, y, type="delta", major=0.0, ratio=1.0, phi=0.0,
-               freq0=0.0, spcind=0.0):
+               freq0=0.0, spcind=0.0, free=None):
         """Add a model component by hand (difmap addcmp); positions and
-        sizes in mas, angles in degrees."""
+        sizes in mas, angles in degrees.
+
+        `free` marks parameters as variable for modelfit, e.g.
+        ``free=["flux", "pos"]`` or ``free="shape"``.
+        """
         self._core.add_component(
             CMP_CODES[type],
             float(flux),
@@ -337,7 +389,66 @@ class Observation:
             float(freq0),
             float(spcind),
         )
+        self._freepars.append(_free_mask(free))
         return self
+
+    def modelfit(self, niter=10, free=None, uvmin=0.0, uvmax=0.0):
+        """Fit the tentative model to the visibilities (difmap
+        modelfit), by Levenberg-Marquardt least squares on the residual
+        real/imaginary parts.
+
+        Components come from the tentative model (see `addcmp`); which
+        of their parameters vary is set per component by `addcmp(free=)`
+        or overridden here by `free` (a single spec applied to all
+        components, or a list, one per component).
+
+        Returns a dict with rchisq/chisq/ndfree/nvis/nfree and a list of
+        1-sigma `errors` per component, in mas/degrees.
+        """
+        _, tentative = self._core.get_models()
+        ncmp = len(tentative)
+        if ncmp == 0:
+            raise RuntimeError("no tentative model to fit; use addcmp() first")
+        if free is None:
+            masks = list(self._freepars[:ncmp])
+            if len(masks) < ncmp:
+                masks += [0] * (ncmp - len(masks))
+        elif isinstance(free, (list, tuple)) and free and isinstance(
+            free[0], (list, tuple, int)
+        ):
+            if len(free) != ncmp:
+                raise ValueError(f"free has {len(free)} entries for {ncmp} components")
+            masks = [_free_mask(f) for f in free]
+        else:
+            masks = [_free_mask(free)] * ncmp
+        if not any(masks):
+            raise ValueError(
+                "no free parameters; pass free=... to modelfit() or addcmp()"
+            )
+        res = dict(
+            self._core.modelfit(
+                niter=int(niter),
+                freepars=[int(m) for m in masks],
+                uvmin=float(uvmin),
+                uvmax=float(uvmax),
+            )
+        )
+        # Convert uncertainties to user units (mas, degrees).
+        res["errors"] = [
+            {
+                "flux": e[0],
+                "x": e[1] / MAS,
+                "y": e[2] / MAS,
+                "major": e[3] / MAS,
+                "ratio": e[4],
+                "phi": e[5] / DEG,
+                "spcind": e[6],
+            }
+            for e in res["errors"]
+        ]
+        self._freepars = list(masks)
+        self._dirty()
+        return res
 
     # ------------------------------------------------------------------
     # calibration
