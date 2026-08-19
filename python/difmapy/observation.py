@@ -498,6 +498,100 @@ class Observation:
         self._core.set_antenna_constraints(str(name), bool(fix), float(weight))
         return self
 
+    def startmod(self, model=None, solint=0.0, flux=1.0):
+        """Phase self-calibrate against a starting model, then discard
+        it (difmap startmod).
+
+        `model` is a .mod file name; with no model a point source of
+        `flux` Jy at the phase center is used, as difmap does.
+        """
+        self.clrmod(old=True, new=True)
+        if model is None:
+            self.addcmp(flux, 0.0, 0.0)
+        else:
+            self.rmodel(model)
+        self.keep()
+        res = self.selfcal(phase=True, solint=solint)
+        self.clrmod(old=True, new=True)
+        return res
+
+    def resoff(self, baseline=None):
+        """Solve for per-baseline amplitude/phase offsets against the
+        current model, to absorb non-closing errors (difmap resoff).
+        Returns the number of (baseline, IF) corrections set."""
+        bl = None
+        if baseline is not None:
+            bl = (self._ant_index(baseline[0]), self._ant_index(baseline[1]))
+        n = self._core.resoff(baseline=bl)
+        self._dirty()
+        return n
+
+    def clroff(self):
+        """Undo all baseline corrections (difmap clroff)."""
+        self._core.clroff()
+        self._dirty()
+        return self
+
+    def baseline_corrections(self):
+        """Baseline corrections as a list of dicts (amp, phase in deg)."""
+        bls, amp, phs = self._core.baseline_corrections()
+        names = self._core.antenna_names
+        amp = np.asarray(amp)
+        phs = np.asarray(phs)
+        return [
+            {
+                "baseline": (names[a], names[b]),
+                "amp": amp[i].tolist(),
+                "phase": (phs[i] / DEG).tolist(),
+            }
+            for i, (a, b) in enumerate(bls)
+        ]
+
+    # ------------------------------------------------------------------
+    # geometry
+    # ------------------------------------------------------------------
+
+    def shift(self, east, north):
+        """Shift the phase center by (east, north) in mas: the map
+        contents move by the same amount and the model follows
+        (difmap shift)."""
+        self._core.shift(float(east) * MAS, float(north) * MAS)
+        self._dirty()
+        return self
+
+    def unshift(self):
+        """Undo all accumulated shifts (difmap unshift)."""
+        self._core.unshift()
+        self._dirty()
+        return self
+
+    @property
+    def total_shift(self):
+        """Accumulated (east, north) shift in mas."""
+        e, n = self._core.shift_total
+        return (e / MAS, n / MAS)
+
+    def uvaver(self, aver_time, doscatter=False):
+        """Return a new observation with the calibrated data averaged
+        into `aver_time`-second integrations (difmap uvaver)."""
+        from difmapy.average import uvaver
+
+        new = Observation(uvaver(self._core, float(aver_time), bool(doscatter)))
+        # Carry over the imaging setup and selection.
+        new._nx, new._ny = self._nx, self._ny
+        new._xinc, new._yinc = self._xinc, self._yinc
+        new._binwid, new._errpow, new._dorad = self._binwid, self._errpow, self._dorad
+        new._gauval, new._gaurad = self._gauval, self._gaurad
+        new._uvmin, new._uvmax = self._uvmin, self._uvmax
+        new._uvzero = self._uvzero
+        new.windows = list(self.windows)
+        try:
+            sel = self._core.selection()
+            new.select(sel["stokes"], channels=[tuple(r) for r in sel["chlist"]])
+        except RuntimeError:
+            pass
+        return new
+
     # ------------------------------------------------------------------
     # editing / flagging
     # ------------------------------------------------------------------

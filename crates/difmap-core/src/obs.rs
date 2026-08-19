@@ -21,6 +21,7 @@
 //! The *derived* stream still uses difmap's signed-weight convention
 //! internally as a compact per-point display state.
 
+use crate::geom::{BaselineCor, UVGeom};
 use crate::model::ModComp;
 use crate::stokes::Cvis;
 use crate::stream::Stream;
@@ -165,6 +166,10 @@ pub struct Observation {
 
     /// Antenna gain corrections (self-cal results).
     pub gains: GainTable,
+    /// Per-baseline corrections (resoff), or None if never used.
+    pub bcor: Option<BaselineCor>,
+    /// Accumulated phase-center shift.
+    pub geom: UVGeom,
 
     /// The established model (Fourier-transformed into the stream).
     pub model: Vec<ModComp>,
@@ -298,6 +303,8 @@ impl Observation {
             time_idx,
             ref_mjd,
             gains: GainTable::new(ntimes, nif, nant as usize),
+            bcor: None,
+            geom: UVGeom::default(),
             model: Vec::new(),
             newmod: Vec::new(),
             stream: None,

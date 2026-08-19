@@ -9,6 +9,7 @@
 pub mod clean;
 pub mod closure;
 pub mod edit;
+pub mod geom;
 pub mod grid;
 pub mod model;
 pub mod modelfit;
@@ -20,6 +21,7 @@ pub mod stream;
 pub use clean::{clean, map_stats, restore, CleanResult, Window};
 pub use closure::{closure_phases, sampling, spectrum, ClosureSeries, Spectrum};
 pub use edit::{edit, edit_rows, EditSelection};
+pub use geom::{clroff, resoff, shift, unshift, BaselineCor, UVGeom};
 pub use grid::{invert, InvertPars, MapBeam, MapGeom};
 pub use model::{CmpType, ModComp};
 pub use modelfit::{fit_uvmodel, FitResult};

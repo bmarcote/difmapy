@@ -177,6 +177,17 @@ impl Stream {
     pub fn apply_calibration_rows(&mut self, ob: &Observation, rows: Option<&[usize]>) {
         let nif = ob.nif();
         let gains = &ob.gains;
+        // Baseline corrections (resoff) are skipped when they are the
+        // identity, which is the common case.
+        let bcor = ob
+            .bcor
+            .as_ref()
+            .filter(|b| !b.is_identity());
+        // Accumulated phase-center shift (difmap uvshift), applied here
+        // so that it survives re-averaging of edited rows.
+        let (east, north) = (ob.geom.east, ob.geom.north);
+        let doshift = east != 0.0 || north != 0.0;
+        let if_freq = self.if_freq.clone();
         let cal_row = |row: usize, vis: &mut [Cvis], raw: &[Cvis]| {
             let it = ob.time_idx[row] as usize;
             let (a1, a2) = (ob.ant1[row] as usize, ob.ant2[row] as usize);
@@ -188,8 +199,21 @@ impl Stream {
                 }
                 let ia = gains.idx(it, cif, a1);
                 let ib = gains.idx(it, cif, a2);
-                let ampcor = gains.amp[ia] * gains.amp[ib];
-                let phscor = gains.phs[ia] - gains.phs[ib];
+                let mut ampcor = gains.amp[ia] * gains.amp[ib];
+                let mut phscor = gains.phs[ia] - gains.phs[ib];
+                if let Some(bc) = bcor {
+                    if let Some(k) = bc.index(ob.ant1[row], ob.ant2[row], cif) {
+                        ampcor *= bc.amp[k];
+                        phscor += bc.phs[k];
+                    }
+                }
+                if doshift {
+                    let freq = if_freq[cif];
+                    let (us, vs) = (ob.uvw[row * 3], ob.uvw[row * 3 + 1]);
+                    phscor += (std::f64::consts::TAU
+                        * (us * freq * east + vs * freq * north))
+                        as f32;
+                }
                 if ampcor != 1.0 || phscor != 0.0 {
                     let (s, c) = phscor.sin_cos();
                     let (re, im) = (v.re, v.im);

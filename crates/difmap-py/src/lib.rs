@@ -8,6 +8,7 @@
 use difmap_core::clean::{clean, map_stats, restore, Window};
 use difmap_core::closure::{closure_phases, sampling, spectrum};
 use difmap_core::edit::{edit, edit_rows, EditSelection};
+use difmap_core::geom::{clroff, resoff, shift, unshift};
 use difmap_core::grid::{invert, InvertPars, MapBeam, MapGeom};
 use difmap_core::model::{
     add_to_stream_model, clear_models, merge_model, recompute_stream_model, CmpType, ModComp,
@@ -893,6 +894,66 @@ impl CoreObservation {
             PyArray1::from_vec(py, vis).reshape([nrow, nctotal, npol])?,
             PyArray1::from_vec(py, wt).reshape([nrow, nctotal, npol])?,
         ))
+    }
+
+    // ---------------- geometry / baseline corrections ----------------
+
+    /// Shift the phase center by (east, north) radians (difmap shift).
+    fn shift(&mut self, py: Python<'_>, east: f64, north: f64) {
+        py.detach(|| shift(&mut self.ob, east, north));
+        self.mb = None;
+    }
+
+    /// Undo all accumulated shifts (difmap unshift).
+    fn unshift(&mut self, py: Python<'_>) {
+        py.detach(|| unshift(&mut self.ob));
+        self.mb = None;
+    }
+
+    /// The accumulated (east, north) shift in radians.
+    #[getter]
+    fn shift_total(&self) -> (f64, f64) {
+        (self.ob.geom.east, self.ob.geom.north)
+    }
+
+    /// Solve for per-baseline amplitude/phase corrections against the
+    /// current model (difmap resoff). Returns the number set.
+    #[pyo3(signature = (baseline=None))]
+    fn resoff(&mut self, py: Python<'_>, baseline: Option<(u32, u32)>) -> usize {
+        let n = py.detach(|| resoff(&mut self.ob, baseline));
+        if n > 0 {
+            self.mb = None;
+        }
+        n
+    }
+
+    /// Undo all baseline corrections (difmap clroff).
+    fn clroff(&mut self, py: Python<'_>) {
+        py.detach(|| clroff(&mut self.ob));
+        self.mb = None;
+    }
+
+    /// Baseline corrections as (baselines, amp[nbase, nif], phs).
+    fn baseline_corrections<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(
+        Vec<(u32, u32)>,
+        Bound<'py, PyArray2<f32>>,
+        Bound<'py, PyArray2<f32>>,
+    )> {
+        match self.ob.bcor.as_ref() {
+            None => Ok((
+                Vec::new(),
+                PyArray1::<f32>::zeros(py, 0, false).reshape([0, 0])?,
+                PyArray1::<f32>::zeros(py, 0, false).reshape([0, 0])?,
+            )),
+            Some(b) => Ok((
+                b.baselines().to_vec(),
+                PyArray1::from_slice(py, &b.amp).reshape([b.nbase, b.nif])?,
+                PyArray1::from_slice(py, &b.phs).reshape([b.nbase, b.nif])?,
+            )),
+        }
     }
 
     // ---------------- closure / spectra / sampling ----------------
