@@ -7,24 +7,27 @@ interactive plots.
 
 Where the original paged one IF at a time through scratch files
 (`uvdata.scr`, `ifdata.scr`, `modvis.scr`), difmapy keeps **everything
-in RAM**: the raw visibility cube is never modified (flags only toggle
-weight signs, calibrations are composed on the fly), so every
-operation — selection, gridding, CLEAN, self-cal, flagging — happens
-in real time and is reversible.
+in RAM**. Visibilities and weights are never modified: flags live in a
+separate FLAG array and calibrations in separate gain/baseline tables,
+composed on the fly when the working data stream is built. Every
+operation — selection, gridding, CLEAN, self-cal, flagging — therefore
+runs in real time and is fully reversible.
 
 Differences from the original by design:
 
 * reads **UVFITS and Measurement Sets** (both single-source)
+* **flags are stored in an explicit FLAG column**, the MS convention,
+  and can be written straight back into the MS with `save_flags()`
+  instead of having to write out a new UV file
 * native **multi-IF / multi-channel** handling: all subbands (IFs /
-  SPWs) are gridded together (multi-frequency synthesis), each may
+  SPWs) are gridded together (multi-frequency synthesis), and each may
   have a different number of channels
-* Python API instead of the sphere command language; interactive
-  plots use pyqtgraph instead of PGPLOT
+* Python API instead of the sphere command language; interactive plots
+  use pyqtgraph instead of PGPLOT
 
 The numerics are faithful ports of the difmap algorithms
 (uvinvert/uvtrans gridding+FFT, Högbom mapclean, mapres restore,
-modvis models, slfcal self-calibration), validated by synthetic-data
-tests against analytic ground truth.
+modvis models, slfcal self-calibration, modfit/lmfit model fitting).
 
 ## Install (development)
 
@@ -40,26 +43,27 @@ pip install ".[ms]"                # casatools for Measurement Sets
 ```python
 import difmapy
 
-obs = difmapy.load("mysource.uvf")     # or a .ms directory
+obs = difmapy.load("mysource.uvfits")  # or a .ms directory
 print(obs.header())
 
 obs.select("I")                        # Stokes I, all channels
 # obs.select("I", channels=[(0, 31)])  # or channel ranges (global axis)
 
-obs.mapsize(1024, 0.1)                 # pixels (power of 2), mas/pixel
+obs.mapsize(2048, 0.5)                 # pixels (power of 2), mas/pixel
 obs.uvweight(binwid=2, errpow=-1)      # uniform weighting
-obs.invert()                           # dirty map + beam
-obs.mapplot()                          # interactive: double-click to add
-                                       # CLEAN windows, c=clean, i=invert
+obs.startmod(flux=1.0)                 # phase selfcal to a point source
 
-obs.clean(niter=200, gain=0.03)        # Högbom CLEAN in the windows
-obs.selfcal(phase=True)                # phase self-cal against the model
-obs.clean(niter=200, gain=0.03)
+for _ in range(4):                     # the classic difmap loop
+    obs.clean(200, 0.03)
+    obs.selfcal(phase=True)
 obs.selfcal(amp=True, phase=True, solint=30)
+obs.clean(400, 0.02)
 
+obs.mapplot()                          # interactive: double-click adds
+                                       # CLEAN windows, c=clean, i=invert
 obs.radplot()                          # amp vs uv-radius; Shift+drag to flag
-obs.vplot(reftel="EF")                 # amp vs time per baseline
-obs.uvplot()                           # uv coverage
+obs.cpplot()                           # closure phases vs the model
+obs.corplot()                          # self-cal gain solutions
 
 m = obs.restore()                      # restored map (numpy array)
 obs.wmap("clean.fits")                 # FITS output with WCS + beam
@@ -67,25 +71,83 @@ obs.save("mysession")                  # .uvf + .mod + .win + parameters
 # later: obs = difmapy.Observation.get("mysession")
 ```
 
-Flagging from scripts:
+### Flagging
+
+Flags are held in an explicit FLAG array and every edit is reversible:
 
 ```python
-obs.flag(station="EF", if_index=2)                # all EF baselines, IF 3
+obs.flag(station="EF", if_index=2)                 # all EF baselines, IF 3
 obs.flag(baseline=("EF", "JB"), tmin=0, tmax=3600)
-obs.unflag(station="EF", if_index=2)              # fully reversible
+obs.unflag(station="EF", if_index=2)
+print(obs.flagged_fraction)
+
+obs.save_flags()        # write FLAG (+FLAG_ROW) back into the source MS
 ```
+
+Interactive flagging (`radplot`, `uvplot`, `vplot`): Shift+drag flags a
+box, Ctrl+drag unflags, `f`/`u` act on the nearest point.
+
+### Model fitting
+
+```python
+obs.addcmp(1.5, 2.0, -1.0, type="gauss", major=3.0, ratio=0.7, phi=30,
+           free=["flux", "pos", "shape"])
+res = obs.modelfit(niter=50)
+print(res["rchisq"], obs.model, res["errors"])
+```
+
+### Other commands
+
+`shift`/`unshift`, `resoff`/`clroff`, `uvaver`, `uvtaper`, `uvrange`,
+`uvzero`, `gscale`, `uncalib`, `selfant`, `keep`, `clrmod`,
+`wmodel`/`rmodel`, `wwins`/`rwins`, `wobs`, `wdmap`, `wbeam`,
+`imstat`, `spectrum`, `closure_phases`, `specplot`, `tplot`.
 
 ## Layout
 
 ```
 crates/difmap-core   pure-Rust engine (no Python): data model, stream
                      selection, gridding/FFT, clean, restore, selfcal,
-                     model visibilities, editing
+                     modelfit, models, closure, editing, geometry
 crates/difmap-py     PyO3 bindings (module difmapy._core)
 python/difmapy       Python API, UVFITS/MS I/O, pyqtgraph plots
-tests/               end-to-end pytest suite on synthetic data
+tests/               pytest suite: synthetic data with analytic truth
+                     plus real EVN data (3C345, UVFITS and MS)
 difmap-master/       reference: original difmap C sources (not built)
 ```
+
+## Validation
+
+The test suite checks against analytic ground truth and real data:
+
+* the **same EVN observation in UVFITS and MS** loads to identical
+  visibilities, weights, flags and uvw, and images identically
+* a **point source** inverts to the right pixel with the right flux;
+  CLEAN recovers its flux; restore reproduces the peak
+* **self-cal** recovers injected antenna gain errors to <2%
+* **closure phases** change by <1e-4 degrees under full amplitude+phase
+  self-calibration (they are gain-invariant by construction), and a
+  full clean/selfcal session ends with a model reproducing them to a
+  few degrees on high-SNR triangles
+* **modelfit** recovers all six parameters of an elliptical gaussian
+  injected into the real uv coverage (reduced chi-squared ~1e-11)
+* **shift** translates the map rigidly by exactly the requested pixels
+* **MS flag write-back** is bit-exact and provably leaves DATA and
+  WEIGHT untouched
+
+## Performance
+
+Release build, 16.6M visibilities (10 antennas, 12 h, 8 IFs x 32
+channels x 2 pols, 1024² maps):
+
+| operation | time |
+|---|---|
+| select (average 46M vis) | 21 ms |
+| invert 1024² | 72 ms |
+| clean 100 iterations | 77 ms |
+| selfcal (phase) | 30 ms |
+| flag/unflag a station | 18 ms |
+| restore | 66 ms |
 
 ## Testing
 

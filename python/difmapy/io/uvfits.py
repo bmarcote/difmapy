@@ -252,7 +252,15 @@ def save_uvfits(core, path, overwrite=True):
     npol = core.npol
     nrow = core.nrow
 
-    pols = core.pols
+    # The FITS STOKES axis must be a regular sequence, but MS
+    # correlations may come in another order (CASA uses RR, RL, LR, LL),
+    # so sort the polarization axis into a FITS-expressible order.
+    pols = list(core.pols)
+    if all(p < 0 for p in pols):
+        porder = np.argsort(np.abs(pols))  # RR, LL, RL, LR ...
+    else:
+        porder = np.argsort(pols)  # I, Q, U, V
+    pols = [pols[i] for i in porder]
     if len(pols) > 1:
         steps = np.diff(pols)
         if not np.all(steps == steps[0]):
@@ -260,6 +268,9 @@ def save_uvfits(core, path, overwrite=True):
         cdelt_s = int(steps[0])
     else:
         cdelt_s = -1 if pols[0] < 0 else 1
+    if not np.array_equal(porder, np.arange(len(pols))):
+        vis = vis[:, :, porder]
+        wt = wt[:, :, porder]
 
     # Data cube [ngroups, 1, 1, nif, nchan, npol, 3]; IFs with fewer
     # channels than nchan are padded with zero-weight visibilities.
