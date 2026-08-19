@@ -82,8 +82,11 @@ class Observation:
         # Imaging state (difmap mapsize/uvweight/uvtaper/uvrange/uvzero).
         self._nx = self._ny = 256
         self._xinc = self._yinc = 1.0 * MAS
-        self._binwid = 0.0  # natural weighting
-        self._errpow = -1.0  # amplitude-error weighting (difmap default)
+        # difmap's own defaults (invdef in difmap.c): uniform weighting
+        # with a 2-pixel bin and no amplitude-error weighting, so that
+        # a first image matches what difmap would produce.
+        self._binwid = 2.0
+        self._errpow = 0.0
         self._dorad = False
         self._gauval = self._gaurad = 0.0
         self._uvmin = self._uvmax = 0.0
@@ -185,9 +188,19 @@ class Observation:
         self._dirty()
         return self
 
-    def uvweight(self, binwid=0.0, errpow=-1.0, radial=False):
-        """Set gridding weights: uniform bin width (pixels; 0=natural),
-        error power and radial weighting (difmap uvweight)."""
+    def uvweight(self, binwid=2.0, errpow=0.0, radial=False):
+        """Set gridding weights (difmap uvweight).
+
+        binwid : uniform-weighting bin width in UV pixels; 0 selects
+            natural weighting (i.e. no density correction).
+        errpow : if negative, scale weights by wt**(-errpow/2), i.e.
+            weight down noisy visibilities; 0 ignores the data weights.
+        radial : multiply weights by the UV radius.
+
+        The defaults are difmap's (uniform, binwid=2, errpow=0). For
+        natural weighting using the data weights, use
+        ``uvweight(0, -1)``.
+        """
         self._binwid = float(binwid)
         self._errpow = float(errpow)
         self._dorad = bool(radial)
@@ -247,13 +260,19 @@ class Observation:
 
     @property
     def dmap(self) -> np.ndarray:
-        """Residual dirty map [ny, nx] (Jy/beam)."""
+        """Residual dirty map [ny, nx] (Jy/beam).
+
+        Only the inner quarter (see `valid_slice`) is scientifically
+        usable: the outer margin is amplified by the gridding
+        correction and can even exceed the true peak. Use `imstat()` or
+        `valid(...)` rather than scanning the whole array.
+        """
         self._ensure_map()
         return self._core.map()
 
     @property
     def dbeam(self) -> np.ndarray:
-        """Dirty beam [ny, nx]."""
+        """Dirty beam [ny, nx]; see `dmap` about the outer margin."""
         self._ensure_map()
         return self._core.beam()
 
@@ -262,6 +281,41 @@ class Observation:
         if self._restored is None:
             raise RuntimeError("no restored map; call restore()")
         return self._restored
+
+    @property
+    def valid_slice(self):
+        """Numpy slice of the scientifically valid map area: the inner
+        quarter, which is what CLEAN searches and `imstat` measures.
+
+        Outside it the gridding-correction factor grows without bound,
+        so pixel values there are meaningless (difmap restricts its
+        map area the same way).
+        """
+        return (
+            slice(self._ny // 4, self._ny - self._ny // 4),
+            slice(self._nx // 4, self._nx - self._nx // 4),
+        )
+
+    def valid(self, image=None) -> np.ndarray:
+        """The valid inner quarter of `image` (default: the dirty map)."""
+        if image is None:
+            image = self.dmap
+        return image[self.valid_slice]
+
+    def peak_offset(self, image=None):
+        """(east, north) offset in mas of the brightest valid pixel, and
+        its value: ``((x, y), value)``."""
+        img = self.dmap if image is None else image
+        sy, sx = self.valid_slice
+        sub = img[sy, sx]
+        iy, ix = np.unravel_index(np.argmax(sub), sub.shape)
+        ix += sx.start
+        iy += sy.start
+        return (
+            ((ix - self._nx / 2) * self._xinc / MAS,
+             (iy - self._ny / 2) * self._yinc / MAS),
+            float(img[iy, ix]),
+        )
 
     @property
     def extent(self):
@@ -452,6 +506,8 @@ class Observation:
         """Self-calibrate against the current model (difmap selfcal).
 
         solint in minutes (0 = per integration); maxphs in degrees.
+        Each IF of each subarray is solved independently, so the
+        returned `nbins` counts solution intervals over all of them.
         """
         res = self._core.selfcal(
             doamp=bool(amp),

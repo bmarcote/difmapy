@@ -176,21 +176,26 @@ def test_two_components(template):
 
 
 def test_fit_reduces_residuals_on_real_data():
-    """On the real (complex) source a fitted component must reduce the
-    residual map, even though a single component is a poor model."""
+    """On the real (complex) source, fitting must reduce the quantity it
+    minimises - chi-squared over the visibilities - even though a single
+    component is a poor model of 3C345.
+
+    (The residual *map* rms is not used here: this snapshot's dirty map
+    has near-unity sidelobes, so map statistics are dominated by them.)
+    """
     o = difmapy.load(UVF)
     o.select("I")
-    o.mapsize(512, 1.0)
+    o.mapsize(1024, 1.0)
     o.invert()
-    rms0 = o.imstat()["rms"]
-    peak = o.imstat()
-    px, py = peak["maxpos"]
-    o.addcmp(peak["max"], px - 256, py - 256, free=["flux", "pos"])
+    (x, y), peak = o.peak_offset()
+    o.addcmp(peak, x, y, free=["flux", "pos"])
+    start = o.modelfit(niter=0)
     res = o.modelfit(niter=30)
     assert res["nvis"] > 10000
-    o.keep()
-    o.invert()
-    assert o.imstat()["rms"] < rms0
+    assert res["rchisq"] < start["rchisq"]
+    # The fitted component stays in the neighbourhood of the peak.
+    c = o.model[0]
+    assert abs(c["x"] - x) < 50 and abs(c["y"] - y) < 50
 
 
 def test_modelfit_errors(template):

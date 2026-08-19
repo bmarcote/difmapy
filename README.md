@@ -50,7 +50,8 @@ obs.select("I")                        # Stokes I, all channels
 # obs.select("I", channels=[(0, 31)])  # or channel ranges (global axis)
 
 obs.mapsize(2048, 0.5)                 # pixels (power of 2), mas/pixel
-obs.uvweight(binwid=2, errpow=-1)      # uniform weighting
+obs.uvweight(0, -1)                    # natural weighting w/ data weights
+                                       # (default is difmap's uniform 2, 0)
 obs.startmod(flux=1.0)                 # phase selfcal to a point source
 
 for _ in range(4):                     # the classic difmap loop
@@ -91,6 +92,22 @@ pyqtgraph's pan/zoom.
 
 Data that are absent from the file (zero weight) count as permanently
 flagged and cannot be unflagged, matching difmap's deleted-data flag.
+
+### Two things worth knowing
+
+**Only the inner quarter of a map is valid.** As in difmap, the grid is
+padded: outside the central quarter the gridding correction amplifies
+pixels without bound, so values there are meaningless (a dirty beam
+can even exceed 1 out there). `clean` and `imstat` already restrict
+themselves to that area; when working with the arrays directly use
+`obs.valid()`, `obs.peak_offset()` or `obs.valid_slice` rather than
+scanning the whole image.
+
+**Weighting defaults follow difmap**, i.e. uniform with a 2-pixel bin
+and no amplitude-error weighting (`invdef` in difmap.c), so a first
+image reproduces what difmap would give. Use `obs.uvweight(0, -1)` for
+natural weighting that uses the data weights - it roughly doubles the
+beam size on typical VLBI data.
 
 ### What gets written out
 

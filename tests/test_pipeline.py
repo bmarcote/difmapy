@@ -43,14 +43,14 @@ def test_select_channels(uvfits_file):
 def test_invert_peak(obs):
     res = obs.invert()
     assert res["nused"] == obs._core.nrow * NIF
-    dmap = obs.dmap
     beam = obs.dbeam
-    iy, ix = np.unravel_index(np.argmax(beam), beam.shape)
-    assert (ix, iy) == (NX // 2, NX // 2)
-    assert abs(beam[iy, ix] - 1.0) < 0.01
-    iy, ix = np.unravel_index(np.argmax(dmap), dmap.shape)
-    assert (ix, iy) == (NX // 2 + int(X0_MAS / CELL), NX // 2 + int(Y0_MAS / CELL))
-    assert abs(dmap[iy, ix] - FLUX) / FLUX < 0.02
+    assert abs(beam[NX // 2, NX // 2] - 1.0) < 0.01
+    (bx, by), bpeak = obs.peak_offset(beam)
+    assert (bx, by) == pytest.approx((0.0, 0.0), abs=1e-9)
+    assert abs(bpeak - 1.0) < 0.01
+    (x, y), peak = obs.peak_offset()
+    assert (x, y) == pytest.approx((X0_MAS, Y0_MAS), abs=CELL)
+    assert abs(peak - FLUX) / FLUX < 0.02
 
 
 def test_clean_restore_wmap(obs, tmp_path):
@@ -64,9 +64,9 @@ def test_clean_restore_wmap(obs, tmp_path):
     assert max(abs(stats["min"]), abs(stats["max"])) < 0.05 * FLUX
 
     cln = obs.restore()
-    iy, ix = np.unravel_index(np.argmax(cln), cln.shape)
-    assert (ix, iy) == (NX // 2 + int(X0_MAS / CELL), NX // 2 + int(Y0_MAS / CELL))
-    assert abs(cln[iy, ix] - FLUX) / FLUX < 0.05
+    (x, y), peak = obs.peak_offset(cln)
+    assert (x, y) == pytest.approx((X0_MAS, Y0_MAS), abs=CELL)
+    assert abs(peak - FLUX) / FLUX < 0.05
 
     # FITS output: the peak must be at the right sky position.
     from astropy.io import fits

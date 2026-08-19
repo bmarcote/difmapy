@@ -63,6 +63,25 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
 
 ## Known behaviour worth remembering
 
+- **Only the inner quarter of a map is meaningful.** Outside it the
+  gridding correction (dividing by the kernel's transform) grows
+  without bound, so a dirty beam can exceed 1.0 there. difmap defines
+  `maparea` the same way; `clean` and `map_stats` honour it, and the
+  Python API exposes `valid_slice`/`valid()`/`peak_offset()`. Never
+  `argmax` a whole map in tests or examples.
+- **Weighting defaults are difmap's** (`invdef`: uvbin=2, errpow=0,
+  i.e. uniform weighting ignoring the data weights). Tests that assert
+  weighting-dependent numbers (beam size, peak flux) must set the
+  weighting explicitly.
+- Time-averaging real data smears emission far from the phase centre:
+  240 s bins on the 3C345 file lose ~30% of the cleaned flux. Use
+  coherence/weight-budget invariants in tests, not flux preservation.
+- `uvaver` must give every baseline in a bin *exactly* the same
+  timestamp; the core identifies integrations by equal times, so
+  per-baseline float noise would split each baseline into its own
+  integration and quietly break per-integration self-cal.
+- `SelfcalResult.nbins` counts solution bins per (subarray, IF), not
+  per integration.
 - `modelfit` is a local optimizer (as in difmap): it converges to the
   truth from a reasonable starting guess but can settle in a local
   minimum (often at the `ratio -> 0` limit) from a far-off start. This

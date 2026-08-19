@@ -110,13 +110,11 @@ def test_uvaver_includes_shift(uvfits_file):
     o.mapsize(256, 0.25)
     o.shift(3.0, -2.0)
     o.invert()
-    m = o.dmap
-    iy, ix = np.unravel_index(np.argmax(m), m.shape)
+    pos, _ = o.peak_offset()
     avg = o.uvaver(120.0)
     avg.invert()
-    m2 = avg.dmap
-    iy2, ix2 = np.unravel_index(np.argmax(m2), m2.shape)
-    assert (ix2, iy2) == (ix, iy)
+    pos2, _ = avg.peak_offset()
+    assert pos2 == pytest.approx(pos, abs=0.25)
     # The averaged data are already corrected, so no shift is pending.
     assert avg.total_shift == (0.0, 0.0)
 

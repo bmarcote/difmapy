@@ -352,6 +352,8 @@ pub struct MapStats {
 }
 
 pub fn map_stats(map: &[f32], nx: usize, ny: usize) -> MapStats {
+    // The same region difmap's mapstats() uses: the inner quarter,
+    // i.e. the area that CLEAN can reach.
     let (ixmin, iymin) = (nx / 4, ny / 4);
     let (ixmax, iymax) = (nx - nx / 4 - 1, ny - ny / 4 - 1);
     let mut min = f32::MAX;
@@ -359,7 +361,6 @@ pub fn map_stats(map: &[f32], nx: usize, ny: usize) -> MapStats {
     let mut minpos = (0, 0);
     let mut maxpos = (0, 0);
     let mut sum = 0.0f64;
-    let mut sumsq = 0.0f64;
     let mut npix = 0usize;
     for iy in iymin..=iymax {
         for ix in ixmin..=ixmax {
@@ -373,16 +374,25 @@ pub fn map_stats(map: &[f32], nx: usize, ny: usize) -> MapStats {
                 maxpos = (ix, iy);
             }
             sum += v as f64;
-            sumsq += (v as f64) * (v as f64);
             npix += 1;
         }
     }
     let mean = sum / npix as f64;
+    // Second pass about the mean, as difmap does: the one-pass
+    // sum(v^2)/n - mean^2 form cancels catastrophically when the rms is
+    // small compared with the mean, and can even go negative.
+    let mut sumsq = 0.0f64;
+    for iy in iymin..=iymax {
+        for ix in ixmin..=ixmax {
+            let d = map[iy * nx + ix] as f64 - mean;
+            sumsq += d * d;
+        }
+    }
     MapStats {
         min,
         max,
         mean,
-        rms: (sumsq / npix as f64 - mean * mean).max(0.0).sqrt(),
+        rms: (sumsq / npix as f64).sqrt(),
         minpos,
         maxpos,
     }

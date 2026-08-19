@@ -95,16 +95,31 @@ def uvaver(core: CoreObservation, aver_time: float, doscatter: bool = False):
         out_wt = sum_w  # sum of input weights (difmap default)
     out_wt = np.where(out_flag, 0.0, out_wt).astype(np.float32)
 
-    # Row metadata: uvw and time are averaged with the row's total data
-    # weight, falling back to a plain mean for fully flagged groups.
+    # Row metadata: uvw is averaged with the row's total data weight,
+    # falling back to a plain mean for fully flagged groups.
     rw = np.maximum(w_s.sum(axis=(1, 2)), 0.0)
     sum_rw = _sum(rw)
     sum_cnt = _sum(np.ones(len(rw)))
     wsum = np.where(sum_rw > 0, sum_rw, sum_cnt)
     wcol = np.where(rw > 0, rw, np.where(sum_rw[gidx] > 0, 0.0, 1.0))
     out_uvw = _sum(uvw_s * wcol[:, None]) / wsum[:, None]
-    out_time = _sum(time_s * wcol) / wsum
     out_int = _sum(it_s)  # integration times add
+
+    # Every baseline in a time bin must end up with *exactly* the same
+    # timestamp: the core identifies integrations by equal times, and a
+    # per-baseline weighted mean would differ in the last bits, turning
+    # each baseline into its own integration (which would quietly break
+    # per-integration self-calibration and closure phases).
+    tbin_s = tbin[order]
+    ubin, bin_of_row = np.unique(tbin_s, return_inverse=True)
+    nb = len(ubin)
+    num = np.bincount(bin_of_row, weights=time_s * rw, minlength=nb)
+    den = np.bincount(bin_of_row, weights=rw, minlength=nb)
+    plain = np.bincount(bin_of_row, weights=time_s, minlength=nb) / np.bincount(
+        bin_of_row, minlength=nb
+    )
+    canon_time = np.where(den > 0, num / np.maximum(den, 1e-300), plain)
+    out_time = canon_time[bin_of_row[starts]]
 
     # Antennas of each group, from its first row.
     out_a1 = np.asarray(a1)[order][starts].astype(np.uint32)

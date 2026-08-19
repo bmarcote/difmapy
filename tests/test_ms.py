@@ -87,13 +87,13 @@ def test_ms_invert_peak(ms_path):
     o = difmapy.load(ms_path)
     o.select("I").mapsize(NX, CELL)
     o.invert()
-    dmap = o.dmap
-    iy, ix = np.unravel_index(np.argmax(dmap), dmap.shape)
-    assert (ix, iy) == (NX // 2 + int(X0_MAS / CELL), NX // 2 + int(Y0_MAS / CELL)), (
-        f"peak at ({(ix - NX // 2) * CELL}, {(iy - NX // 2) * CELL}) mas, "
-        f"expected ({X0_MAS}, {Y0_MAS}) mas"
+    # Only the inner quarter of the grid is valid (the outer margin is
+    # amplified by the gridding correction), so search there.
+    (x, y), peak = o.peak_offset()
+    assert (x, y) == pytest.approx((X0_MAS, Y0_MAS), abs=CELL), (
+        f"peak at ({x}, {y}) mas, expected ({X0_MAS}, {Y0_MAS}) mas"
     )
-    assert abs(dmap[iy, ix] - FLUX) / FLUX < 0.03
+    assert abs(peak - FLUX) / FLUX < 0.03
 
 
 def test_ms_clean_selfcal_smoke(ms_path):

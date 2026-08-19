@@ -105,6 +105,9 @@ def test_imaging_loop(path):
     o = difmapy.load(path)
     o.select("I")
     o.mapsize(1024, 1.0)
+    # Natural weighting, so the beam size below is well defined (the
+    # default uniform weighting sharpens it to ~8 mas).
+    o.uvweight(0, -1)
     r = o.invert()
     bmaj, bmin, _ = o.estimated_beam
     assert 10 < bmaj < 30 and 3 < bmin < 12  # EVN L-band beam (mas)
