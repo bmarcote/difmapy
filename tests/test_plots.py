@@ -32,12 +32,13 @@ def test_radplot_flagging(obs):
     d = p._data
     n0 = int((d["wt"] > 0).sum())
     assert n0 == obs._core.nrow * obs.nif
-    # Programmatic box flag: everything beyond 100 Mlambda.
-    p._apply_box(100.0, 1e9, -1e9, 1e9, flag=True)
+    # Programmatic box flag: everything beyond the median uv radius.
+    cut = float(np.median(d["x"]))
+    p._apply_box(cut, 1e9, -1e9, 1e9, flag=True)
     d = p._data
     nf = int((d["wt"] < 0).sum())
     assert nf > 0
-    assert (np.hypot(*_uv(obs)) / 1e6 > 100.0).sum() == nf
+    assert (np.hypot(*_uv(obs)) / 1e6 >= cut).sum() == nf
     # Unflag box restores everything.
     p._apply_box(-1e9, 1e9, -1e9, 1e9, flag=False)
     assert int((p._data["wt"] > 0).sum()) == n0

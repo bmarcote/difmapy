@@ -6,6 +6,7 @@
 //! wraps this in a friendlier high-level API.
 
 use difmap_core::clean::{clean, map_stats, restore, Window};
+use difmap_core::closure::{closure_phases, sampling, spectrum};
 use difmap_core::edit::{edit, edit_rows, EditSelection};
 use difmap_core::grid::{invert, InvertPars, MapBeam, MapGeom};
 use difmap_core::model::{
@@ -892,6 +893,69 @@ impl CoreObservation {
             PyArray1::from_vec(py, vis).reshape([nrow, nctotal, npol])?,
             PyArray1::from_vec(py, wt).reshape([nrow, nctotal, npol])?,
         ))
+    }
+
+    // ---------------- closure / spectra / sampling ----------------
+
+    /// Closure phases (difmap cpplot). Returns a list of dicts, one per
+    /// (triangle, IF), with time/phase/model/error arrays in radians.
+    #[pyo3(signature = (triangle=None, if_index=None))]
+    fn closure_phases<'py>(
+        &self,
+        py: Python<'py>,
+        triangle: Option<(u32, u32, u32)>,
+        if_index: Option<usize>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let series = py.detach(|| closure_phases(&self.ob, triangle, if_index));
+        let out = PyList::empty(py);
+        for s in series {
+            let d = PyDict::new(py);
+            d.set_item("triangle", s.tri)?;
+            d.set_item("if_index", s.cif)?;
+            d.set_item("time", PyArray1::from_vec(py, s.time))?;
+            d.set_item("phase", PyArray1::from_vec(py, s.phase))?;
+            d.set_item("model", PyArray1::from_vec(py, s.model))?;
+            d.set_item("error", PyArray1::from_vec(py, s.error))?;
+            out.append(d)?;
+        }
+        Ok(out)
+    }
+
+    /// Time-averaged spectrum of the current polarization selection
+    /// (difmap specplot data).
+    #[pyo3(signature = (baseline=None, tmin=None, tmax=None))]
+    fn spectrum<'py>(
+        &self,
+        py: Python<'py>,
+        baseline: Option<(u32, u32)>,
+        tmin: Option<f64>,
+        tmax: Option<f64>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let range = match (tmin, tmax) {
+            (None, None) => None,
+            (a, b) => Some((a.unwrap_or(f64::MIN), b.unwrap_or(f64::MAX))),
+        };
+        let s = py.detach(|| spectrum(&self.ob, baseline, range));
+        let d = PyDict::new(py);
+        d.set_item("chan", s.chan)?;
+        d.set_item("freq", PyArray1::from_vec(py, s.freq))?;
+        d.set_item("re", PyArray1::from_vec(py, s.re))?;
+        d.set_item("im", PyArray1::from_vec(py, s.im))?;
+        d.set_item("amp", PyArray1::from_vec(py, s.amp))?;
+        d.set_item("wt", PyArray1::from_vec(py, s.wt))?;
+        Ok(d)
+    }
+
+    /// Per-(integration, antenna) count of unflagged baseline-IFs
+    /// (difmap tplot data), shape [ntimes, nant].
+    fn sampling<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u32>>> {
+        let s = py.detach(|| sampling(&self.ob));
+        Ok(PyArray1::from_vec(py, s).reshape([self.ob.ntimes, self.ob.antennas.len()])?)
+    }
+
+    /// Integration times of the observation (seconds since ref_mjd).
+    fn times<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_slice(py, &self.ob.times)
     }
 
     /// Gain table (amp[nt, nif, nant], phs, bad) copies.

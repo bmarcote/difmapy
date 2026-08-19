@@ -29,14 +29,25 @@ def make_uvfits(path, gerr=None, flux=FLUX, x0_mas=X0_MAS, y0_mas=Y0_MAS):
     x0, y0 = x0_mas * MAS, y0_mas * MAS
     if_freqs = REF_FREQ + IF_OFFSET * np.arange(NIF)
 
+    # Per-antenna projected station vectors, rotating with time, so
+    # that u_ab = s_b - s_a. Deriving the baselines this way (rather
+    # than making them up per baseline) means the visibilities satisfy
+    # the closure relations exactly, as real data do.
+    station = 1.0e6 * np.array(
+        [[np.cos(2.4 * i), 0.7 * np.sin(1.7 * i + 0.3)] for i in range(NANT)]
+    )
+    station *= 1.0 + 0.35 * np.arange(NANT)[:, None]
+
     rows = []
     for it in range(NTIME):
         tday = (it * 60.0) / 86400.0
+        # Rotate the array to synthesize uv tracks.
+        ha = 0.7 * np.pi * (it / NTIME)
+        rot = np.array([[np.cos(ha), -np.sin(ha)], [np.sin(ha), np.cos(ha)]])
+        proj = station @ rot.T
         for a in range(NANT):
             for b in range(a + 1, NANT):
-                blen = 1.0e6 * ((a + b) + 1.0)
-                theta = 0.7 * (it / NTIME) * np.pi + (a * NANT + b)
-                u_m, v_m = blen * np.cos(theta), blen * np.sin(theta)
+                u_m, v_m = proj[b] - proj[a]
                 u_s, v_s = u_m / C, v_m / C
                 gamp, gphs = 1.0, 0.0
                 if gerr is not None:

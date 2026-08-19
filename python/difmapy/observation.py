@@ -605,6 +605,54 @@ class Observation:
 
         return mapplot(self, what=what, block=block, **clean_args)
 
+    def cpplot(self, triangles=None, if_index=None, nplot=4, block=None):
+        """Closure phases vs time, with the model overplotted
+        (difmap cpplot). `triangles` is a list of antenna-name triples;
+        all closed triangles are shown by default."""
+        from difmapy.plots import cpplot
+
+        return cpplot(self, triangles=triangles, if_index=if_index,
+                      nplot=nplot, block=block)
+
+    def tplot(self, block=None):
+        """Per-antenna time sampling of unflagged data (difmap tplot)."""
+        from difmapy.plots import tplot
+
+        return tplot(self, block=block)
+
+    def corplot(self, quantity="phase", nplot=4, block=None):
+        """Self-cal gain corrections vs time (difmap corplot)."""
+        from difmapy.plots import corplot
+
+        return corplot(self, quantity=quantity, nplot=nplot, block=block)
+
+    def specplot(self, baseline=None, tmin=None, tmax=None, xaxis="freq", block=None):
+        """Time-averaged spectrum of the selected polarization
+        (difmap specplot)."""
+        from difmapy.plots import specplot
+
+        return specplot(self, baseline=baseline, tmin=tmin, tmax=tmax,
+                        xaxis=xaxis, block=block)
+
+    # ------------------------------------------------------------------
+    # closure / spectral data (without plotting)
+    # ------------------------------------------------------------------
+
+    def closure_phases(self, triangle=None, if_index=None):
+        """Closure phase time series (radians). Returns a list of dicts
+        with triangle/if_index/time/phase/model/error."""
+        idx = None
+        if triangle is not None:
+            idx = tuple(sorted(self._ant_index(t) for t in triangle))
+        return self._core.closure_phases(triangle=idx, if_index=if_index)
+
+    def spectrum(self, baseline=None, tmin=None, tmax=None):
+        """Time-averaged spectrum of the current polarization selection."""
+        bl = None
+        if baseline is not None:
+            bl = (self._ant_index(baseline[0]), self._ant_index(baseline[1]))
+        return dict(self._core.spectrum(baseline=bl, tmin=tmin, tmax=tmax))
+
     # ------------------------------------------------------------------
     # file output (difmap wmap/wbeam/wmodel/wwins ...)
     # ------------------------------------------------------------------
