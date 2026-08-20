@@ -90,6 +90,14 @@ impl Stream {
     ) -> Result<Stream, SelectError> {
         let polop =
             PolOp::find(&ob.pols, stokes).ok_or_else(|| SelectError::NoPol(stokes.name().into()))?;
+        // "PI" is only a legacy spelling of the total-intensity
+        // selection, so record it as I: that is what the data represent
+        // and what output images should declare.
+        let stokes = if stokes == Stokes::PI && !matches!(polop, PolOp::Direct(_)) {
+            Stokes::I
+        } else {
+            stokes
+        };
         let chlist = normalize_chlist(chlist, ob.nctotal)?;
         let nif = ob.nif();
 

@@ -18,7 +18,8 @@ pub enum Stokes {
     YY,
     XY,
     YX,
-    /// Pseudo-I: weighted mean of whichever parallel hands are present.
+    /// Legacy alias of [`Stokes::I`], kept because difmap spelled the
+    /// permissive combination "pi" (polarization intensity).
     PI,
 }
 
@@ -116,33 +117,51 @@ pub struct Cvis {
 pub enum PolOp {
     /// Directly recorded: take pol index.
     Direct(usize),
-    /// (a + b) / 2, e.g. I = (RR+LL)/2, Q = (RL+LR)/2.
+    /// (a + b) / 2, e.g. Q = (RL+LR)/2.
     HalfSum(usize, usize),
     /// (a - b) / 2, e.g. V = (RR-LL)/2.
     HalfDiff(usize, usize),
     /// i(a - b) / 2, e.g. U = i(LR-RL)/2.
     HalfIDiff(usize, usize),
-    /// Pseudo-I: weight-weighted mean of the parallel hands present.
+    /// Total intensity from the parallel hands, tolerating the absence
+    /// of one of them (difmap's "pi", and what [`Stokes::I`] now uses).
+    ///
+    /// With both hands usable this is the weight-weighted mean, which
+    /// for the usual case of equal weights is exactly (RR+LL)/2 = I,
+    /// with the same summed weight as the strict combination - so the
+    /// flux scale is unchanged. Where only one hand survives, that hand
+    /// is used on its own, i.e. the other is assumed identical. That
+    /// assumption is exact for unpolarized emission and neglects
+    /// circular polarization (RR = I + V, LL = I - V).
     PseudoI(usize, Option<usize>),
 }
 
 impl PolOp {
     /// Find a way to construct `stokes` from the recorded pol codes.
-    /// Ported from get_Obpol() in obpol.c, with the (non-difmap)
-    /// extension that I/Q/U/V can also be derived from linear feeds.
+    /// Ported from get_Obpol() in obpol.c, with two deliberate
+    /// differences: I/Q/U/V may also be derived from linear feeds, and
+    /// `I` uses the permissive parallel-hand combination that difmap
+    /// called `pi` (see [`PolOp::PseudoI`]).
     pub fn find(pols: &[i32], stokes: Stokes) -> Option<PolOp> {
         let idx = |s: Stokes| pols.iter().position(|&p| p == s.code());
         if let Some(pa) = idx(stokes) {
             return Some(PolOp::Direct(pa));
         }
         match stokes {
-            Stokes::I => match (idx(Stokes::RR), idx(Stokes::LL)) {
-                (Some(a), Some(b)) => Some(PolOp::HalfSum(a, b)),
-                _ => match (idx(Stokes::XX), idx(Stokes::YY)) {
-                    (Some(a), Some(b)) => Some(PolOp::HalfSum(a, b)),
-                    _ => None,
-                },
-            },
+            // I and PI are the same operation; PI is kept as a legacy
+            // spelling. Circular feeds are preferred, then linear.
+            Stokes::I | Stokes::PI => {
+                let (mut a, mut b) = (idx(Stokes::RR), idx(Stokes::LL));
+                if a.is_none() && b.is_none() {
+                    (a, b) = (idx(Stokes::XX), idx(Stokes::YY));
+                }
+                match (a, b) {
+                    (Some(a), Some(b)) => Some(PolOp::PseudoI(a, Some(b))),
+                    // Only one hand recorded: assume the other matches.
+                    (Some(a), None) | (None, Some(a)) => Some(PolOp::PseudoI(a, None)),
+                    (None, None) => None,
+                }
+            }
             Stokes::V => match (idx(Stokes::RR), idx(Stokes::LL)) {
                 (Some(a), Some(b)) => Some(PolOp::HalfDiff(a, b)),
                 _ => None,
@@ -155,20 +174,6 @@ impl PolOp {
                 (Some(a), Some(b)) => Some(PolOp::HalfIDiff(a, b)),
                 _ => None,
             },
-            Stokes::PI => {
-                let (a, b) = (idx(Stokes::RR), idx(Stokes::LL));
-                let (a, b) = if a.is_some() || b.is_some() {
-                    (a, b)
-                } else {
-                    (idx(Stokes::XX), idx(Stokes::YY))
-                };
-                match (a, b) {
-                    (Some(a), Some(b)) => Some(PolOp::PseudoI(a, Some(b))),
-                    (Some(a), None) => Some(PolOp::PseudoI(a, None)),
-                    (None, Some(b)) => Some(PolOp::PseudoI(b, None)),
-                    (None, None) => None,
-                }
-            }
             _ => None,
         }
     }

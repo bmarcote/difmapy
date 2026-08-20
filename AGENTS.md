@@ -61,6 +61,16 @@ clean.rs; modvis.c/besj.c → model.rs; modfit.c/lmfit.c → modelfit.rs;
 slfcal.c → selfcal.rs; obutil.c/obpol.c → stream.rs; obedit.c →
 edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
 
+## Deliberate deviations from difmap
+
+- `select("I")` uses difmap's permissive `pi` combination
+  (`PolOp::PseudoI`), not strict (RR+LL)/2: a visibility survives when
+  only one parallel hand is usable. `Stokes::PI` is a legacy alias and
+  is canonicalised to `I` in `Stream::select`, so headers and FITS
+  output report Stokes I. Q/U/V stay strict.
+- Weighting defaults are difmap's, but the map-area, flag-storage and
+  write-path differences are listed in the README.
+
 ## Known behaviour worth remembering
 
 - **Only the inner quarter of a map is meaningful.** Outside it the
@@ -82,6 +92,13 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
   integration and quietly break per-integration self-cal.
 - `SelfcalResult.nbins` counts solution bins per (subarray, IF), not
   per integration.
+- An identically zero visibility counts as deleted (difmap behaviour),
+  which bites when constructing test data: if RR == LL then V == 0 and
+  the sample is reported deleted rather than flagged.
+- The CLI (`difmapy.cli`) binds observation methods into the IPython
+  namespace, and prints its banner itself because IPython's
+  `display_banner=False` also suppresses `banner1`. `--batch` runs
+  `-c` code without a prompt, which is how the CLI is tested.
 - `modelfit` is a local optimizer (as in difmap): it converges to the
   truth from a reasonable starting guess but can settle in a local
   minimum (often at the `ratio -> 0` limit) from a far-off start. This

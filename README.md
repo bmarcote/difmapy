@@ -15,6 +15,14 @@ runs in real time and is fully reversible.
 
 Differences from the original by design:
 
+* **`select("I")` is permissive**: total intensity is formed from
+  whichever parallel hands are usable, so data survive when one hand is
+  missing or flagged (difmap called this `pi`, which remains as a legacy
+  alias). With both hands present and equal weights this is exactly
+  (RR+LL)/2, so the flux scale is unchanged; where only one hand
+  survives the other is assumed identical, which neglects circular
+  polarization. Output images declare Stokes I. `Q`, `U` and `V` remain
+  strict, since a missing hand cannot be guessed for polarization.
 * reads **UVFITS and Measurement Sets** (both single-source)
 * **flags are stored in an explicit FLAG column**, the MS convention,
   and can be written straight back into the MS with `save_flags()`
@@ -47,6 +55,37 @@ whose licence terms must be settled before any public release.
 
 ## Usage
 
+### The `difmapy` command
+
+```sh
+difmapy                                   # empty interactive session
+difmapy mysource.uvfits                   # load and select Stokes I
+difmapy data.ms --stokes I --mapsize 2048 --cell 0.5
+difmapy data.ms --channels 0-31           # channel ranges
+difmapy data.ms -c "clean(200, 0.03)"     # run commands on startup
+difmapy data.ms --batch -c "wmap('m.fits')"   # scripted, no prompt
+```
+
+This opens an IPython session with the observation bound to `obs` and
+the difmap-style commands available as bare functions, so a session
+reads much like difmap:
+
+```
+In [1]: invert()
+In [2]: add_window(-5, 5, -5, 5)
+In [3]: clean(200, 0.03)
+In [4]: selfcal(phase=True)
+In [5]: radplot()          # opens; the prompt stays usable
+In [6]: wmap('clean.fits')
+```
+
+The Qt event loop is driven by IPython, so plot windows stay live and
+interactive while you keep typing - flagging in a plot updates `obs`
+immediately. `load('other.uvfits')` switches dataset and rebinds the
+commands. `--batch` makes the same commands usable from shell scripts.
+
+### As a library
+
 ```python
 import difmapy
 
@@ -55,6 +94,7 @@ print(obs.header())
 
 obs.select("I")                        # Stokes I, all channels
 # obs.select("I", channels=[(0, 31)])  # or channel ranges (global axis)
+# obs.select("RR") / "LL" / "Q" / "U" / "V" / "XX" ... also available
 
 obs.mapsize(2048, 0.5)                 # pixels (power of 2), mas/pixel
 obs.uvweight(0, -1)                    # natural weighting w/ data weights

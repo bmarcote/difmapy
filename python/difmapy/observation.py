@@ -832,19 +832,27 @@ class Observation:
         hdr["CRVAL2"] = np.rad2deg(c.dec)
         hdr["CDELT2"] = self._yinc / DEG
         hdr["CRPIX2"] = ny / 2.0 + 1.0
+        # FREQ and STOKES axes, as radio images conventionally carry. The
+        # stokes code is that of the selection, so a legacy "pi"
+        # selection is written as Stokes I - which is what it is.
         sel = c.selection()
         freqs = [f for f, u in zip(sel["if_freq"], sel["if_used"]) if u]
-        if freqs:
-            hdr["CTYPE3"] = "FREQ"
-            hdr["CRVAL3"] = float(np.mean(freqs))
-            hdr["CRPIX3"] = 1.0
+        hdr["CTYPE3"] = "FREQ"
+        hdr["CRVAL3"] = float(np.mean(freqs)) if freqs else 0.0
+        hdr["CDELT3"] = 1.0
+        hdr["CRPIX3"] = 1.0
+        hdr["CTYPE4"] = "STOKES"
+        hdr["CRVAL4"] = float(sel["stokes_code"])
+        hdr["CDELT4"] = 1.0
+        hdr["CRPIX4"] = 1.0
         if beam is not None:
             bmaj, bmin, bpa = beam
             hdr["BMAJ"] = bmaj * MAS / DEG
             hdr["BMIN"] = bmin * MAS / DEG
             hdr["BPA"] = bpa
         hdr["ORIGIN"] = "difmapy"
-        fits.PrimaryHDU(data=img[np.newaxis] if freqs else img, header=hdr).writeto(
+        # Shape [stokes, freq, dec, ra].
+        fits.PrimaryHDU(data=img[np.newaxis, np.newaxis], header=hdr).writeto(
             path, overwrite=overwrite
         )
 

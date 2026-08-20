@@ -331,6 +331,8 @@ impl CoreObservation {
             .ok_or_else(|| PyRuntimeError::new_err("no selection"))?;
         let d = PyDict::new(py);
         d.set_item("stokes", s.stokes.name())?;
+        // AIPS/FITS code of the selection, for output image headers.
+        d.set_item("stokes_code", s.stokes.code())?;
         d.set_item("chlist", s.chlist.clone())?;
         d.set_item("if_freq", s.if_freq.clone())?;
         d.set_item("if_used", s.if_used.clone())?;

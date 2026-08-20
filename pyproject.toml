@@ -30,7 +30,13 @@ classifiers = [
 dependencies = [
     "numpy>=1.26",
     "astropy>=6.0",
+    # The `difmapy` command is an IPython session, so this is a hard
+    # dependency rather than an extra.
+    "ipython>=8.0",
 ]
+
+[project.scripts]
+difmapy = "difmapy.cli:main"
 
 [project.optional-dependencies]
 # Measurement Set support. casatools ships wheels only for some
