@@ -224,8 +224,13 @@ pub fn total_flux(comps: &[ModComp]) -> f64 {
 }
 
 // ----------------------------------------------------------------------
-// Bessel functions J0, J1 (port of besj.c, itself from Numerical
-// Recipes rational approximations).
+// Bessel functions J0, J1, J2.
+//
+// The rational approximations below are the classic ones tabulated in
+// Abramowitz & Stegun, "Handbook of Mathematical Functions", eqs.
+// 9.4.1-9.4.6 (a US Government work, in the public domain; the same
+// coefficients are reproduced in several textbooks). difmap's besj.c
+// uses the same approximations.
 // ----------------------------------------------------------------------
 
 pub fn besj0(x: f64) -> f64 {
@@ -254,8 +259,8 @@ pub fn besj0(x: f64) -> f64 {
     }
 }
 
-/// J2(x) via the upward recurrence for x > 2, and Miller's downward
-/// recurrence below that (port of c_besj2()).
+/// J2(x) via the upward recurrence J2 = 2*J1/x - J0 for x > 2, where it
+/// is stable, and Miller's downward recurrence below that.
 pub fn besj2(x: f64) -> f64 {
     let x = x.abs();
     if x == 0.0 {

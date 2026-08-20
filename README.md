@@ -29,7 +29,10 @@ The numerics are faithful ports of the difmap algorithms
 (uvinvert/uvtrans gridding+FFT, Högbom mapclean, mapres restore,
 modvis models, slfcal self-calibration, modfit/lmfit model fitting).
 
-## Install (development)
+## Install
+
+Building needs a Rust toolchain (https://rustup.rs); using difmapy does
+not.
 
 ```sh
 pip install maturin
@@ -37,6 +40,10 @@ maturin develop --release          # builds the Rust core into your env
 pip install ".[plot]"              # pyqtgraph + PySide6 for plots
 pip install ".[ms]"                # casatools for Measurement Sets
 ```
+
+See `INSTALL.md` for building redistributable wheels and for publishing
+to PyPI - and read `NOTICE.md` first: difmapy is a close port of Difmap,
+whose licence terms must be settled before any public release.
 
 ## Usage
 

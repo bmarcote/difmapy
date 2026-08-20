@@ -6,21 +6,53 @@ build-backend = "maturin"
 name = "difmapy"
 version = "0.1.0"
 description = "Modern in-memory reimplementation of Difmap for VLBI imaging and self-calibration"
+readme = "README.md"
 requires-python = ">=3.11"
+authors = [
+    { name = "Benito Marcote", email = "marcote@jive.eu" },
+]
+keywords = ["VLBI", "radio astronomy", "interferometry", "imaging", "difmap"]
+# NOTE: the licence is deliberately not declared yet - difmapy is a close
+# port of Difmap (Caltech), whose terms forbid redistribution in modified
+# form without the author's permission. See NOTICE.md and settle this
+# before any public release, then add e.g.
+#   license = "MIT"
+#   license-files = ["LICENSE", "NOTICE.md"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
 dependencies = [
     "numpy>=1.26",
     "astropy>=6.0",
 ]
 
 [project.optional-dependencies]
+# Measurement Set support. casatools ships wheels only for some
+# platforms/Python versions, which is why it is not a hard dependency.
 ms = ["casatools"]
+# Interactive plots. PySide6 is LGPL, hence optional.
 plot = ["pyqtgraph>=0.13", "PySide6"]
+dev = ["pytest>=7", "maturin>=1.7"]
+
+[project.urls]
+Homepage = "https://github.com/bmarcote/difmapy"
+Repository = "https://github.com/bmarcote/difmapy"
+Issues = "https://github.com/bmarcote/difmapy/issues"
 
 [tool.maturin]
 manifest-path = "crates/difmap-py/Cargo.toml"
 python-source = "python"
 module-name = "difmapy._core"
 features = ["pyo3/extension-module"]
+# Keep the wheel small: the reference difmap sources and test data are
+# not part of the distribution.
+exclude = ["difmap-master/**", "tests/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -5,7 +5,10 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+# See NOTICE.md: the licence is unsettled until the Difmap copyright
+# holder has been consulted, so nothing is published to crates.io.
+publish = false
+repository = "https://github.com/bmarcote/difmapy"
 
 [profile.release]
 lto = "thin"
