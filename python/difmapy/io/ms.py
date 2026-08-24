@@ -243,12 +243,18 @@ def load_ms(path, field=None, data_column="DATA", wtscale=1.0):
         ref_mjd,
         flag=np.ascontiguousarray(flag),
     )
-    # Provenance needed to write the FLAG column back (save_flags).
+    # Provenance needed to write the FLAG column back (save_flags) and to
+    # export CASA calibration tables (savecaltable).
     core._ms_origin = {
         "path": path,
         "data_column": data_column,
         "ms_row": ms_row,
         "if_nchan": list(if_nchan),
+        "field_id": int(field_id),
+        # SPECTRAL_WINDOW_ID of each difmapy IF, in IF order.
+        "spw_ids": [int(dd_spw[d]) for d in used_dd],
+        # Antenna table row of each difmapy antenna entry.
+        "ant_ids": [int(k) % nant_tab for k in range(len(ant_names))],
     }
     return core
 

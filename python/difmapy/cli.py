@@ -23,6 +23,7 @@ import sys
 COMMANDS = (
     # selection and data
     "select", "header", "flag", "unflag", "save_flags", "uvaver",
+    "savecaltable", "gain_snapshot",
     # imaging setup
     "mapsize", "uvweight", "uvtaper", "uvrange", "uvzero",
     # imaging
@@ -162,6 +163,7 @@ def banner(obs) -> str:
         lines.append(f"Loaded {obs.source}: {obs._core.nrow} rows, "
                      f"{obs.nif} IFs{sel}. The observation is 'obs'.")
     lines.append("Commands: " + ", ".join(COMMANDS[:14]) + ", ...")
+    lines.append("Values live on obs (obs.model_flux, obs.dmap, obs.windows, ...)")
     lines.append("Help: obs? / clean? / difmapy.Observation?   Quit: exit")
     return "\n".join(lines)
 

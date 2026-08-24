@@ -712,6 +712,54 @@ class Observation:
         c = self._core
         return c.nflagged / (c.nrow * c.nctotal * c.npol)
 
+    def gain_snapshot(self):
+        """A copy of the current gain table, for use as `savecaltable`'s
+        `since=` argument so that later calibration can be exported as a
+        separate, incremental table."""
+        amp, phs, _ = (np.asarray(x) for x in self._core.gains())
+        nt, nif, nant = self._core.ntimes, self.nif, len(self.antennas)
+        return {
+            "amp": amp.reshape(nt, nif, nant).astype(np.float64).copy(),
+            "phs": phs.reshape(nt, nif, nant).astype(np.float64).copy(),
+            "used": np.asarray(self._core.gains_used()).reshape(
+                nt, nif, nant).copy(),
+        }
+
+    def savecaltable(self, path, ms=None, spw_ids=None,
+                     flag_uncalibrated=False, overwrite=True, quiet=False,
+                     since=None):
+        """Export the accumulated antenna gains as a CASA calibration
+        table, applicable with CASA's `applycal`.
+
+        The table is a snapshot of every correction applied so far (the
+        gains accumulate over `selfcal`/`gscale` calls), holding the
+        reciprocal of difmapy's corrections so that CASA's
+        ``CORRECTED_DATA = DATA / (G_p conj(G_q))`` reproduces what
+        difmapy shows.
+
+        `ms` defaults to the Measurement Set the data came from and is
+        required for UVFITS input; antennas are matched by name, so a
+        different but compatible MS may be given. Baseline corrections
+        (`resoff`) and phase-centre `shift`s cannot be expressed in such
+        a table and are reported instead of being dropped silently.
+
+        Pass `since=obs.gain_snapshot()` (taken earlier) to write only
+        the calibration accumulated since then, giving one table per
+        self-cal round in the CASA style; applying the chain together is
+        equivalent to applying one cumulative table.
+        """
+        from difmapy.io.caltable import save_caltable
+
+        info = save_caltable(self, path, ms=ms, spw_ids=spw_ids,
+                             flag_uncalibrated=flag_uncalibrated,
+                             overwrite=overwrite, since=since)
+        if not quiet:
+            print(f"Wrote {info['path']}: {info['nrows']} solutions "
+                  f"({info['nflagged']} flagged)")
+            for w in info["warnings"]:
+                print(f"  warning: {w}")
+        return info
+
     def save_flags(self, path=None, flag_row=True):
         """Write the FLAG column back to the source Measurement Set.
 

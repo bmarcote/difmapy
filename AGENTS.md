@@ -71,6 +71,29 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
 - Weighting defaults are difmap's, but the map-area, flag-storage and
   write-path differences are listed in the README.
 
+## CASA calibration tables
+
+`python/difmapy/io/caltable.py` writes a NewCalTable ("G Jones") from
+the accumulated gains. Hard-won details, all of them load-bearing:
+
+- CASA identifies a caltable by the table **info** (`type='Calibration'`,
+  `subType='G Jones'`), not by keywords. Without it applycal reports
+  `type found = ""`.
+- The conformance check also requires `QuantumUnits=['s']` on TIME and
+  INTERVAL, and TIME carries `MEASINFO` (UTC epoch).
+- `ANTENNA2 = -1` marks an antenna-based table. `CPARAM` etc. are
+  `[ncorr, nchan, nrow]`; `WEIGHT` is left unwritten, as in CASA's own
+  tables.
+- Subtables (ANTENNA/FIELD/OBSERVATION/SPECTRAL_WINDOW/HISTORY) are deep
+  copies of the MS's.
+- **Convention**: difmapy multiplies data by corrections, CASA divides by
+  gains, so `CPARAM = 1/(amp·exp(i·phs))`. The test suite verifies this
+  by running CASA's applycal and comparing CORRECTED_DATA with
+  difmapy's own corrected cube - do not "simplify" the reciprocal away.
+- When comparing against CASA output, exclude flagged samples: this
+  file has flagged junk at |V| ~ 2000 where float32 rounding dwarfs
+  physical tolerances.
+
 ## Known behaviour worth remembering
 
 - **Only the inner quarter of a map is meaningful.** Outside it the

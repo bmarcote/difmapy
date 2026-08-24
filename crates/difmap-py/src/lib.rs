@@ -1061,6 +1061,18 @@ impl CoreObservation {
         PyArray1::from_slice(py, &self.ob.times)
     }
 
+    /// True where a self-cal solution was actually applied, in the same
+    /// [ntimes, nif, nant] order as `gains()` (used when exporting
+    /// calibration tables to tell solved from untouched gains).
+    fn gains_used<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        PyArray1::from_vec(py, self.ob.gains.used.clone())
+    }
+
+    /// Integration index of each row, `[nrow]`.
+    fn time_index<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u32>> {
+        PyArray1::from_slice(py, &self.ob.time_idx)
+    }
+
     /// Gain table (amp[nt, nif, nant], phs, bad) copies.
     fn gains<'py>(
         &self,

@@ -156,6 +156,58 @@ image reproduces what difmap would give. Use `obs.uvweight(0, -1)` for
 natural weighting that uses the data weights - it roughly doubles the
 beam size on typical VLBI data.
 
+### Exporting calibration to CASA
+
+difmapy never rewrites an MS's visibilities: `DATA`/`CORRECTED_DATA` are
+only ever read, corrections live in a separate gain table in memory, and
+the only column written back is `FLAG` (see `save_flags`). That is the
+same separation CASA makes, so the gains can be handed over as a
+calibration table:
+
+```python
+obs.selfcal(phase=True)
+obs.selfcal(amp=True, phase=True, solint=30)
+obs.savecaltable("mysource.G")            # CASA "G Jones" table
+```
+
+```python
+# in CASA, on the same or another MS with the same stations:
+applycal(vis='other.ms', gaintable=['mysource.G'], interp=['nearest'])
+```
+
+The table is a snapshot of everything accumulated so far. To keep one
+table per self-cal round, in the usual CASA style, mark a point and
+export the increment - applying the chain is equivalent to applying the
+cumulative table:
+
+```python
+mark = obs.gain_snapshot()
+obs.selfcal(amp=True, phase=True)
+obs.savecaltable("round2.G", since=mark)
+# applycal(..., gaintable=['round1.G', 'round2.G'])
+```
+
+difmapy stores the *correction* it applies to the data
+(`V_corr = V·c_p·conj(c_q)`) whereas CASA divides by antenna *gains*
+(`CORRECTED = DATA/(G_p·conj(G_q))`), so the exported table holds
+`G = 1/c`. This is verified against CASA in the test suite: `applycal`
+reproduces difmapy's visibilities to float32 precision.
+
+Notes and limits:
+
+* an MS is needed for the antenna/spw/field metadata a caltable refers
+  to; it defaults to the one loaded, and `ms=` accepts another. Antennas
+  are matched by **name**, so gains derived from an averaged dataset can
+  be applied to the full-resolution MS.
+* the gains are polarization-independent (they are solved on the
+  total-intensity stream) and are written to both parallel hands.
+* `resoff` baseline corrections and `shift` cannot be expressed in a
+  G table; `savecaltable` reports them rather than dropping them
+  silently. Use `wobs()` to write data with everything applied.
+* exporting from UVFITS-loaded data works with `ms=`, but timestamps in
+  a UVFITS file can differ from the MS's by a fraction of an
+  integration, so prefer exporting from the MS-loaded observation.
+
 ### What gets written out
 
 `wobs` applies the antenna gains and baseline corrections to the data
