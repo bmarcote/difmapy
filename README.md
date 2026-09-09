@@ -30,6 +30,11 @@ Differences from the original by design:
 * native **multi-IF / multi-channel** handling: all subbands (IFs /
   SPWs) are gridded together (multi-frequency synthesis), and each may
   have a different number of channels
+* **loading selects total intensity**, since that is how nearly every
+  session starts (`stokes=None` to skip it)
+* **Briggs robust weighting** as a single number from -2 to +2, in
+  addition to difmap's own `binwid`/`errpow` scheme
+* **map sizes need only be multiples of four**, not powers of two
 * Python API instead of the sphere command language; interactive plots
   use pyqtgraph instead of PGPLOT
 
@@ -89,35 +94,60 @@ commands. `--batch` makes the same commands usable from shell scripts.
 ```python
 import difmapy
 
-obs = difmapy.load("mysource.uvfits")  # or a .ms directory
-print(obs.header())
+obs = difmapy.load("mysource.uvfits")  # or a .ms directory; difmapy.observe
+print(obs.header())                    # is the same function
+print(obs.pols)                        # ['RR', 'LL', 'RL', 'LR']
 
-obs.select("I")                        # Stokes I, all channels
-# obs.select("I", channels=[(0, 31)])  # or channel ranges (global axis)
+# Loading already selects total intensity; select() changes it at will:
+# obs.select("I", channels=[(0, 31)])  # channel ranges (global axis)
 # obs.select("RR") / "LL" / "Q" / "U" / "V" / "XX" ... also available
+# difmapy.load(path, stokes=None)      # load without selecting anything
 
-obs.mapsize(2048, 0.5)                 # pixels (power of 2), mas/pixel
-obs.uvweight(0, -1)                    # natural weighting w/ data weights
+obs.mapsize(2048, 0.5)                 # pixels (multiple of 4), mas/pixel
+# obs.auto_mapsize()                   # 4096 pixels of resolution/10
+obs.uvweight(robust=0)                 # Briggs: -2 uniform ... +2 natural
                                        # (default is difmap's uniform 2, 0)
 obs.startmod(flux=1.0)                 # phase selfcal to a point source
 
 for _ in range(4):                     # the classic difmap loop
-    obs.clean(200, 0.03)
+    obs.clean(200, 0.03)               # prints and returns a summary dict
     obs.selfcal(phase=True)
+obs.gscale()                           # amplitude scale per station
 obs.selfcal(amp=True, phase=True, solint=30)
 obs.clean(400, 0.02)
 
-obs.mapplot()                          # interactive: double-click adds
-                                       # CLEAN windows, c=clean, i=invert
-obs.radplot()                          # amp vs uv-radius; Shift+drag to flag
+obs.mapplot()                          # interactive; also spelled maplot()
+obs.radplot()                          # amp+phase vs uv-radius, model in red
+obs.vplot()                            # amp+phase vs time, 3 baselines/page
 obs.cpplot()                           # closure phases vs the model
 obs.corplot()                          # self-cal gain solutions
 
+info = obs.mapinfo()                   # beam, peak, model, residual noise
 m = obs.restore()                      # restored map (numpy array)
 obs.wmap("clean.fits")                 # FITS output with WCS + beam
 obs.save("mysession")                  # .uvf + .mod + .win + parameters
 # later: obs = difmapy.Observation.get("mysession")
+
+obs.clearmodel()                       # drop every component and start over
 ```
+
+`clean`, `modelfit` and `gscale` print a short report and return it as a
+dict, so a scripted run can keep the numbers:
+
+```python
+res = obs.clean(200, 0.03)
+res["ncomp"], res["cleaned_flux"], res["total_flux"], res["residual_rms"]
+
+fit = obs.modelfit()          # niter=-1: iterate until it converges
+fit["rchisq"], fit["converged"], fit["components"], fit["errors"]
+
+g = obs.gscale()              # {"gains": {"EF": 1.03, ...}, ...}
+g["gains"]["EF"], g["gains_per_if"]["EF"]
+```
+
+With no model at all, `modelfit` seeds itself with a circular Gaussian of
+zero width at the peak of the residual map, so `obs.modelfit()` on a
+freshly loaded dataset already does something sensible.
 
 ### Flagging
 
@@ -134,8 +164,15 @@ obs.save_flags()        # write FLAG (+FLAG_ROW) back into the source MS
 
 Interactive flagging (`radplot`, `uvplot`, `vplot`): **Shift+drag**
 sweeps a box to flag, **Ctrl+drag** unflags, `f`/`u` act on the nearest
-point, `x` toggles display of flagged points. Plain drag/wheel keep
-pyqtgraph's pan/zoom.
+point, `z`/`r` undo and redo the last edit, and `x` shows or hides the
+flagged points (hidden by default). Plain drag/wheel keep pyqtgraph's
+pan/zoom, and `h` shows the full key legend of whichever plot is in
+front. In `vplot` the space bar switches flagging between the displayed
+baseline and every baseline of its first antenna.
+
+Undo is exact: each edit stores the affected rows of the FLAG column
+before and after, so `z` restores what was there even where the edit
+overlapped data that was already flagged.
 
 Data that are absent from the file (zero weight) count as permanently
 flagged and cannot be unflagged, matching difmap's deleted-data flag.
@@ -155,6 +192,16 @@ and no amplitude-error weighting (`invdef` in difmap.c), so a first
 image reproduces what difmap would give. Use `obs.uvweight(0, -1)` for
 natural weighting that uses the data weights - it roughly doubles the
 beam size on typical VLBI data.
+
+**Briggs robust weighting** is available as a single number,
+`obs.uvweight(robust=R)` with R from -2 (uniform, sharpest beam) to +2
+(natural, lowest noise); it supersedes `binwid`/`errpow` while set, and
+`mapplot(uvweight=R)` is the same knob. The two ends reproduce difmap's
+own uniform and natural weighting.
+
+**Map dimensions no longer have to be powers of two** - any multiple of
+four works, since the FFTs handle arbitrary lengths - but powers of two
+(or products of small primes) are still much the fastest.
 
 ### Exporting calibration to CASA
 
@@ -221,9 +268,15 @@ session round-trips exactly.
 ```python
 obs.addcmp(1.5, 2.0, -1.0, type="gauss", major=3.0, ratio=0.7, phi=30,
            free=["flux", "pos", "shape"])
-res = obs.modelfit(niter=50)
-print(res["rchisq"], obs.model, res["errors"])
+res = obs.modelfit()            # niter=-1: run until it converges
+print(res["rchisq"], res["converged"], obs.model, res["errors"])
 ```
+
+`niter=-1` (the default) iterates until successive Levenberg-Marquardt
+steps stop improving the reduced chi-squared; pass a positive `niter`
+for a fixed number of steps. With no tentative model, `seed_model()` is
+called first: a circular Gaussian of zero width carrying the peak flux,
+placed at the peak of the residual map.
 
 Like difmap's, this is a local optimizer: it converges from a sensible
 starting guess but can settle in a local minimum from a far-off one, so
@@ -231,12 +284,41 @@ start from something like the map peak. The reported `errors` are
 first-order estimates from the inverse Hessian and ignore parameter
 covariances.
 
+### The interactive map display
+
+`obs.mapplot()` (or `maplot()`) takes `mapsize=`, `cellsize=` and
+`uvweight=` (a Briggs robustness), which override the current imaging
+setup. With none given and `mapsize()` never called, it images 4096
+pixels of a tenth of the estimated resolution (lambda / B_max), and it
+prints the beam it is showing.
+
+| key | action |
+| --- | --- |
+| double-click | add a CLEAN window (drag to move/resize) |
+| `d` | delete the window under the cursor |
+| `c` / `i` | CLEAN / re-invert |
+| `1` `2` `3` `4` | residual map, dirty beam, restored map, model |
+| `n` | add a Gaussian: click the centre, then each axis |
+| `d` (while adding) | point source, then circular Gaussian |
+| `M` | fit the model to the UV data |
+| `k` / `C` | keep the tentative model / clear every component |
+| `x` | close and report the image properties |
+| `h` / `q` | key legend / close |
+
+Beside the colour bar is a histogram of the displayed pixel values with
+a Gaussian fitted to the residual noise, which shows the noise
+distribution and any emission standing above it at a glance. Closing
+with `x` prints (and leaves in `plot.result`) the `mapinfo()` dict: beam,
+peak position and flux, model components, total flux, residual rms.
+
 ### Other commands
 
 `shift`/`unshift`, `resoff`/`clroff`, `uvaver`, `uvtaper`, `uvrange`,
-`uvzero`, `gscale`, `uncalib`, `selfant`, `keep`, `clrmod`,
-`wmodel`/`rmodel`, `wwins`/`rwins`, `wobs`, `wdmap`, `wbeam`,
-`imstat`, `spectrum`, `closure_phases`, `specplot`, `tplot`.
+`uvzero`, `gscale`, `station_gains`, `uncalib`, `selfant`, `keep`,
+`clrmod`, `clearmodel`, `auto_mapsize`, `estimated_resolution`,
+`mapinfo`, `noise_stats`, `wmodel`/`rmodel`, `wwins`/`rwins`, `wobs`,
+`wdmap`, `wbeam`, `imstat`, `spectrum`, `closure_phases`, `specplot`,
+`tplot`.
 
 ## Layout
 

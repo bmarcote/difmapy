@@ -4,7 +4,7 @@ Requires the ``plot`` extra: ``pip install difmapy[plot]``.
 """
 
 from difmapy.plots.diagnostics import corplot, cpplot, specplot, tplot
-from difmapy.plots.mapplot import mapplot
+from difmapy.plots.mapplot import maplot, mapplot
 from difmapy.plots.points import projplot, radplot, uvplot, vplot
 
 __all__ = [
@@ -13,6 +13,7 @@ __all__ = [
     "uvplot",
     "vplot",
     "mapplot",
+    "maplot",
     "cpplot",
     "tplot",
     "corplot",

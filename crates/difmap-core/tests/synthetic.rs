@@ -416,3 +416,78 @@ fn calibration_roundtrip() {
         assert_eq!(stream.vis[row * nif].re, stream.raw[row * nif].re);
     }
 }
+
+/// Briggs robust weighting must interpolate between difmap's own
+/// uniform and natural weighting, and must not need a power-of-two map.
+#[test]
+fn robust_weighting_spans_uniform_to_natural() {
+    let cell = 0.5 * MAS;
+    let mut ob = synthetic_obs(2.5, 8.0 * cell, -5.0 * cell);
+    ob.stream = Some(Stream::select(&ob, Stokes::I, &[]).expect("select I"));
+    // Not a power of two: any multiple of four is a valid map size.
+    let geom = MapGeom {
+        nx: 320,
+        ny: 320,
+        xinc: cell,
+        yinc: cell,
+    };
+
+    let beam_of = |pars: &InvertPars| -> (f64, f64) {
+        let mb = invert(&ob, geom, pars).expect("invert");
+        (mb.e_bmaj, mb.noise)
+    };
+
+    // difmap's own two extremes.
+    let (uniform, uniform_noise) = beam_of(&InvertPars {
+        binwid: 2.0,
+        ..Default::default()
+    });
+    let (natural, natural_noise) = beam_of(&InvertPars {
+        errpow: -2.0,
+        ..Default::default()
+    });
+    assert!(uniform < natural, "uniform beam {uniform} !< natural {natural}");
+    assert!(natural_noise < uniform_noise);
+
+    let mut prev = 0.0;
+    for (i, r) in [-2.0f32, -1.0, 0.0, 1.0, 2.0].iter().enumerate() {
+        let (bmaj, _) = beam_of(&InvertPars {
+            binwid: 2.0,
+            robust: Some(*r),
+            ..Default::default()
+        });
+        assert!(bmaj > prev, "beam must grow with robustness (R = {r})");
+        prev = bmaj;
+        if i == 0 {
+            // R = -2 is uniform to within the binning approximation.
+            assert!((bmaj - uniform).abs() / uniform < 0.2, "R=-2: {bmaj} vs {uniform}");
+        }
+        if i == 4 {
+            assert!((bmaj - natural).abs() / natural < 0.02, "R=2: {bmaj} vs {natural}");
+        }
+    }
+}
+
+/// Map dimensions must be multiples of four, but need not be powers of
+/// two any more.
+#[test]
+fn map_dimensions_need_only_be_multiples_of_four() {
+    let cell = 0.5 * MAS;
+    let mut ob = synthetic_obs(2.5, 0.0, 0.0);
+    ob.stream = Some(Stream::select(&ob, Stokes::I, &[]).expect("select I"));
+    let ok = MapGeom {
+        nx: 132,
+        ny: 260,
+        xinc: cell,
+        yinc: cell,
+    };
+    let mb = invert(&ob, ok, &InvertPars::default()).expect("132x260 must invert");
+    assert_eq!(mb.map.len(), 132 * 260);
+    let bad = MapGeom {
+        nx: 130,
+        ny: 260,
+        xinc: cell,
+        yinc: cell,
+    };
+    assert!(invert(&ob, bad, &InvertPars::default()).is_err());
+}

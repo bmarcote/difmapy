@@ -200,14 +200,69 @@ def test_fit_reduces_residuals_on_real_data():
 
 def test_modelfit_errors(template):
     o = make_obs(template, gauss=TRUTH)
-    with pytest.raises(RuntimeError, match="no tentative model"):
-        o.modelfit()
+    o.mapsize(256, 0.5)
     o.addcmp(1.0, 0.0, 0.0)  # no free parameters
-    with pytest.raises(ValueError, match="no free parameters"):
+    with pytest.raises(ValueError, match="free parameter"):
         o.modelfit()
     with pytest.raises(ValueError, match="unknown free parameter"):
         o.modelfit(free=["nonsense"])
     # uvrange restricts the data used.
-    all_vis = o.modelfit(niter=1, free=["flux"])["nvis"]
-    cut = o.modelfit(niter=1, free=["flux"], uvmin=2e7, uvmax=1e9)["nvis"]
+    all_vis = o.modelfit(niter=1, free=["flux"], quiet=True)["nvis"]
+    cut = o.modelfit(niter=1, free=["flux"], uvmin=2e7, uvmax=1e9,
+                     quiet=True)["nvis"]
     assert 0 < cut < all_vis
+
+
+def test_modelfit_seeds_itself_from_the_map(template, capsys):
+    """With no model at all, modelfit starts from a circular Gaussian of
+    zero width at the peak of the residual map, and finds the source."""
+    o = make_obs(template, point=POINT)
+    o.mapsize(512, 0.5)
+    (x, y), peak = o.peak_offset()
+    res = o.modelfit()
+    assert res["ncomp"] == 1
+    c = res["components"][0]
+    assert c["type"] == "gauss"
+    assert c["flux"] == pytest.approx(POINT["flux"], rel=0.05)
+    assert c["x"] == pytest.approx(POINT["x"], abs=0.05)
+    assert c["y"] == pytest.approx(POINT["y"], abs=0.05)
+    # An unresolved source stays (nearly) unresolved.
+    assert c["major"] < 0.5
+    out = capsys.readouterr().out
+    assert "no model given" in out
+    assert "reduced chi-squared" in out
+
+
+def test_modelfit_default_runs_to_convergence(template):
+    """niter=-1 (the default) iterates until the fit stops improving,
+    and gets at least as close as a long fixed-length run."""
+    def fit(niter):
+        o = make_obs(template, gauss=TRUTH)
+        o.addcmp(1.0, 0.0, 0.0, type="gauss", major=1.0,
+                 free=["flux", "pos", "major"])
+        return o.modelfit(niter=niter, quiet=True)
+
+    auto = fit(-1)
+    assert auto["converged"] is True
+    assert 0 < auto["niter"] <= 500
+    short = fit(2)
+    assert short["converged"] is False
+    assert short["niter"] == 2
+    assert auto["rchisq"] < short["rchisq"]
+
+
+def test_clearmodel_returns_to_the_dirty_map(template):
+    """clearmodel() drops every component so imaging starts over."""
+    o = make_obs(template, point=POINT)
+    o.mapsize(256, 0.5)
+    o.invert()
+    dirty_peak = o.imstat()["max"]
+    o.clean(100, 0.1, quiet=True)
+    o.keep()
+    assert o.model_flux > 0
+    assert o.imstat()["max"] < dirty_peak  # emission was subtracted
+
+    o.clearmodel()
+    assert o.model == []
+    assert o.model_flux == 0.0
+    assert o.imstat()["max"] == pytest.approx(dirty_peak, rel=1e-5)

@@ -68,6 +68,12 @@ pub struct InvertPars {
     pub errpow: f32,
     /// Uniform-weighting bin width in UV grid pixels; <= 0 = natural.
     pub binwid: f32,
+    /// Briggs robustness. When set, it supersedes `binwid`/`errpow`:
+    /// weights become `w_i / (1 + W_k f^2)` with `W_k` the summed
+    /// natural weight of the point's UV bin and
+    /// `f^2 = (5*10^-R)^2 / (sum_k W_k^2 / sum_i w_i)`, so that
+    /// R = -2 is (nearly) uniform and R = +2 (nearly) natural.
+    pub robust: Option<f32>,
     /// Optional zero-spacing flux (uvzero): amplitude, model amp, weight.
     pub uvzero_amp: f32,
     pub uvzero_modamp: f32,
@@ -84,6 +90,7 @@ impl Default for InvertPars {
             dorad: false,
             errpow: 0.0,
             binwid: 0.0,
+            robust: None,
             uvzero_amp: 0.0,
             uvzero_modamp: 0.0,
             uvzero_wt: 0.0,
@@ -109,7 +116,7 @@ pub struct MapBeam {
 
 #[derive(thiserror::Error, Debug)]
 pub enum GridError {
-    #[error("map dimensions must be powers of 2 >= 32 (got {0}x{1})")]
+    #[error("map dimensions must be multiples of 4 and >= 32 (got {0}x{1})")]
     BadDims(usize, usize),
     #[error("invalid cell size")]
     BadCell,
@@ -184,8 +191,13 @@ impl Gcf {
 }
 
 /// Uniform-weighting bin array (port of uvbin()/getuvbin()).
+///
+/// `bins` holds difmap's point counts (uniform weighting); `sums` holds
+/// the summed natural weights of each bin, which is what Briggs robust
+/// weighting needs. Only the one in use is filled.
 struct UVbin {
     bins: Vec<i32>,
+    sums: Vec<f32>,
     nu: i64,
     nbin: i64,
     utopix: f64,
@@ -193,7 +205,7 @@ struct UVbin {
 }
 
 impl UVbin {
-    fn cell(&mut self, mut uu: f64, mut vv: f64) -> Option<&mut i32> {
+    fn index(&self, mut uu: f64, mut vv: f64) -> Option<usize> {
         if uu >= 0.0 {
             uu = -uu;
             vv = -vv;
@@ -202,15 +214,25 @@ impl UVbin {
         let binpix = self.nu * (nv / 2 + (vv * self.vtopix + 0.5).floor() as i64)
             + (uu * self.utopix + 0.5).floor() as i64;
         if binpix >= 0 && binpix < self.nbin {
-            Some(&mut self.bins[binpix as usize])
+            Some(binpix as usize)
         } else {
             None
         }
+    }
+    fn cell(&mut self, uu: f64, vv: f64) -> Option<&mut i32> {
+        self.index(uu, vv).map(|i| &mut self.bins[i])
     }
     fn count(&mut self, uu: f64, vv: f64) -> f32 {
         match self.cell(uu, vv) {
             Some(&mut c) if c > 0 => c as f32,
             _ => 1.0,
+        }
+    }
+    /// Summed natural weight of a point's bin (Briggs `W_k`).
+    fn wsum(&self, uu: f64, vv: f64) -> f32 {
+        match self.index(uu, vv) {
+            Some(i) => self.sums[i],
+            None => 0.0,
         }
     }
 }
@@ -229,7 +251,11 @@ struct UVPoint {
 /// effective frequency (multi-frequency synthesis).
 pub fn invert(ob: &Observation, geom: MapGeom, pars: &InvertPars) -> Result<MapBeam, GridError> {
     let stream = ob.stream.as_ref().ok_or(GridError::NoStream)?;
-    if !geom.nx.is_power_of_two() || !geom.ny.is_power_of_two() || geom.nx < 32 || geom.ny < 32 {
+    // The FFTs handle any length; the map only has to split evenly into
+    // the half-plane grid (nx/2+1) and the bin/inner-quarter arrays
+    // (nx/4, ny/2). Powers of two (or products of small primes) are
+    // still much the fastest, but are no longer required.
+    if geom.nx % 4 != 0 || geom.ny % 4 != 0 || geom.nx < 32 || geom.ny < 32 {
         return Err(GridError::BadDims(geom.nx, geom.ny));
     }
     if !(geom.xinc > 0.0) || !(geom.yinc > 0.0) {
@@ -293,15 +319,20 @@ pub fn invert(ob: &Observation, geom: MapGeom, pars: &InvertPars) -> Result<MapB
         return Err(GridError::NoData);
     }
 
-    // Uniform-weighting bin counts (uvbin()).
-    let dounif = pars.binwid > 0.0;
-    let binwid = if dounif { pars.binwid.max(1.0) as f64 } else { 0.0 };
+    // UV binning: difmap's point counts for uniform weighting, or the
+    // summed natural weights for Briggs robust weighting.
+    let dorobust = pars.robust.is_some();
+    let dounif = !dorobust && pars.binwid > 0.0;
+    let dobin = dorobust || dounif;
+    let binwid = if dobin { pars.binwid.max(1.0) as f64 } else { 0.0 };
+    let nbin = (nx / 4) * (ny / 2);
     let mut bin = UVbin {
-        bins: vec![0; (nx / 4) * (ny / 2)],
+        bins: if dounif { vec![0; nbin] } else { Vec::new() },
+        sums: if dorobust { vec![0.0; nbin] } else { Vec::new() },
         nu: (nx / 4) as i64,
-        nbin: ((nx / 4) * (ny / 2)) as i64,
-        utopix: if dounif { 1.0 / uinc / binwid } else { 0.0 },
-        vtopix: if dounif { 1.0 / vinc / binwid } else { 0.0 },
+        nbin: nbin as i64,
+        utopix: if dobin { 1.0 / uinc / binwid } else { 0.0 },
+        vtopix: if dobin { 1.0 / vinc / binwid } else { 0.0 },
     };
     if dounif {
         for p in &pts {
@@ -315,9 +346,32 @@ pub fn invert(ob: &Observation, geom: MapGeom, pars: &InvertPars) -> Result<MapB
                 }
             }
         }
+        if let Some(c) = bin.cell(0.0, 0.0) {
+            *c += 1; // zero-spacing / natural weighting entry
+        }
     }
-    if let Some(c) = bin.cell(0.0, 0.0) {
-        *c += 1; // zero-spacing / natural weighting entry
+
+    // Briggs robust weighting factor f^2 (Briggs 1995, eq. 3.3), with
+    // the same binning as uniform weighting so that the two are
+    // directly comparable.
+    let mut f2 = 0.0f64;
+    if dorobust {
+        for p in &pts {
+            if let Some(i) = bin.index(p.uu, p.vv) {
+                bin.sums[i] += p.wt.abs();
+            }
+            if fnint(p.uu.abs() * bin.utopix) == 0 {
+                if let Some(i) = bin.index(p.uu, -p.vv) {
+                    bin.sums[i] += p.wt.abs();
+                }
+            }
+        }
+        let wsum: f64 = pts.iter().map(|p| p.wt.abs() as f64).sum();
+        let w2sum: f64 = bin.sums.iter().map(|&s| (s as f64) * (s as f64)).sum();
+        if w2sum > 0.0 && wsum > 0.0 {
+            let r = pars.robust.unwrap().clamp(-2.0, 2.0) as f64;
+            f2 = (5.0 * 10f64.powf(-r)).powi(2) / (w2sum / wsum);
+        }
     }
 
     // Grid map and beam simultaneously (same weights and kernel).
@@ -379,19 +433,24 @@ pub fn invert(ob: &Observation, geom: MapGeom, pars: &InvertPars) -> Result<MapB
         if pars.dorad {
             weight *= uvrad as f32;
         }
-        if pars.errpow < -0.001 {
-            let power = -pars.errpow / 2.0;
-            let wt = p.wt.abs();
-            if power == 1.0 {
-                weight *= wt;
-            } else if power == 0.5 {
-                weight *= wt.sqrt();
-            } else {
-                weight *= wt.powf(power);
+        if dorobust {
+            // Briggs: the data weight damped by the local UV density.
+            weight *= p.wt.abs() / (1.0 + (bin.wsum(p.uu, p.vv) as f64 * f2) as f32);
+        } else {
+            if pars.errpow < -0.001 {
+                let power = -pars.errpow / 2.0;
+                let wt = p.wt.abs();
+                if power == 1.0 {
+                    weight *= wt;
+                } else if power == 0.5 {
+                    weight *= wt.sqrt();
+                } else {
+                    weight *= wt.powf(power);
+                }
             }
-        }
-        if dounif {
-            weight /= bin.count(p.uu, p.vv);
+            if dounif {
+                weight /= bin.count(p.uu, p.vv);
+            }
         }
         // Beam-size and noise estimation sums.
         {
@@ -409,11 +468,15 @@ pub fn invert(ob: &Observation, geom: MapGeom, pars: &InvertPars) -> Result<MapB
     // Optional zero-spacing flux (ignored with radial weighting).
     if pars.uvzero_wt > 0.0 && !pars.dorad {
         let mut weight = 1.0f32;
-        if pars.errpow < -0.001 {
-            weight *= pars.uvzero_wt.powf(-pars.errpow / 2.0);
-        }
-        if dounif {
-            weight /= bin.count(0.0, 0.0);
+        if dorobust {
+            weight = pars.uvzero_wt / (1.0 + (bin.wsum(0.0, 0.0) as f64 * f2) as f32);
+        } else {
+            if pars.errpow < -0.001 {
+                weight *= pars.uvzero_wt.powf(-pars.errpow / 2.0);
+            }
+            if dounif {
+                weight /= bin.count(0.0, 0.0);
+            }
         }
         let re = pars.uvzero_amp - pars.uvzero_modamp;
         // Note: the zero-spacing flux contributes to the gridding

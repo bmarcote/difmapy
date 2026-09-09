@@ -43,6 +43,17 @@ pub enum FitError {
     Singular,
 }
 
+/// Convergence controls for `niter < 0` ("fit until it converges").
+///
+/// The fit is declared converged once [`NSTALL`] successive improvements
+/// each change the reduced chi-squared by less than [`FTOL`], or once
+/// Levenberg's damping factor exceeds [`MAX_INCFAC`] (no step helps any
+/// more); [`MAX_ITER`] is a safety stop.
+pub const MAX_ITER: usize = 500;
+const FTOL: f64 = 1e-7;
+const NSTALL: usize = 3;
+const MAX_INCFAC: f64 = 1e12;
+
 /// Result of a model fit.
 #[derive(Clone, Debug)]
 pub struct FitResult {
@@ -58,6 +69,11 @@ pub struct FitResult {
     pub nfree: usize,
     /// Iterations that improved the fit.
     pub nbetter: usize,
+    /// Levenberg-Marquardt iterations actually run.
+    pub niter: usize,
+    /// Whether the fit stopped because it converged (rather than
+    /// because it ran out of iterations).
+    pub converged: bool,
     /// 1-sigma uncertainties of the fitted component parameters, in
     /// the same (flux, x, y, major, ratio, phi, spcind) order used by
     /// [`fit_uvmodel`]'s component list; NaN where not fitted.
@@ -528,12 +544,13 @@ fn accumulate(
 /// the current stream (i.e. after subtraction of the established
 /// model). `comps` is updated in place with the best-fit values.
 ///
-/// `niter` is the number of Levenberg-Marquardt iterations; `uvmin`
+/// `niter` is the number of Levenberg-Marquardt iterations; a negative
+/// value iterates until the fit converges (up to [`MAX_ITER`]). `uvmin`
 /// and `uvmax` optionally restrict the UV radius range (wavelengths).
 pub fn fit_uvmodel(
     ob: &Observation,
     comps: &mut [ModComp],
-    niter: usize,
+    niter: i64,
     uvmin: f32,
     uvmax: f32,
 ) -> Result<FitResult, FitError> {
@@ -622,7 +639,16 @@ pub fn fit_uvmodel(
     accumulate(&work, &maps, uvrmax, &data, &mut best)?;
     nbetter += 1;
 
-    for _ in 0..niter {
+    // niter < 0 means "iterate to convergence": stop once successive
+    // improvements in reduced chi-squared are negligible, or once
+    // Levenberg's damping has grown so large that no step can help.
+    let auto = niter < 0;
+    let maxiter = if auto { MAX_ITER } else { niter as usize };
+    let mut nstall = 0usize;
+    let mut converged = false;
+    let mut iter = 0usize;
+    while iter < maxiter {
+        iter += 1;
         // Solve (H + incfac*diag(H)) dp = cgrad for the increments.
         let mut h = best.hessian.clone();
         for (i, row) in h.iter_mut().enumerate() {
@@ -632,6 +658,10 @@ pub fn fit_uvmodel(
         if gj_solve(&mut h, &mut dp).is_err() {
             // Singular: shrink the step and try again.
             incfac *= 10.0;
+            if auto && incfac > MAX_INCFAC {
+                converged = true;
+                break;
+            }
             continue;
         }
         for i in 0..nfree {
@@ -642,17 +672,27 @@ pub fn fit_uvmodel(
         get_free(&work, &maps, uvrmax, &mut trial.pars);
         if accumulate(&work, &maps, uvrmax, &data, &mut trial).is_err() {
             incfac *= 10.0;
+            if auto && incfac > MAX_INCFAC {
+                converged = true;
+                break;
+            }
             continue;
         }
         if trial.rchisq < best.rchisq {
+            let rel = (best.rchisq - trial.rchisq) / best.rchisq.abs().max(f64::MIN_POSITIVE);
             std::mem::swap(&mut best, &mut trial);
             incfac *= 0.5;
             nbetter += 1;
+            nstall = if rel < FTOL { nstall + 1 } else { 0 };
         } else {
             incfac *= 10.0;
         }
         // Always leave the model at the best-fit parameters.
         set_free(&mut work, &maps, uvrmax, &best.pars);
+        if auto && (nstall >= NSTALL || incfac > MAX_INCFAC) {
+            converged = true;
+            break;
+        }
     }
     set_free(&mut work, &maps, uvrmax, &best.pars);
     comps.copy_from_slice(&work);
@@ -721,6 +761,8 @@ pub fn fit_uvmodel(
         nvis: data.len(),
         nfree,
         nbetter,
+        niter: iter,
+        converged,
         errors,
     })
 }

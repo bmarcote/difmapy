@@ -5,34 +5,39 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtWidgets
 
-from difmapy.plots.base import IF_COLORS, ensure_app, run_if_needed
+from difmapy.plots.base import (
+    FLAG_COLOR,
+    PlotWindow,
+    gradient_colors,
+    run_if_needed,
+)
 
 __all__ = ["cpplot", "tplot", "corplot", "specplot"]
 
 RAD2DEG = 180.0 / np.pi
 
 
-class _MultiPanel(QtWidgets.QMainWindow):
+class _MultiPanel(PlotWindow):
     """A page of stacked panels with keyboard paging (n/p)."""
 
     def __init__(self, obs, title, nplot=4):
-        ensure_app()
-        super().__init__()
+        super().__init__(title)
         self.obs = obs
         self.nplot = nplot
         self.page = 0
-        self.setWindowTitle(title)
         self.glw = pg.GraphicsLayoutWidget()
         self.glw.setBackground("w")
         self.setCentralWidget(self.glw)
-        self.statusBar().showMessage("n: next page | p: previous page")
+        self.statusBar().showMessage("n: next page | p: previous page | h: help")
         self.refresh()
 
     @property
     def npages(self) -> int:
         return max(1, int(np.ceil(len(self._items) / self.nplot)))
+
+    def key_help(self):
+        return [("n / p", "next / previous page")]
 
     def keyPressEvent(self, ev):
         key = ev.text().lower()
@@ -73,6 +78,7 @@ class CpPlot(_MultiPanel):
             self._items = sorted(grouped.items())
         self.glw.clear()
         names = core.antenna_names
+        colors = gradient_colors(self.obs.nif)
         lo = self.page * self.nplot
         for row, (tri, series) in enumerate(self._items[lo : lo + self.nplot]):
             p = self.glw.addPlot(row=row, col=0)
@@ -82,7 +88,7 @@ class CpPlot(_MultiPanel):
             p.showGrid(y=True, alpha=0.2)
             for s in series:
                 cif = s["if_index"]
-                col = IF_COLORS[cif % len(IF_COLORS)]
+                col = colors[cif % len(colors)]
                 t = np.asarray(s["time"]) / 3600.0
                 p.addItem(
                     pg.ScatterPlotItem(
@@ -105,38 +111,54 @@ class CpPlot(_MultiPanel):
         )
 
 
-class TPlot(QtWidgets.QMainWindow):
-    """Per-antenna time sampling (difmap tplot)."""
+class TPlot(PlotWindow):
+    """Per-antenna time sampling (difmap tplot).
+
+    One row per antenna, labelled by name, showing where each has
+    unflagged data.
+    """
 
     def __init__(self, obs):
-        ensure_app()
-        super().__init__()
+        super().__init__("difmapy tplot")
         self.obs = obs
-        self.setWindowTitle("difmapy tplot")
         self.glw = pg.GraphicsLayoutWidget()
         self.glw.setBackground("w")
         self.setCentralWidget(self.glw)
         core = obs._core
         samp = np.asarray(core.sampling())  # [ntimes, nant]
         times = np.asarray(core.times()) / 3600.0
-        names = core.antenna_names
-        p = self.glw.addPlot()
+        names = list(core.antenna_names)
+        colors = gradient_colors(len(names), "turbo")
+        self.plot = p = self.glw.addPlot()
         p.setLabel("bottom", "Time (hours)")
         p.setLabel("left", "Antenna")
-        for ia in range(len(names)):
+        p.showGrid(x=True, alpha=0.2)
+        nsamp = []
+        for ia, name in enumerate(names):
             good = samp[:, ia] > 0
+            nsamp.append(int(good.sum()))
             if not good.any():
                 continue
             p.addItem(
                 pg.ScatterPlotItem(
                     times[good], np.full(good.sum(), ia), size=5, symbol="s",
-                    pen=None, brush=pg.mkBrush(*IF_COLORS[ia % len(IF_COLORS)], 200),
+                    pen=None, brush=pg.mkBrush(*colors[ia % len(colors)], 220),
                 )
             )
         ax = p.getAxis("left")
-        ax.setTicks([[(i, n) for i, n in enumerate(names)]])
+        # Label the rows with the station names rather than their index.
+        ax.setTicks([[(i, n) for i, n in enumerate(names)], []])
+        ax.setWidth(max(48, 9 * max((len(n) for n in names), default=4)))
         p.setYRange(-0.5, len(names) - 0.5)
-        self.statusBar().showMessage("unflagged data per antenna vs time")
+        dead = [n for n, c in zip(names, nsamp) if c == 0]
+        self.statusBar().showMessage(
+            "unflagged data per antenna vs time"
+            + (f" | no data: {', '.join(dead)}" if dead else "")
+            + " | h: help"
+        )
+
+    def key_help(self):
+        return [("", "one row per antenna; a mark means unflagged data")]
 
 
 class CorPlot(_MultiPanel):
@@ -165,13 +187,14 @@ class CorPlot(_MultiPanel):
                 if np.any(amp[:, :, ia] != 1.0) or np.any(phs[:, :, ia] != 0.0)
             ] or [(ia, names[ia]) for ia in range(nant)]
         self.glw.clear()
+        colors = gradient_colors(nif)
         lo = self.page * self.nplot
         for row, (ia, name) in enumerate(self._items[lo : lo + self.nplot]):
             p = self.glw.addPlot(row=row, col=0)
             p.setLabel("left", name)
             p.showGrid(y=True, alpha=0.2)
             for cif in range(nif):
-                col = IF_COLORS[cif % len(IF_COLORS)]
+                col = colors[cif % len(colors)]
                 good = ~bad[:, cif, ia]
                 y = (
                     phs[:, cif, ia] * RAD2DEG
@@ -188,7 +211,7 @@ class CorPlot(_MultiPanel):
                     p.addItem(
                         pg.ScatterPlotItem(
                             times[~good], y[~good], size=6, symbol="x",
-                            pen=pg.mkPen(220, 40, 40), brush=None,
+                            pen=pg.mkPen(*FLAG_COLOR), brush=None,
                         )
                     )
             if row == min(self.nplot, len(self._items) - lo) - 1:
@@ -200,14 +223,12 @@ class CorPlot(_MultiPanel):
         )
 
 
-class SpecPlot(QtWidgets.QMainWindow):
+class SpecPlot(PlotWindow):
     """Time-averaged spectrum (difmap specplot)."""
 
     def __init__(self, obs, baseline=None, tmin=None, tmax=None, xaxis="freq"):
-        ensure_app()
-        super().__init__()
+        super().__init__("difmapy specplot")
         self.obs = obs
-        self.setWindowTitle("difmapy specplot")
         self.glw = pg.GraphicsLayoutWidget()
         self.glw.setBackground("w")
         self.setCentralWidget(self.glw)
@@ -224,17 +245,21 @@ class SpecPlot(QtWidgets.QMainWindow):
         phase = np.rad2deg(np.arctan2(np.asarray(s["im"]), np.asarray(s["re"])))
         pa = self.glw.addPlot(row=0, col=0)
         pa.setLabel("left", "Amplitude (Jy)")
-        pa.addItem(pg.PlotDataItem(x[good], amp[good], pen=pg.mkPen(*IF_COLORS[0], width=2),
+        pa.addItem(pg.PlotDataItem(x[good], amp[good],
+                                   pen=pg.mkPen(31, 119, 180, width=2),
                                    symbol="o", symbolSize=4))
         pp = self.glw.addPlot(row=1, col=0)
         pp.setLabel("left", "Phase (deg)")
         pp.setLabel("bottom", "Frequency (GHz)" if xaxis == "freq" else "Channel")
         pp.setYRange(-180, 180)
-        pp.addItem(pg.PlotDataItem(x[good], phase[good], pen=pg.mkPen(*IF_COLORS[1], width=2),
+        pp.addItem(pg.PlotDataItem(x[good], phase[good],
+                                   pen=pg.mkPen(255, 127, 14, width=2),
                                    symbol="o", symbolSize=4))
         pp.setXLink(pa)
         label = "all baselines" if baseline is None else "-".join(map(str, baseline))
-        self.statusBar().showMessage(f"vector-averaged spectrum ({label})")
+        self.statusBar().showMessage(
+            f"vector-averaged spectrum ({label}) | h: help"
+        )
 
 
 def cpplot(obs, triangles=None, if_index=None, nplot=4, block=None):

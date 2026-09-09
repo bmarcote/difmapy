@@ -11,3 +11,4 @@ tests/rsm07_3C345.ms/
 tests/rsm07_3C345.uvfits
 casa-*.log
 *.last
+test_data

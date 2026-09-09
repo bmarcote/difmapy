@@ -261,6 +261,20 @@ impl CoreObservation {
     fn pols(&self) -> Vec<i32> {
         self.ob.pols.clone()
     }
+    /// The recorded polarizations as names ("RR", "LL", ...), in the
+    /// order they appear on the data's polarization axis. Codes with no
+    /// AIPS meaning are reported as e.g. "?(-12)".
+    #[getter]
+    fn pol_names(&self) -> Vec<String> {
+        self.ob
+            .pols
+            .iter()
+            .map(|&c| match Stokes::from_code(c) {
+                Some(s) => s.name().to_string(),
+                None => format!("?({c})"),
+            })
+            .collect()
+    }
     #[getter]
     fn antenna_names(&self) -> Vec<String> {
         self.ob.antennas.iter().map(|a| a.name.clone()).collect()
@@ -412,7 +426,7 @@ impl CoreObservation {
     /// Grid + FFT the current stream into a residual map and beam.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (nx, ny, xinc, yinc, uvmin=0.0, uvmax=0.0, gauval=0.0, gaurad=0.0,
-                        dorad=false, errpow=0.0, binwid=0.0,
+                        dorad=false, errpow=0.0, binwid=0.0, robust=None,
                         uvzero_amp=0.0, uvzero_modamp=0.0, uvzero_wt=0.0))]
     fn invert<'py>(
         &mut self,
@@ -428,6 +442,7 @@ impl CoreObservation {
         dorad: bool,
         errpow: f32,
         binwid: f32,
+        robust: Option<f32>,
         uvzero_amp: f32,
         uvzero_modamp: f32,
         uvzero_wt: f32,
@@ -441,6 +456,7 @@ impl CoreObservation {
             dorad,
             errpow,
             binwid,
+            robust,
             uvzero_amp,
             uvzero_modamp,
             uvzero_wt,
@@ -605,11 +621,11 @@ impl CoreObservation {
     /// tentative model (`newmod`); their `freepar` bitmasks are given
     /// in `freepars` (one per component, same order as get_models()[1]).
     /// Returns a summary dict including per-component uncertainties.
-    #[pyo3(signature = (niter=10, freepars=vec![], uvmin=0.0, uvmax=0.0))]
+    #[pyo3(signature = (niter=-1, freepars=vec![], uvmin=0.0, uvmax=0.0))]
     fn modelfit<'py>(
         &mut self,
         py: Python<'py>,
-        niter: usize,
+        niter: i64,
         freepars: Vec<u32>,
         uvmin: f32,
         uvmax: f32,
@@ -644,6 +660,8 @@ impl CoreObservation {
         d.set_item("nvis", res.nvis)?;
         d.set_item("nfree", res.nfree)?;
         d.set_item("niter_better", res.nbetter)?;
+        d.set_item("niter", res.niter)?;
+        d.set_item("converged", res.converged)?;
         let errs = PyList::new(
             py,
             res.errors.iter().map(|e| {
@@ -836,6 +854,69 @@ impl CoreObservation {
             stream.rebuild_rows(&self.ob, &rows);
             self.ob.stream = Some(stream);
         }
+        self.mb = None;
+        Ok(())
+    }
+
+    /// The FLAG column restricted to `rows`, as [len(rows), nctotal,
+    /// npol]. Cheap snapshot for interactive undo.
+    fn flags_rows<'py>(
+        &self,
+        py: Python<'py>,
+        rows: Vec<usize>,
+    ) -> PyResult<Bound<'py, PyArray3<bool>>> {
+        let (nctotal, npol) = (self.ob.nctotal, self.ob.npol());
+        let stride = nctotal * npol;
+        let mut out = Vec::with_capacity(rows.len() * stride);
+        for &r in &rows {
+            if r >= self.ob.nrow {
+                return Err(PyValueError::new_err("row index out of range"));
+            }
+            out.extend_from_slice(&self.ob.flag[r * stride..(r + 1) * stride]);
+        }
+        Ok(PyArray1::from_vec(py, out).reshape([rows.len(), nctotal, npol])?)
+    }
+
+    /// Restore a `flags_rows()` snapshot. Deleted data (zero weight)
+    /// stays flagged, and the derived stream is rebuilt for those rows
+    /// only.
+    fn set_flags_rows(
+        &mut self,
+        py: Python<'_>,
+        rows: Vec<usize>,
+        flag: PyReadonlyArray3<bool>,
+    ) -> PyResult<()> {
+        let (nctotal, npol) = (self.ob.nctotal, self.ob.npol());
+        let stride = nctotal * npol;
+        let f = flag.as_array();
+        if f.shape() != [rows.len(), nctotal, npol] {
+            return Err(PyValueError::new_err(format!(
+                "flag shape {:?} != [{}, {nctotal}, {npol}]",
+                f.shape(),
+                rows.len()
+            )));
+        }
+        for &r in &rows {
+            if r >= self.ob.nrow {
+                return Err(PyValueError::new_err("row index out of range"));
+            }
+        }
+        let src: Vec<bool> = f.iter().copied().collect();
+        py.detach(|| {
+            for (k, &r) in rows.iter().enumerate() {
+                let dst = &mut self.ob.flag[r * stride..(r + 1) * stride];
+                dst.copy_from_slice(&src[k * stride..(k + 1) * stride]);
+                for (i, v) in self.ob.vis[r * stride..(r + 1) * stride].iter().enumerate() {
+                    if v.wt == 0.0 {
+                        dst[i] = true;
+                    }
+                }
+            }
+            if let Some(mut stream) = self.ob.stream.take() {
+                stream.rebuild_rows(&self.ob, &rows);
+                self.ob.stream = Some(stream);
+            }
+        });
         self.mb = None;
         Ok(())
     }

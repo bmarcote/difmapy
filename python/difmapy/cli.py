@@ -25,18 +25,21 @@ COMMANDS = (
     "select", "header", "flag", "unflag", "save_flags", "uvaver",
     "savecaltable", "gain_snapshot",
     # imaging setup
-    "mapsize", "uvweight", "uvtaper", "uvrange", "uvzero",
+    "mapsize", "auto_mapsize", "estimated_resolution",
+    "uvweight", "uvtaper", "uvrange", "uvzero",
     # imaging
-    "invert", "clean", "keep", "clrmod", "restore", "imstat", "peak_offset",
+    "invert", "clean", "keep", "clrmod", "clearmodel", "restore", "imstat",
+    "peak_offset", "noise_stats", "mapinfo", "print_mapinfo",
     "add_window", "clear_windows",
     # calibration
-    "selfcal", "gscale", "uncalib", "selfant", "startmod", "resoff", "clroff",
+    "selfcal", "gscale", "station_gains", "uncalib", "selfant", "startmod",
+    "resoff", "clroff",
     # models
-    "addcmp", "modelfit", "rmodel", "wmodel",
+    "addcmp", "seed_model", "modelfit", "rmodel", "wmodel",
     # geometry
     "shift", "unshift",
     # plots
-    "mapplot", "radplot", "projplot", "uvplot", "vplot",
+    "mapplot", "maplot", "radplot", "projplot", "uvplot", "vplot",
     "cpplot", "tplot", "corplot", "specplot",
     # output
     "wobs", "wmap", "wdmap", "wbeam", "wwins", "rwins", "save",
@@ -81,6 +84,8 @@ def build_parser():
     p.add_argument("--cell", type=float, help="pixel size in mas")
     p.add_argument("--uvweight", nargs=2, type=float, metavar=("BINWID", "ERRPOW"),
                    help="gridding weights, e.g. --uvweight 0 -1 for natural")
+    p.add_argument("--robust", type=float, metavar="R",
+                   help="Briggs robustness from -2 (uniform) to 2 (natural)")
     p.add_argument("-c", "--command", action="append", default=[], metavar="CODE",
                    help="Python to run after loading (repeatable)")
     p.add_argument("--batch", action="store_true",
@@ -99,20 +104,17 @@ def _qt_available() -> bool:
     return any(find_spec(m) is not None for m in ("PySide6", "PyQt6", "PySide2", "PyQt5"))
 
 
-def _load(path, stokes, channels, mapsize, cell, uvweight):
+def _load(path, stokes, channels, mapsize, cell, uvweight, robust=None):
     """Load an observation and apply the startup options."""
     import difmapy
 
-    obs = difmapy.load(path)
-    if stokes and str(stokes).lower() != "none":
-        try:
-            obs.select(stokes, channels=channels)
-        except ValueError as exc:
-            print(f"warning: could not select {stokes}: {exc}", file=sys.stderr)
+    obs = difmapy.load(path, stokes=stokes, channels=channels)
     if mapsize or cell:
         obs.mapsize(mapsize or 256, cell or 1.0)
     if uvweight:
         obs.uvweight(uvweight[0], uvweight[1])
+    if robust is not None:
+        obs.uvweight(robust=robust)
     # Printed after the selection so the summary reflects it.
     print(obs.header())
     return obs
@@ -135,6 +137,7 @@ def make_namespace(obs=None):
         return new
 
     ns["load"] = load
+    ns["observe"] = load  # difmap's own name for it
     if obs is not None:
         ns.update(bind_commands(obs))
     return ns
@@ -185,7 +188,7 @@ def main(argv=None) -> int:
             return 2
         try:
             obs = _load(path, args.stokes, _parse_channels(args.channels),
-                        args.mapsize, args.cell, args.uvweight)
+                        args.mapsize, args.cell, args.uvweight, args.robust)
         except Exception as exc:  # a bad file should not show a traceback
             print(f"difmapy: could not load {path}: {exc}", file=sys.stderr)
             return 1
