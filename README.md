@@ -23,10 +23,12 @@ Differences from the original by design:
   survives the other is assumed identical, which neglects circular
   polarization. Output images declare Stokes I. `Q`, `U` and `V` remain
   strict, since a missing hand cannot be guessed for polarization.
+  Intensity is also loaded by default if not specified.
 * reads **UVFITS and Measurement Sets** (both single-source)
 * **flags are stored in an explicit FLAG column**, the MS convention,
   and can be written straight back into the MS with `save_flags()`
-  instead of having to write out a new UV file
+  instead of having to write out a new UV file.
+* **Calibration tables can be stored as CASA calibration files** via `savecaltable()`. The stored table compiles all calibration corrections performed to the data in the Difmapy session. You can then use this table inside CASA (or other software package) to apply it to other data sets.
 * native **multi-IF / multi-channel** handling: all subbands (IFs /
   SPWs) are gridded together (multi-frequency synthesis), and each may
   have a different number of channels
@@ -34,7 +36,8 @@ Differences from the original by design:
   session starts (`stokes=None` to skip it)
 * **Briggs robust weighting** as a single number from -2 to +2, in
   addition to difmap's own `binwid`/`errpow` scheme
-* **map sizes need only be multiples of four**, not powers of two
+* **Modelfitting done inside mapplot() via 'f'**: If you set a component in the image,
+  you can directly fit the component to the uv data by pressing "f". No need to do it in the terminal.
 * Python API instead of the sphere command language; interactive plots
   use pyqtgraph instead of PGPLOT
 
