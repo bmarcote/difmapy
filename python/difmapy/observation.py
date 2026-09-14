@@ -106,7 +106,7 @@ def _comp_dict(comp, freepar=0) -> dict:
     }
 
 
-__all__ = ["Observation", "load", "observe"]
+__all__ = ["Observation", "load", "observe", "uvaver"]
 
 
 class Observation:
@@ -140,20 +140,29 @@ class Observation:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_uvfits(cls, path, wtscale=1.0, stokes="I", channels=None) -> "Observation":
+    def from_uvfits(cls, path, wtscale=1.0, stokes="I", channels=None,
+                    average=None, scatter=False) -> "Observation":
         from difmapy.io.uvfits import load_uvfits
 
         obs = cls(load_uvfits(path, wtscale=wtscale))
         obs._initial_select(stokes, channels)
-        return obs
+        return obs._averaged(average, scatter)
 
     @classmethod
-    def from_ms(cls, path, stokes="I", channels=None, **kwargs) -> "Observation":
+    def from_ms(cls, path, stokes="I", channels=None, average=None,
+                scatter=False, **kwargs) -> "Observation":
         from difmapy.io.ms import load_ms
 
         obs = cls(load_ms(path, **kwargs))
         obs._initial_select(stokes, channels)
-        return obs
+        return obs._averaged(average, scatter)
+
+    def _averaged(self, average, scatter=False):
+        """This observation time-averaged by `uvaver`, or itself when
+        `average` is None/0."""
+        if not average:
+            return self
+        return self.uvaver(average, doscatter=scatter)
 
     def _initial_select(self, stokes, channels=None):
         """Apply the selection asked for at load time (difmap `observe`
@@ -1309,6 +1318,10 @@ class Observation:
         new = Observation(
             uvaver(self._core, parse_time(aver_time, "s"), bool(doscatter))
         )
+        # The averaged rows no longer map onto an MS's rows, so it cannot
+        # be written back; remember where it came from to say so.
+        origin = getattr(self._core, "_ms_origin", None)
+        new._from_ms = origin["path"] if origin else getattr(self, "_from_ms", None)
         # Carry over the imaging setup and selection.
         new._nx, new._ny = self._nx, self._ny
         new._xinc, new._yinc = self._xinc, self._yinc
@@ -1590,12 +1603,17 @@ class Observation:
 
         return uvplot(self, colorby=colorby, block=block)
 
-    def vplot(self, reftel=None, quantity="ap", nplot=3, block=None):
+    def vplot(self, nplot=3, reftel=None, quantity="ap", block=None):
         """Visibility amplitude and phase vs time, `nplot` baselines to
-        a page, with a per-IF legend and interactive flagging."""
+        a page, with a per-IF legend and interactive flagging.
+
+        The arguments come in difmap's order: ``vplot(3)`` is three
+        baselines to a page, ``vplot(3, "EF")`` only EF's baselines, and
+        0 puts all of a station's baselines on one page.
+        """
         from difmapy.plots import vplot
 
-        return vplot(self, reftel=reftel, quantity=quantity, nplot=nplot,
+        return vplot(self, nplot=nplot, reftel=reftel, quantity=quantity,
                      block=block)
 
     def mapplot(self, what="map", mapsize=None, cellsize=None, uvweight=None,
@@ -1846,6 +1864,10 @@ class Observation:
                     "ms=True, but this observation was not loaded from a "
                     "Measurement Set; only <prefix>.uvf can be written"
                 )
+            if getattr(self, "_from_ms", None):
+                print(f"warning: {prefix}.ms not written: the data were "
+                      f"time-averaged after loading {self._from_ms}, so its "
+                      "rows no longer match")
             return None
         try:
             return save_ms(self._core, f"{prefix}.ms", overwrite=True)
@@ -1947,18 +1969,39 @@ class Observation:
         return self
 
 
-def load(path, stokes="I", channels=None, **kwargs) -> Observation:
+def load(path, stokes="I", channels=None, average=None, scatter=False,
+         **kwargs) -> Observation:
     """Load a UVFITS file or Measurement Set (difmap observe).
 
     Unlike difmap, the total intensity is selected straight away, since
     that is how nearly every session starts; pass ``stokes=None`` to
     load without a selection, and `select()` can change it at any time.
+
+    `average` time-averages the data straight after loading, as difmap's
+    `observe` does with its bin width: ``average="10s"`` (or seconds as
+    a number) is `uvaver` applied on load, and `scatter=True` derives
+    the weights from the scatter of the averaged samples. Averaging a
+    long, finely sampled observation first makes every later step
+    faster. Note that an averaged Measurement Set can no longer be
+    written back as one (see `save`).
     """
     import os
 
     if os.path.isdir(path):
-        return Observation.from_ms(path, stokes=stokes, channels=channels, **kwargs)
-    return Observation.from_uvfits(path, stokes=stokes, channels=channels, **kwargs)
+        return Observation.from_ms(path, stokes=stokes, channels=channels,
+                                   average=average, scatter=scatter, **kwargs)
+    return Observation.from_uvfits(path, stokes=stokes, channels=channels,
+                                   average=average, scatter=scatter, **kwargs)
+
+
+def uvaver(obs, aver_time, scatter=False) -> Observation:
+    """Time-average an observation into `aver_time` integrations (difmap
+    uvaver), returning a new one; `obs` is left as it is.
+
+    `aver_time` is seconds, or a string with its unit ("10s", "2min").
+    The same as ``obs.uvaver(aver_time, doscatter=scatter)``.
+    """
+    return obs.uvaver(aver_time, doscatter=scatter)
 
 
 #: `load` under difmap's own name for it.

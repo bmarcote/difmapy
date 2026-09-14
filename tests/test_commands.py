@@ -366,3 +366,19 @@ def test_outfile_creates_missing_directories(obs, tmp_path):
     obs.invert()
     obs.imstat(outfile=str(path))
     assert path.exists()
+
+
+def test_load_can_average_in_time(uvfits_file):
+    """load(average=...) is uvaver straight after loading, and uvaver is
+    a function of its own too."""
+    raw = difmapy.load(uvfits_file)
+    avg = difmapy.load(uvfits_file, average="3min")
+    assert avg._core.ntimes < raw._core.ntimes
+    assert avg._core.ntimes == raw.uvaver(180)._core.ntimes
+    assert avg._core.selection()["stokes"] == "I"
+    fn = difmapy.uvaver(raw, "3min")
+    assert fn._core.nrow == avg._core.nrow
+    assert np.allclose(np.asarray(fn._core.stream_vis()[0]),
+                       np.asarray(avg._core.stream_vis()[0]))
+    assert raw._core.ntimes == difmapy.load(uvfits_file, average=None)._core.ntimes
+

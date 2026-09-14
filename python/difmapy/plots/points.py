@@ -6,6 +6,7 @@ import numpy as np
 
 from difmapy.plots.base import (
     HIGHLIGHT_COLOR,
+    FastScatter,
     FlagPlotBase,
     TimeGaps,
     install_time_axis,
@@ -210,7 +211,7 @@ class RadPlot(_VisPlot):
         if m.any():
             self._add_item(
                 panel,
-                pg.ScatterPlotItem(
+                FastScatter(
                     d["x"][m], d[panel.key][m], size=7, symbol="o",
                     pen=pg.mkPen(*HIGHLIGHT_COLOR, width=1),
                     brush=pg.mkBrush(*HIGHLIGHT_COLOR, 120),
@@ -290,13 +291,17 @@ class VPlot(_VisPlot):
     #: Tall: a page is several baselines of stacked amp/phase panels.
     DEFAULT_SIZE = (1200, 950)
 
-    def __init__(self, obs, reftel=None, quantity="ap", nplot=3):
+    def __init__(self, obs, nplot=3, reftel=None, quantity="ap"):
         names = obs.antennas
+        if isinstance(nplot, str) and reftel is None:
+            # vplot("EF"): a station name where the page size goes.
+            nplot, reftel = 3, nplot
         self.reftel = None
         if reftel is not None:
             self.reftel = (names.index(str(reftel)) if not isinstance(reftel, int)
                            else int(reftel))
-        self.nplot = max(int(nplot), 1)
+        # difmap's 0: every baseline of a station on one page.
+        self.nplot = int(nplot) if int(nplot) > 0 else max(len(names) - 1, 1)
         self.page = 0
         self.by_antenna = False
         self._baselines = []
@@ -342,6 +347,12 @@ class VPlot(_VisPlot):
         self._share_x_axis()
         if self._panels:
             self._panels[-1].plot.setLabel("bottom", "Time (hours)")
+
+    def set_page(self, page):
+        """Show page `page` (counting from 0, wrapping around)."""
+        self.page = int(page) % self.npages
+        self._relayout()
+        return self.page
 
     def _relayout(self):
         self.glw.clear()
@@ -418,11 +429,9 @@ class VPlot(_VisPlot):
     def keyPressEvent(self, ev):
         key = ev.text().lower()
         if key == "n":
-            self.page = (self.page + 1) % self.npages
-            self._relayout()
+            self.set_page(self.page + 1)
         elif key == "p":
-            self.page = (self.page - 1) % self.npages
-            self._relayout()
+            self.set_page(self.page - 1)
         elif key == " ":
             self.by_antenna = not self.by_antenna
             self._update_status()
@@ -456,7 +465,7 @@ def uvplot(obs, colorby="spw", block=None):
     return p
 
 
-def vplot(obs, reftel=None, quantity="ap", nplot=3, block=None):
-    p = VPlot(obs, reftel=reftel, quantity=quantity, nplot=nplot)
+def vplot(obs, nplot=3, reftel=None, quantity="ap", block=None):
+    p = VPlot(obs, nplot=nplot, reftel=reftel, quantity=quantity)
     run_if_needed(p, block)
     return p

@@ -924,7 +924,7 @@ def test_diagnostic_time_plots_share_the_cut_axis(scanned_obs):
         assert len(plot.getAxis("bottom").gaps.breaks) == 3
     # The samples of tplot sit on the same compressed coordinates.
     xs = np.concatenate([i.getData()[0] for i in t.plot.items
-                         if isinstance(i, pg.ScatterPlotItem)])
+                         if type(i).__name__ == "FastScatter"])
     assert np.isclose(xs.max(), TimeGapAxis(t.plot.getAxis("bottom").gaps)
                       .gaps.compress(np.asarray(scanned_obs._core.times()) / 3600).max())
     for w in (t, c, k):
@@ -977,3 +977,60 @@ def test_projplot_angle_keys_rotate_the_projection(obs):
     assert r.projection is None and np.array_equal(r._data["x"], x)
     assert not any(k == "< / >" for k, _ in r.key_help())
     r.close()
+
+
+def test_vplot_first_argument_is_baselines_per_page(obs):
+    """vplot(3) is three baselines to a page, as difmap's vplot takes it.
+    It used to be read as reftel=3, which pinned the plot to one
+    station's baselines on a single page."""
+    v = VPlot(obs, 3)
+    assert v.nplot == 3 and v.reftel is None
+    assert len(v._baselines) == 10 and v.npages == 4
+    assert v.set_page(5) == 1                       # wraps around
+    v.close()
+    w = VPlot(obs, 2, "AN1")
+    assert w.nplot == 2 and w.reftel == obs.antennas.index("AN1")
+    assert w.npages == 2
+    w.close()
+    x = VPlot(obs, "AN1")                           # a station name first
+    assert x.reftel == 1 and x.nplot == 3
+    x.close()
+    y = VPlot(obs, 0)                               # difmap's 0
+    assert y.nplot == len(obs.antennas) - 1
+    y.close()
+
+
+def test_fast_markers_bound_and_draw_every_point(obs):
+    from difmapy.plots.base import FastScatter
+
+    s = FastScatter([1.0, np.nan, 3.0, 2.0], [5.0, 1.0, np.inf, -1.0], size=4)
+    x, y = s.getData()
+    assert list(x) == [1.0, 2.0] and list(y) == [5.0, -1.0]  # non-finite dropped
+    assert s.dataBounds(0) == (1.0, 2.0) and s.dataBounds(1) == (-1.0, 5.0)
+    assert s.dataBounds(1, orthoRange=(1.5, 3.0)) == (-1.0, -1.0)
+    assert FastScatter([], []).dataBounds(0) == (None, None)
+
+    p = RadPlot(obs, quantity="amp")
+    drawn = [it for it, _ in p._items if isinstance(it, FastScatter)]
+    assert drawn
+    assert sum(len(it.getData()[0]) for it in drawn) >= int((p._data["wt"] > 0).sum())
+    assert not p.grab().isNull()
+    p.close()
+
+
+def test_cpplot_computes_only_the_page_it_shows(obs):
+    """cpplot lists the triangles up front but computes closure phases a
+    page at a time; computing all 3276 triangles of a 28-station array
+    took seconds before the window opened."""
+    from difmapy.plots.diagnostics import CpPlot
+
+    p = CpPlot(obs, nplot=4)
+    assert len(p._items) == 10                      # C(5, 3)
+    assert all(t == tuple(sorted(t)) for t in p._items)
+    assert p.npages == 3 and len(p._plots) == 4
+    p.set_page(2)
+    assert len(p._plots) == 2
+    q = CpPlot(obs, triangles=[("AN2", "AN0", "AN1")])
+    assert q._items == [(0, 1, 2)] and len(q._plots) == 1
+    p.close()
+    q.close()

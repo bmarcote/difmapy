@@ -21,6 +21,10 @@ undo restores precisely what was there before.
 from __future__ import annotations
 
 import atexit
+import functools
+import math
+import os
+import sys
 
 import numpy as np
 import pyqtgraph as pg
@@ -130,6 +134,11 @@ def fit_to_screen(width, height, margin=0.92):
 def ensure_app():
     app = QtWidgets.QApplication.instance()
     if app is None:
+        if not os.environ.get("QT_QPA_PLATFORM") and _no_display_server():
+            # A server or CI job with no X/Wayland display: Qt would abort
+            # trying to connect to one. Draw off-screen instead, which is
+            # all a headless pipeline can use anyway.
+            os.environ["QT_QPA_PLATFORM"] = "offscreen"
         app = pg.mkQApp("difmapy")
     return app
 
@@ -147,6 +156,137 @@ def gradient_colors(n, name="viridis", lo=0.0, hi=0.88):
         return [tuple(int(v) for v in row[:3]) for row in lut]
     except Exception:  # pragma: no cover - colormap missing
         return [IF_COLORS[i % len(IF_COLORS)] for i in range(n)]
+
+
+# ----------------------------------------------------------------------
+# fast markers
+# ----------------------------------------------------------------------
+
+class FastScatter(pg.GraphicsObject):
+    """Many identical markers, drawn in one call.
+
+    pyqtgraph's ScatterPlotItem builds a per-point record of style and
+    geometry, which takes seconds for the million-point panels of a long
+    VLBI observation - and every refresh (a flag edit, a highlighted
+    antenna, a new page) pays it again. Every marker here shares one
+    symbol, so the points are kept as two plain arrays and painted as
+    fragments of a single pre-rendered pixmap. Non-finite points are
+    dropped.
+    """
+
+    def __init__(self, x, y, size=4, symbol="o", pen=None, brush=None):
+        super().__init__()
+        x = np.asarray(x, dtype=np.float64).ravel()
+        y = np.asarray(y, dtype=np.float64).ravel()
+        ok = np.isfinite(x) & np.isfinite(y)
+        if not ok.all():
+            x, y = x[ok], y[ok]
+        self._x, self._y = x, y
+        self._size = float(size)
+        self._symbol = symbol
+        self._pen = pg.mkPen(pen)
+        self._brush = pg.mkBrush(brush)
+        self._bounds = (((float(x.min()), float(x.max())),
+                         (float(y.min()), float(y.max())))
+                        if x.size else ((None, None), (None, None)))
+        self._pixmap = None
+        self._dpr = None
+        self._frags = None
+
+    def getData(self):
+        """The (x, y) of the points drawn."""
+        return self._x, self._y
+
+    def _extent_px(self):
+        return self._size + max(math.ceil(self._pen.widthF()), 1)
+
+    def dataBounds(self, ax, frac=1.0, orthoRange=None):
+        if self._x.size == 0:
+            return (None, None)
+        d, other = (self._x, self._y) if ax == 0 else (self._y, self._x)
+        if orthoRange is not None:
+            d = d[(other >= orthoRange[0]) & (other <= orthoRange[1])]
+            if d.size == 0:
+                return (None, None)
+        elif frac >= 1.0:
+            return self._bounds[ax]
+        if frac >= 1.0:
+            return (float(d.min()), float(d.max()))
+        lo, hi = np.percentile(d, [50 * (1 - frac), 50 * (1 + frac)])
+        return (float(lo), float(hi))
+
+    def pixelPadding(self):
+        return self._extent_px() * 0.7072
+
+    def _pixel_size(self):
+        """Length of a screen pixel along x and y, in data units."""
+        vx, vy = self.pixelVectors()
+        try:
+            return (0.0 if vx is None else vx.length(),
+                    0.0 if vy is None else vy.length())
+        except OverflowError:
+            return (0.0, 0.0)
+
+    def boundingRect(self):
+        (x0, x1), (y0, y1) = self._bounds
+        if x0 is None:
+            return QtCore.QRectF()
+        px, py = self._pixel_size()
+        pad = self.pixelPadding()
+        px, py = px * pad, py * pad
+        return QtCore.QRectF(x0 - px, y0 - py, (x1 - x0) + 2 * px, (y1 - y0) + 2 * py)
+
+    def viewTransformChanged(self):
+        self.prepareGeometryChange()
+        super().viewTransformChanged()
+
+    def _pixmap_for(self, dpr):
+        if self._pixmap is None or self._dpr != dpr:
+            from pyqtgraph.graphicsItems.ScatterPlotItem import renderSymbol
+
+            img = renderSymbol(self._symbol, self._size, self._pen, self._brush,
+                               dpr=dpr)
+            pm = QtGui.QPixmap.fromImage(img)
+            pm.setDevicePixelRatio(1.0)  # fragments address device pixels
+            self._pixmap, self._dpr = pm, dpr
+        return self._pixmap
+
+    @pg.debug.warnOnException  # an exception raised in paint() kills Qt
+    def paint(self, p, option, widget):
+        x, y = self._x, self._y
+        if x.size == 0:
+            return
+        # Cull to the view (padded by a marker) before mapping to pixels:
+        # a zoomed-in view then only draws what it shows.
+        vr = self.viewRect()
+        if vr is not None:
+            px, py = self._pixel_size()
+            padx, pady = px * self._extent_px(), py * self._extent_px()
+            l, r = sorted((vr.left(), vr.right()))
+            b, t = sorted((vr.top(), vr.bottom()))
+            m = (x >= l - padx) & (x <= r + padx) & (y >= b - pady) & (y <= t + pady)
+            if not m.all():
+                x, y = x[m], y[m]
+            if x.size == 0:
+                return
+        tr = p.transform()
+        X = np.clip(tr.m11() * x + tr.m21() * y + tr.dx(), -2.0 ** 30, 2.0 ** 30)
+        Y = np.clip(tr.m12() * x + tr.m22() * y + tr.dy(), -2.0 ** 30, 2.0 ** 30)
+        dev = p.device()
+        dpr = float(dev.devicePixelRatioF()) if dev is not None else 1.0
+        pm = self._pixmap_for(dpr)
+        if self._frags is None:
+            from pyqtgraph.Qt import internals
+
+            self._frags = internals.PrimitiveArray(QtGui.QPainter.PixmapFragment, 10)
+        self._frags.resize(X.size)
+        f = self._frags.ndarray()
+        f[:, 0] = X  # x, y: the centre of the marker
+        f[:, 1] = Y
+        f[:, 2:6] = (0.0, 0.0, pm.width(), pm.height())  # source rect
+        f[:, 6:10] = (1.0 / dpr, 1.0 / dpr, 0.0, 1.0)     # scale, rotation, opacity
+        p.resetTransform()
+        p.drawPixmapFragments(*self._frags.drawargs(), pm)
 
 
 class SelectViewBox(pg.ViewBox):
@@ -211,17 +351,24 @@ class SelectViewBox(pg.ViewBox):
 
 
 def run_if_needed(widget, block):
-    """Show the widget, entering the Qt event loop if nothing else is
-    driving it.
+    """Present a plot the way the current mode says (see `set_mode`).
 
-    In a plain script the loop must be run or the window would vanish
-    immediately; under IPython/Jupyter with the Qt event loop hook
-    enabled (``%gui qt``) it must *not* be run, or the session would
-    freeze. Pass `block` explicitly to override the detection.
+    "window": show it, and enter the Qt event loop only if nothing else
+    will pump it. Under IPython or Jupyter the loop is hooked into the
+    session instead (what ``%gui qt`` does), so the prompt stays usable;
+    a plain script blocks until the window is closed. `block` overrides
+    that choice.
+
+    "inline": draw it off-screen and never block; under Jupyter the image
+    goes into the cell's output. The plot is returned either way, for
+    `savefig` and further calls.
     """
+    if get_mode() == "inline":
+        _present_inline(widget)
+        return
     widget.show()
     if block is None:
-        block = not _qt_loop_hooked()
+        block = not _hook_qt_loop()
     if block:
         pg.exec()
 
@@ -238,6 +385,111 @@ def _qt_loop_hooked() -> bool:
     # IPython records the active GUI integration here ("qt", "qt5"...).
     gui = getattr(shell, "active_eventloop", None)
     return bool(gui) and str(gui).startswith("qt")
+
+
+# ----------------------------------------------------------------------
+# where plots go: interactive windows, or inline / off-screen images
+# ----------------------------------------------------------------------
+
+#: How plot commands present their plots; see `set_mode`.
+MODES = ("auto", "window", "inline")
+_MODE = os.environ.get("DIFMAPY_PLOT_MODE", "auto").strip().lower()
+if _MODE not in MODES:
+    _MODE = "auto"
+
+
+def set_mode(mode="auto") -> str:
+    """Choose how plot commands present their plots.
+
+    - "window": an interactive Qt window, with flagging and the keys.
+      Under IPython or Jupyter the Qt event loop is hooked in
+      automatically, so the prompt or notebook stays usable.
+    - "inline": no window. The plot is drawn off-screen, shown in the
+      cell output under Jupyter, and returned for `savefig()` /
+      `to_png()` - what pipelines and headless kernels need.
+    - "auto" (the default, or $DIFMAPY_PLOT_MODE): "inline" in a Jupyter
+      kernel or where there is no display, "window" otherwise.
+
+    Returns the previous setting.
+    """
+    global _MODE
+    mode = str(mode).strip().lower()
+    if mode not in MODES:
+        raise ValueError(f"unknown plot mode {mode!r}; use one of {MODES}")
+    old, _MODE = _MODE, mode
+    return old
+
+
+def get_mode() -> str:
+    """The mode plots are presented in now: "window" or "inline"."""
+    if _MODE != "auto":
+        return _MODE
+    return "inline" if (in_jupyter() or not has_display()) else "window"
+
+
+def in_jupyter() -> bool:
+    """True inside a Jupyter kernel (notebook, lab, nbconvert...)."""
+    try:
+        from IPython import get_ipython
+    except ImportError:
+        return False
+    shell = get_ipython()
+    return shell is not None and type(shell).__name__ == "ZMQInteractiveShell"
+
+
+def _no_display_server() -> bool:
+    """True on X11/Wayland systems with neither display set."""
+    if sys.platform.startswith(("linux", "freebsd", "openbsd", "netbsd")):
+        return not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    return False
+
+
+def has_display() -> bool:
+    """Whether a window could be put on a screen at all."""
+    platform = os.environ.get("QT_QPA_PLATFORM", "").lower()
+    if platform.startswith(("offscreen", "minimal")):
+        return False
+    return not _no_display_server()
+
+
+def _hook_qt_loop() -> bool:
+    """Have an IPython or Jupyter session pump Qt events, as ``%gui qt``
+    does; False if there is no session to do it."""
+    if _qt_loop_hooked():
+        return True
+    try:
+        from IPython import get_ipython
+    except ImportError:
+        return False
+    shell = get_ipython()
+    if shell is None:
+        return False
+    try:
+        shell.enable_gui("qt")
+    except Exception:
+        return False
+    return True
+
+
+def _cell_number():
+    """The IPython execution count, or None outside IPython."""
+    try:
+        from IPython import get_ipython
+    except ImportError:
+        return None
+    shell = get_ipython()
+    return None if shell is None else shell.execution_count
+
+
+def _present_inline(widget):
+    png = widget.to_png()
+    if in_jupyter():
+        from IPython.display import Image, display
+
+        display(Image(data=png))
+        # Remembered so that returning the plot as the cell's value does
+        # not show the same image twice.
+        widget._shown_png = (_cell_number(), getattr(widget, "_revision", 0))
 
 
 # ----------------------------------------------------------------------
@@ -260,6 +512,23 @@ class PlotWindow(QtWidgets.QMainWindow):
     #: bar and histogram - so they open large.
     DEFAULT_SIZE = (1150, 800)
 
+    def __init_subclass__(cls, **kwargs):
+        """Count redraws: every `refresh()` a plot class defines bumps
+        `_revision`, which is how the notebook display knows whether a
+        plot has changed since it was shown."""
+        super().__init_subclass__(**kwargs)
+        fn = cls.__dict__.get("refresh")
+        if fn is None or getattr(fn, "_counts_revisions", False):
+            return
+
+        @functools.wraps(fn)
+        def refresh(self, *args, **kw):
+            self._revision = getattr(self, "_revision", 0) + 1
+            return fn(self, *args, **kw)
+
+        refresh._counts_revisions = True
+        cls.refresh = refresh
+
     def __init__(self, title):
         ensure_app()
         super().__init__()
@@ -275,6 +544,78 @@ class PlotWindow(QtWidgets.QMainWindow):
         ("h", "show or hide this help"),
         ("q", "close the window"),
     )
+
+    # ---- output without a screen (notebooks, pipelines) --------------
+
+    def render(self, width=None, height=None):
+        """The plot drawn off-screen, as a QImage.
+
+        Works whether or not the window is shown, and never puts one on
+        the screen: an unshown plot is laid out and painted as a window
+        would be, then hidden again. `width`/`height` resize it first.
+        """
+        if width or height:
+            self.resize(int(width or self.width()), int(height or self.height()))
+        was_visible = self.isVisible()
+        if not was_visible:
+            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+            self.show()
+        try:
+            app = ensure_app()
+            for _ in range(2):  # the layout, then the items that follow it
+                app.processEvents()
+            return self.grab().toImage()
+        finally:
+            if not was_visible:
+                self.hide()
+                self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DontShowOnScreen, False)
+
+    def to_png(self, width=None, height=None) -> bytes:
+        """The plot as PNG image data."""
+        buf = QtCore.QBuffer()
+        buf.open(QtCore.QIODevice.OpenModeFlag.WriteOnly)
+        self.render(width, height).save(buf, "PNG")
+        return bytes(buf.data())
+
+    def savefig(self, path, width=None, height=None):
+        """Write the plot to an image file, its format taken from the
+        extension (.png, .jpg, ...).
+
+        On a paged plot (vplot, cpplot, corplot, fplot) a `path`
+        containing ``{page}`` writes every page, numbered from 1, and
+        returns the list of files; otherwise the file written is
+        returned.
+        """
+        path = os.fspath(path)
+        if "{page}" in path and hasattr(self, "set_page"):
+            start, written = self.page, []
+            try:
+                for i in range(self.npages):
+                    self.set_page(i)
+                    written.append(self._write_image(
+                        path.replace("{page}", str(i + 1)), width, height))
+            finally:
+                self.set_page(start)
+            return written
+        return self._write_image(path, width, height)
+
+    def _write_image(self, path, width, height):
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        if not self.render(width, height).save(path):
+            raise OSError(f"could not write {path} (unsupported image format?)")
+        return path
+
+    def _repr_png_(self):
+        """Jupyter's rich display of the plot."""
+        shown = (_cell_number(), getattr(self, "_revision", 0))
+        if getattr(self, "_shown_png", None) == shown:
+            return None  # already in this cell's output, unchanged
+        return self.to_png()
+
+    def __repr__(self):
+        return f"<{self.windowTitle()}>"
 
     # ---- axis ranges and reloading ------------------------------------
 
@@ -720,7 +1061,7 @@ class FlagPlotBase(PlotWindow):
                 col = self.colors.colors[int(k) % len(self.colors.colors)]
                 self._add_item(
                     panel,
-                    pg.ScatterPlotItem(
+                    FastScatter(
                         d["x"][m], y[m], size=4, pen=None,
                         brush=pg.mkBrush(*col, 190),
                     ),
@@ -730,7 +1071,7 @@ class FlagPlotBase(PlotWindow):
                 if m.any():
                     self._add_item(
                         panel,
-                        pg.ScatterPlotItem(
+                        FastScatter(
                             d["x"][m], y[m], size=6, symbol="x",
                             pen=pg.mkPen(*FLAG_COLOR), brush=None,
                         ),
@@ -762,7 +1103,7 @@ class FlagPlotBase(PlotWindow):
             if m.any():
                 self._add_item(
                     panel,
-                    pg.ScatterPlotItem(
+                    FastScatter(
                         d["x"][m], model[m], size=2.5, pen=None,
                         brush=pg.mkBrush(*MODEL_COLOR, 220),
                     ),

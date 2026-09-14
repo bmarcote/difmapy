@@ -8,6 +8,7 @@ import pyqtgraph as pg
 
 from difmapy.plots.base import (
     FLAG_COLOR,
+    FastScatter,
     PlotWindow,
     TimeGaps,
     gradient_colors,
@@ -106,13 +107,17 @@ class _MultiPanel(PlotWindow):
     def keyPressEvent(self, ev):
         key = ev.text().lower()
         if key == "n":
-            self.page = (self.page + 1) % self.npages
-            self.refresh()
+            self.set_page(self.page + 1)
         elif key == "p":
-            self.page = (self.page - 1) % self.npages
-            self.refresh()
+            self.set_page(self.page - 1)
         else:
             super().keyPressEvent(ev)
+
+    def set_page(self, page):
+        """Show page `page` (counting from 0, wrapping around)."""
+        self.page = int(page) % self.npages
+        self.refresh()
+        return self.page
 
 
 class CpPlot(_MultiPanel):
@@ -124,29 +129,47 @@ class CpPlot(_MultiPanel):
         self._items = []
         super().__init__(obs, "difmapy cpplot", nplot=nplot)
 
+    def _triangle_list(self):
+        """The triangles to page through, as sorted antenna indices.
+
+        Worked out from which baselines have unflagged data, without
+        computing any closure phase: those are computed a page at a
+        time, since a 28-station array has 3276 triangles (seconds of
+        work for all of them) and a page shows four.
+        """
+        core = self.obs._core
+        names = core.antenna_names
+        if self._triangles is not None:
+            return [tuple(sorted(names.index(str(t)) for t in tri))
+                    for tri in self._triangles]
+        _, wt = core.stream_vis()
+        _, a1, a2, *_ = core.rows()
+        good = (np.asarray(wt) > 0).any(axis=1)
+        a1, a2 = np.asarray(a1)[good], np.asarray(a2)[good]
+        pairs = set(zip(np.minimum(a1, a2).tolist(), np.maximum(a1, a2).tolist()))
+        ants = sorted({a for pair in pairs for a in pair})
+        out = []
+        for i, a in enumerate(ants):
+            for j in range(i + 1, len(ants)):
+                b = ants[j]
+                if (a, b) not in pairs:
+                    continue
+                out.extend((a, b, c) for c in ants[j + 1:]
+                           if (a, c) in pairs and (b, c) in pairs)
+        return out
+
     def refresh(self):
         core = self.obs._core
         if not self._items:
-            names = core.antenna_names
-            data = []
-            if self._triangles is None:
-                data = core.closure_phases(if_index=self._if_index)
-            else:
-                for tri in self._triangles:
-                    idx = tuple(sorted(names.index(str(t)) for t in tri))
-                    data += core.closure_phases(triangle=idx, if_index=self._if_index)
-            # Group the IFs of each triangle into one panel.
-            grouped: dict[tuple, list] = {}
-            for d in data:
-                grouped.setdefault(tuple(d["triangle"]), []).append(d)
-            self._items = sorted(grouped.items())
+            self._items = self._triangle_list()
         self.glw.clear()
         names = core.antenna_names
         colors = gradient_colors(self.obs.nif)
         lo = self.page * self.nplot
         self._plots = []
         gaps = TimeGaps.of(self.obs)
-        for row, (tri, series) in enumerate(self._items[lo : lo + self.nplot]):
+        for row, tri in enumerate(self._items[lo : lo + self.nplot]):
+            series = core.closure_phases(triangle=tri, if_index=self._if_index)
             p = self._new_plot(row, (-180, 180))
             install_time_axis(p, gaps)
             label = "-".join(names[i] for i in tri)
@@ -158,7 +181,7 @@ class CpPlot(_MultiPanel):
                 col = colors[cif % len(colors)]
                 t = gaps.compress(np.asarray(s["time"]) / 3600.0)
                 p.addItem(
-                    pg.ScatterPlotItem(
+                    FastScatter(
                         t, np.asarray(s["phase"]) * RAD2DEG, size=4,
                         pen=None, brush=pg.mkBrush(*col, 200),
                     )
@@ -166,7 +189,7 @@ class CpPlot(_MultiPanel):
                 m = np.asarray(s["model"]) * RAD2DEG
                 if np.isfinite(m).any():
                     p.addItem(
-                        pg.ScatterPlotItem(
+                        FastScatter(
                             t, m, size=5, symbol="+", pen=pg.mkPen(200, 30, 30), brush=None
                         )
                     )
@@ -219,7 +242,7 @@ class TPlot(PlotWindow):
             if not good.any():
                 continue
             p.addItem(
-                pg.ScatterPlotItem(
+                FastScatter(
                     times[good], np.full(good.sum(), ia), size=5, symbol="s",
                     pen=None, brush=pg.mkBrush(*colors[ia % len(colors)], 220),
                 )
@@ -322,13 +345,17 @@ class CorPlot(_MultiPanel):
                                 times, np.where(good, y, np.nan),
                                 connect="finite",
                                 pen=pg.mkPen(*col, 160, width=1.2),
-                                symbol="o", symbolSize=4, symbolPen=None,
-                                symbolBrush=pg.mkBrush(*col, 220),
                             )
                         )
+                        # The markers as one fast item: a PlotDataItem's
+                        # own symbols cost a per-point record each.
+                        p.addItem(FastScatter(
+                            times[good], y[good], size=4, pen=None,
+                            brush=pg.mkBrush(*col, 220),
+                        ))
                     if flagged.any():
                         p.addItem(
-                            pg.ScatterPlotItem(
+                            FastScatter(
                                 times[flagged], y[flagged], size=6, symbol="x",
                                 pen=pg.mkPen(*FLAG_COLOR), brush=None,
                             )

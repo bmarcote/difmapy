@@ -114,6 +114,22 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
   closing the window adds any still unfitted. `run_modelfit` refuses to
   seed a component of its own, unlike `Observation.modelfit`; it fits
   whenever something is placed or `obs.nvariable` is non-zero.
+- Point plots draw with `plots.base.FastScatter`, not pyqtgraph's
+  `ScatterPlotItem`: the latter builds a per-point record costing
+  seconds per refresh at ~2M points (a 28-station, 16-IF VLBI run).
+  Use `FastScatter` for anything that can have many points; it keeps
+  `getData()` for tests.
+- `cpplot` lists triangles up front but calls `closure_phases` one
+  triangle at a time for the page shown; computing all triangles of a
+  large array takes seconds.
+- Plot presentation goes through `run_if_needed` and the mode in
+  `plots.base` (`set_mode`/`get_mode`: auto/window/inline). Inline
+  renders off-screen (`render`/`to_png`/`savefig`) and is the default in
+  Jupyter and without a display; window mode hooks IPython's Qt loop
+  instead of blocking. Every `refresh()` bumps `_revision` (wrapped in
+  `PlotWindow.__init_subclass__`), which is how a notebook avoids
+  showing an unchanged plot twice.
+- `vplot` takes difmap's argument order: `vplot(nplot, reftel, ...)`.
 - `ignore(station)` is a flag edit with a memory: it snapshots the FLAG
   rows of that station's baselines (as they would be with *nothing*
   ignored - see `_flags_without_ignores`, which matters for a baseline

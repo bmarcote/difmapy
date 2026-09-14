@@ -67,6 +67,7 @@ difmapy                                   # empty interactive session
 difmapy mysource.uvfits                   # load and select Stokes I
 difmapy data.ms --stokes I --mapsize 2048 --cell 0.5
 difmapy data.ms --channels 0-31           # channel ranges
+difmapy big.uvfits --average 10s          # time-average on load
 difmapy data.ms -c "clean(200, 0.03)"     # run commands on startup
 difmapy data.ms --batch -c "wmap('m.fits')"   # scripted, no prompt
 ```
@@ -95,6 +96,7 @@ commands. `--batch` makes the same commands usable from shell scripts.
 import difmapy
 
 obs = difmapy.load("mysource.uvfits")  # or a .ms directory; difmapy.observe
+obs = difmapy.load("big.uvfits", average="10s") # time-average on load (also difmapy.uvaver)
 print(obs.header())                    # is the same function
 print(obs.pols)                        # ['RR', 'LL', 'RL', 'LR']
 
@@ -119,7 +121,8 @@ obs.clean(400, 0.02)
 obs.mapplot()                          # interactive; also spelled maplot()
 obs.radplot()                          # amp+phase vs uv-radius, model in red
 obs.projplot(30)                       # vs uv distance projected at PA 30; < / > turn it
-obs.vplot()                            # amp+phase vs time, 3 baselines/page
+obs.vplot(3)                           # amp+phase vs time, 3 baselines/page
+obs.vplot(3, "EF")                     # only EF's baselines (difmap's order)
 obs.fplot()                            # amp+phase vs frequency, time-averaged
 obs.cpplot()                           # closure phases vs the model
 obs.corplot()                          # self-cal gains: amp+phase per antenna
@@ -402,6 +405,30 @@ Notes and limits:
 * exporting from UVFITS-loaded data works with `ms=`, but timestamps in
   a UVFITS file can differ from the MS's by a fraction of an
   integration, so prefer exporting from the MS-loaded observation.
+
+### Notebooks and pipelines
+
+Every plot also works without a window. In a Jupyter notebook - or
+anywhere without a display, such as a server or a CI job - plots are
+drawn off-screen and shown in the cell output, and every plot command
+returns an object that can be saved:
+
+```python
+obs.radplot()                              # appears in the notebook
+p = obs.vplot(3)
+p.savefig("plots/vplot_{page}.png")        # every page, numbered from 1
+obs.mapplot().savefig("map.png", width=1400, height=1000)
+p.set_page(2); p                           # show page 3 inline
+```
+
+`difmapy.plots.set_mode("window")` switches a notebook to interactive Qt
+windows instead (the Qt event loop is hooked in, as `%gui qt` does, so
+the kernel stays responsive); `"inline"` forces off-screen plots
+anywhere, and `"auto"` is the default. `$DIFMAPY_PLOT_MODE` sets the
+same from outside, and `difmapy --batch` always draws inline. Paged
+plots (`vplot`, `cpplot`, `corplot`, `fplot`) take `set_page(n)` in
+place of the `n`/`p` keys, and radplot's antenna highlight and
+projplot's angle have `cycle_antenna()` and `rotate_projection()`.
 
 ### What gets written out
 

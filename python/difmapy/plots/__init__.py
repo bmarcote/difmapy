@@ -23,3 +23,7 @@ __all__ = [
     "open_windows",
     "close_all_windows",
 ]
+
+from difmapy.plots.base import get_mode, set_mode  # noqa: E402
+
+__all__ += ["set_mode", "get_mode"]

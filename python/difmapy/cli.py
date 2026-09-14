@@ -81,6 +81,8 @@ def build_parser():
                    help="polarization to select on load (default: I; "
                         "'pi' is a legacy alias of I). Use 'none' to skip.")
     p.add_argument("--channels", help="channel ranges to select, e.g. 0-31 or 0-3,8-11")
+    p.add_argument("--average", metavar="TIME",
+                   help="time-average on load, e.g. 10s or 2min (difmap uvaver)")
     p.add_argument("--mapsize", type=int, help="map size in pixels (power of 2)")
     p.add_argument("--cell", type=float, help="pixel size in mas")
     p.add_argument("--uvweight", nargs=2, type=float, metavar=("BINWID", "ERRPOW"),
@@ -105,11 +107,12 @@ def _qt_available() -> bool:
     return any(find_spec(m) is not None for m in ("PySide6", "PyQt6", "PySide2", "PyQt5"))
 
 
-def _load(path, stokes, channels, mapsize, cell, uvweight, robust=None):
+def _load(path, stokes, channels, mapsize, cell, uvweight, robust=None,
+          average=None):
     """Load an observation and apply the startup options."""
     import difmapy
 
-    obs = difmapy.load(path, stokes=stokes, channels=channels)
+    obs = difmapy.load(path, stokes=stokes, channels=channels, average=average)
     if mapsize or cell:
         obs.mapsize(mapsize or 256, cell or 1.0)
     if uvweight:
@@ -189,12 +192,18 @@ def main(argv=None) -> int:
             return 2
         try:
             obs = _load(path, args.stokes, _parse_channels(args.channels),
-                        args.mapsize, args.cell, args.uvweight, args.robust)
+                        args.mapsize, args.cell, args.uvweight, args.robust, average=args.average)
         except Exception as exc:  # a bad file should not show a traceback
             print(f"difmapy: could not load {path}: {exc}", file=sys.stderr)
             return 1
 
     ns = make_namespace(obs)
+    if args.batch and _qt_available():
+        # No prompt and nobody to close a window: plots are drawn
+        # off-screen, for savefig().
+        from difmapy.plots.base import set_mode
+
+        set_mode("inline")
 
     # Startup commands run in the session namespace, so --batch can drive
     # a whole reduction from a shell script.
