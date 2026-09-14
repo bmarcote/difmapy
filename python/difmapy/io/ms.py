@@ -14,7 +14,7 @@ import numpy as np
 
 from difmapy._core import CoreObservation
 
-__all__ = ["load_ms", "save_flags"]
+__all__ = ["load_ms", "save_flags", "save_ms"]
 
 C = 299792458.0
 
@@ -302,40 +302,149 @@ def save_flags(core, path=None, flag_row=True):
     tb = casatools.table()
     tb.open(target, nomodify=False)
     try:
-        nwritten = 0
-        coff = 0
-        for i, nch in enumerate(if_nchan):
-            rows = ms_row[:, i]
-            valid = rows >= 0
-            if not valid.any():
-                coff += nch
-                continue
-            r = rows[valid]
-            # [n, nchan, npol] -> MS cell order [npol, nchan]
-            block = flags[valid, coff : coff + nch, :]
-            cells = np.transpose(block, (0, 2, 1))
-            order = np.argsort(r)
-            r_sorted = r[order]
-            cells = cells[order]
-            # Contiguous runs can be written in one putcol call.
-            breaks = np.nonzero(np.diff(r_sorted) != 1)[0] + 1
-            for chunk_r, chunk_c in zip(
-                np.split(r_sorted, breaks), np.split(cells, breaks)
-            ):
-                # chunk_c is [n, npol, nchan]; the MS column wants
-                # [npol, nchan, n].
-                arr = np.ascontiguousarray(np.transpose(chunk_c, (1, 2, 0)))
-                tb.putcol("FLAG", arr, startrow=int(chunk_r[0]), nrow=len(chunk_r))
-                if flag_row:
-                    tb.putcol(
-                        "FLAG_ROW",
-                        chunk_c.all(axis=(1, 2)),
-                        startrow=int(chunk_r[0]),
-                        nrow=len(chunk_r),
-                    )
-                nwritten += len(chunk_r)
-            coff += nch
+        nwritten = _put_cube(
+            tb, "FLAG", flags, ms_row, if_nchan,
+            extra=("FLAG_ROW", lambda c: c.all(axis=(1, 2))) if flag_row else None,
+        )
         tb.flush()
     finally:
         tb.close()
     return nwritten
+
+
+def _put_cube(tb, column, cube, ms_row, if_nchan, extra=None):
+    """Write a difmapy cube `[nrow, nctotal, npol]` into an MS column.
+
+    difmapy merges the MS rows of one (time, baseline) across spectral
+    windows into a single row covering every IF, so writing back means
+    undoing that: each IF's channels go to its own MS row, given by
+    `ms_row[:, if]` (negative where the MS had no such row).
+
+    `extra` is an optional ``(name, func)`` writing a second, per-row
+    column derived from the same block (FLAG_ROW from FLAG).
+
+    Returns the number of MS rows written.
+    """
+    nwritten = 0
+    coff = 0
+    for i, nch in enumerate(if_nchan):
+        rows = ms_row[:, i]
+        valid = rows >= 0
+        if not valid.any():
+            coff += nch
+            continue
+        r = rows[valid]
+        # [n, nchan, npol] -> MS cell order [npol, nchan]
+        block = cube[valid, coff : coff + nch, :]
+        cells = np.transpose(block, (0, 2, 1))
+        order = np.argsort(r)
+        r_sorted = r[order]
+        cells = cells[order]
+        # Contiguous runs can be written in one putcol call.
+        breaks = np.nonzero(np.diff(r_sorted) != 1)[0] + 1
+        for chunk_r, chunk_c in zip(
+            np.split(r_sorted, breaks), np.split(cells, breaks)
+        ):
+            # chunk_c is [n, npol, nchan]; the MS column wants
+            # [npol, nchan, n].
+            arr = np.ascontiguousarray(np.transpose(chunk_c, (1, 2, 0)))
+            tb.putcol(column, arr, startrow=int(chunk_r[0]), nrow=len(chunk_r))
+            if extra is not None:
+                name, func = extra
+                tb.putcol(
+                    name, func(chunk_c), startrow=int(chunk_r[0]),
+                    nrow=len(chunk_r),
+                )
+            nwritten += len(chunk_r)
+        coff += nch
+    return nwritten
+
+
+def save_ms(core, path, data_column="CORRECTED_DATA", overwrite=False,
+            flag_row=True):
+    """Write the observation out as a Measurement Set at `path`.
+
+    difmapy has no MS writer of its own: an MS is a directory of
+    reference-counted CASA tables with subtables (ANTENNA, FIELD,
+    SPECTRAL_WINDOW, SOURCE, ...) that no difmapy session holds enough
+    of to rebuild faithfully. So the MS the data were *loaded from* is
+    copied and the session's own results are written into the copy -
+    the calibrated visibilities into `data_column` and the current
+    flags into FLAG. Everything else (metadata, subtables, the
+    untouched DATA column) is preserved exactly, which is what makes
+    the result usable by CASA.
+
+    The original MS is never modified; see `save_flags` for writing
+    flags back into it in place.
+
+    Parameters
+    ----------
+    core : CoreObservation
+        Observation loaded from an MS.
+    path : str
+        Path of the MS to create.
+    data_column : str | None
+        Column the calibrated visibilities go to, created if the MS
+        has none. None writes only the flags.
+    overwrite : bool
+        Replace `path` if it already exists.
+    flag_row : bool
+        Also maintain FLAG_ROW, as `save_flags` does.
+
+    Returns the path written.
+    """
+    import shutil
+
+    try:
+        import casatools
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("writing a Measurement Set requires casatools") from exc
+
+    origin = getattr(core, "_ms_origin", None)
+    if origin is None:
+        raise ValueError(
+            "this observation was not loaded from a Measurement Set, and "
+            "difmapy can only write one by copying the MS it came from; "
+            "use wobs() to write UVFITS instead"
+        )
+    src = origin["path"]
+    if os.path.abspath(path) == os.path.abspath(src):
+        raise ValueError(
+            f"refusing to overwrite the originating MS {src}; "
+            "use save_flags() to write flags back into it"
+        )
+    if os.path.exists(path):
+        if not overwrite:
+            raise FileExistsError(f"{path} exists; pass overwrite=True")
+        shutil.rmtree(path)
+    shutil.copytree(src, path)
+
+    ms_row = origin["ms_row"]  # [nrow, nif]
+    if_nchan = origin["if_nchan"]
+    flags = np.asarray(core.flags())  # [nrow, nctotal, npol]
+
+    tb = casatools.table()
+    tb.open(path, nomodify=False)
+    try:
+        _put_cube(
+            tb, "FLAG", flags, ms_row, if_nchan,
+            extra=("FLAG_ROW", lambda c: c.all(axis=(1, 2))) if flag_row else None,
+        )
+        if data_column:
+            vis, _ = core.calibrated_cube()
+            vis = np.asarray(vis)
+            if data_column not in tb.colnames():
+                _add_data_column(tb, data_column)
+            _put_cube(tb, data_column, vis, ms_row, if_nchan)
+        tb.flush()
+    finally:
+        tb.close()
+    return path
+
+
+def _add_data_column(tb, name, like="DATA"):
+    """Add a complex visibility column shaped like an existing one."""
+    desc = tb.getcoldesc(like)
+    desc.pop("comment", None)
+    tb.addcols({name: desc})
+

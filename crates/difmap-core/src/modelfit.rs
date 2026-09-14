@@ -126,7 +126,7 @@ struct CompMap {
     freepar: u32,
 }
 
-fn count_free(freepar: u32) -> usize {
+pub(crate) fn count_free(freepar: u32) -> usize {
     let mut n = 0;
     if freepar & M_FLUX != 0 {
         n += 1;

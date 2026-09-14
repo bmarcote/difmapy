@@ -14,6 +14,7 @@ pub mod grid;
 pub mod model;
 pub mod modelfit;
 pub mod obs;
+pub mod scans;
 pub mod selfcal;
 pub mod stokes;
 pub mod stream;

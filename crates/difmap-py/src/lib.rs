@@ -11,7 +11,8 @@ use difmap_core::edit::{edit, edit_rows, EditSelection};
 use difmap_core::geom::{clroff, resoff, shift, unshift};
 use difmap_core::grid::{invert, InvertPars, MapBeam, MapGeom};
 use difmap_core::model::{
-    add_to_stream_model, clear_models, merge_model, recompute_stream_model, CmpType, ModComp,
+    add_to_stream_model, clear_models, full_model_vis, merge_model, partition_variable_model,
+    recompute_stream_model, CmpType, ModComp,
 };
 use difmap_core::modelfit::fit_uvmodel;
 use difmap_core::obs::{Antenna, IfBand, Observation, Source};
@@ -302,6 +303,17 @@ impl CoreObservation {
             .collect()
     }
 
+    /// Per-antenna self-calibration constraints, in antenna order:
+    /// (name, subarray, fixed, weight).
+    #[getter]
+    fn antenna_constraints(&self) -> Vec<(String, u32, bool, f32)> {
+        self.ob
+            .antennas
+            .iter()
+            .map(|a| (a.name.clone(), a.subarray, a.fixed, a.weight))
+            .collect()
+    }
+
     fn set_antenna_constraints(&mut self, name: &str, fixed: bool, weight: f32) -> PyResult<()> {
         let mut found = false;
         for a in self.ob.antennas.iter_mut() {
@@ -379,7 +391,7 @@ impl CoreObservation {
         ))
     }
 
-    /// Model visibilities as complex64 [nrow, nif].
+    /// Established-model visibilities as complex64 [nrow, nif].
     fn stream_model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<Complex32>>> {
         let s = self
             .ob
@@ -387,6 +399,24 @@ impl CoreObservation {
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("no selection"))?;
         let m: Vec<Complex32> = s.model.iter().map(|&(re, im)| Complex32::new(re, im)).collect();
+        Ok(PyArray1::from_vec(py, m).reshape([self.ob.nrow, self.ob.nif()])?)
+    }
+
+    /// Complete-model visibilities - established plus tentative - as
+    /// complex64 [nrow, nif].
+    ///
+    /// Outside `modelfit` every component is in the stream model, so
+    /// this equals `stream_model`; it stays right even mid-fit, when the
+    /// components being fitted are held apart.
+    fn full_model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<Complex32>>> {
+        if self.ob.stream.is_none() {
+            return Err(PyRuntimeError::new_err("no selection"));
+        }
+        let m: Vec<Complex32> = py
+            .detach(|| full_model_vis(&self.ob))
+            .iter()
+            .map(|&(re, im)| Complex32::new(re, im))
+            .collect();
         Ok(PyArray1::from_vec(py, m).reshape([self.ob.nrow, self.ob.nif()])?)
     }
 
@@ -529,7 +559,11 @@ impl CoreObservation {
         let wins = parse_windows(windows);
         let res =
             py.detach(|| clean(mb, &wins, niter, gain, cutoff).map_err(run_err))?;
+        // The components are part of the model straight away. The
+        // residual map already has them subtracted (CLEAN works in the
+        // image plane), so it stays valid for the next clean.
         self.ob.newmod.extend(res.comps.iter().cloned());
+        py.detach(|| merge_model(&mut self.ob));
         let d = PyDict::new(py);
         d.set_item("niter", res.niter)?;
         d.set_item("cleaned_flux", res.cleaned_flux)?;
@@ -567,21 +601,26 @@ impl CoreObservation {
 
     // ---------------- model ----------------
 
-    /// Established + tentative model components as tuples
-    /// (type, flux, x, y, major, ratio, phi, freq0, spcind).
+    /// Model components as tuples
+    /// (type, flux, x, y, major, ratio, phi, freq0, spcind), returned as
+    /// (model, pending). Every binding leaves `pending` empty: it only
+    /// holds components while `modelfit` is working on them.
     fn get_models<'py>(&self, py: Python<'py>) -> PyResult<(Bound<'py, PyList>, Bound<'py, PyList>)> {
         let old = PyList::new(py, self.ob.model.iter().map(comp_to_tuple))?;
         let new = PyList::new(py, self.ob.newmod.iter().map(comp_to_tuple))?;
         Ok((old, new))
     }
 
-    /// Add a component to the tentative model (difmap addcmp).
-    /// `freepar` is the bitmask of parameters that modelfit may vary.
+    /// Add a component to the model (difmap addcmp), with its
+    /// visibilities in the stream model at once: there is no separate
+    /// step to establish it. `freepar` is the bitmask of parameters
+    /// that modelfit may vary.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (ctype, flux, x, y, major=0.0, ratio=1.0, phi=0.0, freq0=0.0,
                         spcind=0.0, freepar=0))]
     fn add_component(
         &mut self,
+        py: Python<'_>,
         ctype: i32,
         flux: f32,
         x: f32,
@@ -596,18 +635,34 @@ impl CoreObservation {
         let mut c = comp_from_args(ctype, flux, x, y, major, ratio, phi, freq0, spcind)?;
         c.freepar = freepar;
         self.ob.newmod.push(c);
+        py.detach(|| merge_model(&mut self.ob));
+        // The residuals changed, so any map made before is stale.
+        self.mb = None;
         Ok(())
     }
 
-    /// The free-parameter bitmask of each tentative model component.
+    /// The free-parameter bitmask of every model component, in
+    /// get_models() order.
     #[getter]
-    fn tentative_freepars(&self) -> Vec<u32> {
-        self.ob.newmod.iter().map(|c| c.freepar).collect()
+    fn freepars(&self) -> Vec<u32> {
+        self.ob
+            .model
+            .iter()
+            .chain(self.ob.newmod.iter())
+            .map(|c| c.freepar)
+            .collect()
     }
 
-    /// Establish the tentative model (difmap keep).
-    fn keep(&mut self, py: Python<'_>) {
-        py.detach(|| merge_model(&mut self.ob));
+    /// How many components modelfit would vary: those with at least one
+    /// free parameter.
+    #[getter]
+    fn nvariable(&self) -> usize {
+        self.ob
+            .model
+            .iter()
+            .chain(self.ob.newmod.iter())
+            .filter(|c| c.is_variable())
+            .count()
     }
 
     /// Clear models (difmap clrmod).
@@ -616,10 +671,12 @@ impl CoreObservation {
         py.detach(|| clear_models(&mut self.ob, do_old, do_new));
     }
 
-    /// Fit the free parameters of the tentative model to the residual
-    /// visibilities (difmap modelfit). Components are taken from the
-    /// tentative model (`newmod`); their `freepar` bitmasks are given
-    /// in `freepars` (one per component, same order as get_models()[1]).
+    /// Fit the free parameters of the model to the visibilities (difmap
+    /// modelfit). `freepars`, if given, replaces the free-parameter
+    /// bitmask of every component, one per component in get_models()
+    /// order. The fitted components are back in the model when this
+    /// returns - also when the fit fails - at its end, after the fixed
+    /// ones; "nfitted" says how many there are.
     /// Returns a summary dict including per-component uncertainties.
     #[pyo3(signature = (niter=-1, freepars=vec![], uvmin=0.0, uvmax=0.0))]
     fn modelfit<'py>(
@@ -630,29 +687,42 @@ impl CoreObservation {
         uvmin: f32,
         uvmax: f32,
     ) -> PyResult<Bound<'py, PyDict>> {
-        if self.ob.newmod.is_empty() {
-            return Err(PyRuntimeError::new_err(
-                "no tentative model components to fit; use add_component()",
-            ));
-        }
-        if !freepars.is_empty() && freepars.len() != self.ob.newmod.len() {
+        let ncomp = self.ob.model.len() + self.ob.newmod.len();
+        if !freepars.is_empty() && freepars.len() != ncomp {
             return Err(PyValueError::new_err(format!(
                 "freepars has {} entries for {} components",
                 freepars.len(),
-                self.ob.newmod.len()
+                ncomp
             )));
         }
-        let mut comps = std::mem::take(&mut self.ob.newmod);
-        for (i, c) in comps.iter_mut().enumerate() {
-            if let Some(&fp) = freepars.get(i) {
-                c.freepar = fp;
-            }
+        for (c, &fp) in self
+            .ob
+            .model
+            .iter_mut()
+            .chain(self.ob.newmod.iter_mut())
+            .zip(freepars.iter())
+        {
+            c.freepar = fp;
         }
+        // difmap's obvarmod(): everything with no free parameter stays
+        // in the stream model, so the fit works on the residuals after
+        // it, and everything with one is taken out of it to be fitted.
+        py.detach(|| partition_variable_model(&mut self.ob));
+        self.mb = None; // the stream model moved between the two halves
+        if self.ob.newmod.is_empty() {
+            return Err(PyRuntimeError::new_err(
+                "no model component has a free parameter to fit; \
+                 use add_component(freepar=...)",
+            ));
+        }
+        let mut comps = std::mem::take(&mut self.ob.newmod);
         let res = py.detach(|| fit_uvmodel(&self.ob, &mut comps, niter, uvmin, uvmax));
-        // Always restore the (possibly updated) components.
+        // Always put the (possibly updated) components back into the
+        // model, so that no failure leaves part of it out.
+        let nfitted = comps.len();
         self.ob.newmod = comps;
+        py.detach(|| merge_model(&mut self.ob));
         let res = res.map_err(run_err)?;
-        self.mb = None;
         let d = PyDict::new(py);
         d.set_item("rchisq", res.rchisq)?;
         d.set_item("chisq", res.chisq)?;
@@ -662,6 +732,7 @@ impl CoreObservation {
         d.set_item("niter_better", res.nbetter)?;
         d.set_item("niter", res.niter)?;
         d.set_item("converged", res.converged)?;
+        d.set_item("nfitted", nfitted)?;
         let errs = PyList::new(
             py,
             res.errors.iter().map(|e| {
@@ -695,7 +766,8 @@ impl CoreObservation {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (doamp=false, dophs=true, dofloat=false, solint=0.0, doone=false,
                         gauval=0.0, gaurad=0.0, maxamp=0.0, maxphs=0.0,
-                        uvmin=0.0, uvmax=0.0, mintel=0, doflag=false))]
+                        uvmin=0.0, uvmax=0.0, mintel=0, doflag=false,
+                        nscan=0, scangap=0.0))]
     fn selfcal<'py>(
         &mut self,
         py: Python<'py>,
@@ -712,12 +784,16 @@ impl CoreObservation {
         uvmax: f32,
         mintel: usize,
         doflag: bool,
+        nscan: usize,
+        scangap: f64,
     ) -> PyResult<Bound<'py, PyDict>> {
         let pars = SelfcalPars {
             doamp,
             dophs,
             dofloat,
             solint,
+            nscan,
+            scangap,
             doone,
             gauval,
             gaurad,
@@ -1107,19 +1183,20 @@ impl CoreObservation {
 
     /// Time-averaged spectrum of the current polarization selection
     /// (difmap specplot data).
-    #[pyo3(signature = (baseline=None, tmin=None, tmax=None))]
+    #[pyo3(signature = (baseline=None, tmin=None, tmax=None, calibrated=true))]
     fn spectrum<'py>(
         &self,
         py: Python<'py>,
         baseline: Option<(u32, u32)>,
         tmin: Option<f64>,
         tmax: Option<f64>,
+        calibrated: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         let range = match (tmin, tmax) {
             (None, None) => None,
             (a, b) => Some((a.unwrap_or(f64::MIN), b.unwrap_or(f64::MAX))),
         };
-        let s = py.detach(|| spectrum(&self.ob, baseline, range));
+        let s = py.detach(|| spectrum(&self.ob, baseline, range, calibrated));
         let d = PyDict::new(py);
         d.set_item("chan", s.chan)?;
         d.set_item("freq", PyArray1::from_vec(py, s.freq))?;
@@ -1140,6 +1217,19 @@ impl CoreObservation {
     /// Integration times of the observation (seconds since ref_mjd).
     fn times<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         PyArray1::from_slice(py, &self.ob.times)
+    }
+
+    /// The scans of the observation as (first, last) integration index
+    /// pairs, delimited by a gap of `scangap` seconds (0 = default).
+    #[pyo3(signature = (scangap=0.0))]
+    fn scans(&self, scangap: f64) -> Vec<(usize, usize)> {
+        difmap_core::scans::scans(&self.ob, scangap)
+    }
+
+    /// The default scan-delimiting gap in seconds.
+    #[getter]
+    fn default_scangap(&self) -> f64 {
+        difmap_core::scans::default_gap(&self.ob)
     }
 
     /// True where a self-cal solution was actually applied, in the same
@@ -1174,7 +1264,9 @@ impl CoreObservation {
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    // Rust crate version, not the difmapy release version: the Python package
+    // takes `__version__` from pyproject.toml via importlib.metadata.
+    m.add("__core_version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<CoreObservation>()?;
     Ok(())
 }

@@ -102,6 +102,92 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
   arrays keyed by panel quantity (`amp`, `phase`, ...), plus `wt`,
   `row`, `cif` and, for paged plots, `group` (which panel row a point
   belongs to). Flag edits are index-based and shared across panels.
+- Stacked panels share one x axis: `_share_x_axis()` links them all to
+  the first and strips the tick labels from every panel but the bottom
+  one. pyqtgraph's link matches the *data* across panels of different
+  widths, so the linked view ranges are close but not equal - do not
+  assert equality on them.
+- `mapplot` keeps hand-placed components in `MapPlot._placed`, drawn
+  (dashed) but not in `obs.model`, because their flux is only a guess
+  and anything in the model is imaged at once. `run_modelfit` adds them
+  (`_commit_placed`) and restores the previous model if the fit fails;
+  closing the window adds any still unfitted. `run_modelfit` refuses to
+  seed a component of its own, unlike `Observation.modelfit`; it fits
+  whenever something is placed or `obs.nvariable` is non-zero.
+- `ignore(station)` is a flag edit with a memory: it snapshots the FLAG
+  rows of that station's baselines (as they would be with *nothing*
+  ignored - see `_flags_without_ignores`, which matters for a baseline
+  between two ignored stations) and flags them, and `unignore` restores
+  the snapshot. Every path that edits flags calls `_reapply_ignores()`
+  afterwards - `flag`, `unflag` and `EditHistory.apply` - so an unflag
+  cannot resurrect an ignored station. Ignores are session state: they
+  are not written by `save()` and do not survive `get()`.
+- `z`, `u` and `r` are reserved in **every** plot (difmap's `Z`, `U` and
+  `L`): restore the y range, restore the x range, reload. That is why
+  flag undo/redo moved to Ctrl+Z/Ctrl+Shift+Z and unflag-nearest to
+  `F`. A subclass adding keys must not take z/u/r, and must fall through
+  to `super().keyPressEvent`. Plots expose their panels through
+  `view_boxes()`, and a panel whose default view is fixed (phase, or
+  fplot's floored amplitude range) reports it from `default_y_range`.
+- **Never let Python garbage-collect a live plot window.**
+  `plots.base` keeps a strong reference to every window it creates and
+  destroys them from an `atexit` handler (`close_all_windows`). Left to
+  the interpreter, a window still alive at shutdown has its wrappers
+  freed first and Qt then walks `~QGraphicsScene` -> `~QGraphicsItem`
+  over items whose Python halves are gone, which aborts the process
+  with SIGTRAP ("zsh: trace trap" after exiting the CLI). It reproduced
+  in about half of the runs of
+  `printf 'mapplot(block=False)\nexit\n' | difmapy file.uvf`;
+  `tests/test_plots.py` keeps a subprocess regression test, repeated,
+  because of that. A *closed* window is still a live QMainWindow, so it
+  stays in the registry until its deferred deletion has actually
+  happened - entries are pruned by `_alive()` when the next window is
+  created, not by `closeEvent`. Our handler must also be registered
+  after `pyqtgraph` is imported so that it runs before Qt's own module
+  shutdown (atexit is last-registered-first).
+- Windows open at `PlotWindow.DEFAULT_SIZE`, clipped by
+  `fit_to_screen()`; the offscreen test platform reports an 800x600
+  virtual screen, so tests must compare against `fit_to_screen(...)`
+  rather than the raw constant.
+- `gscale` **does** apply its solutions. With `float_scale=False`
+  (difmap's default) the gains are renormalised to preserve the data's
+  flux scale, so the map peak barely moves and it can look like a
+  no-op; that is why it reports `fit_before`/`fit_after` like `selfcal`.
+- Time arguments go through `difmapy.units.parse_time` /
+  `parse_interval`, which accept "30s"/"1min"/"2h" strings but leave a
+  bare number in that argument's historical unit - **minutes** for
+  `selfcal`'s solint (difmap's unit), seconds everywhere else. Do not
+  "unify" those base units: `solint=30` means half an hour in every
+  existing difmap script and test.
+- `solint="scan"`/`"Nscan"` sets `SelfcalPars.nscan`, and the selfcal
+  bin loop then ends each bin on a scan boundary instead of at a fixed
+  duration, which is the only way to guarantee one solution per scan.
+  Scan numbers come from `scans::scan_index` (difmap's rule: a gap
+  bigger than the threshold starts a new scan) and are global, so every
+  subarray breaks its bins in the same places. The default threshold is
+  five times the median integration spacing, *not* difmap's flat hour -
+  that default is for breaking plot axes and would merge a whole track
+  into one "scan".
+- `spectrum()` (and so `specplot`/`fplot`) averages the *raw*
+  channel-resolved cube, which the stream's calibration never touches,
+  so it applies the gains, baseline corrections and shift itself, per
+  channel - the same composition as `Stream::apply_calibration_rows`,
+  but with the channel's own frequency for the shift phase. It read the
+  cube uncalibrated until 2026-09-10, which made a vector average of
+  self-calibrated data meaningless. `tests/test_diagnostics.py` pins it
+  against the stream's own average.
+- pyqtgraph's `ColorBarItem` rounds every level to a multiple of
+  `rounding` (default **1**) and refuses a narrower span, so on a map in
+  Jy/beam the first drag of a handle snapped the levels to (0, 1) and
+  the bar died. `MapPlot._tune_rounding()` keeps it at a thousandth of
+  the displayed span, on every refresh and after every drag. The log
+  colour scale is a re-positioning of the colour map's stops
+  (`log_stretch`), never a transform of the pixel values: the levels and
+  the bar axis must stay in Jy/beam, and residual maps have negatives.
+- `selfcal` reports difmap's `moddif` fit before and after the solution,
+  and the residual-map statistics too when a map already exists. The
+  extra invert that costs is the one the next `clean` would have done,
+  since self-cal invalidates the map anyway.
 
 ## Deliberate deviations from difmap
 
@@ -160,6 +246,26 @@ the accumulated gains. Hard-won details, all of them load-bearing:
   integration and quietly break per-integration self-cal.
 - `SelfcalResult.nbins` counts solution bins per (subarray, IF), not
   per integration.
+- With a finite `solint`, self-cal does **not** apply a bin's solution
+  as a step: `apply_solns` (a port of the same function in slfcal.c)
+  smooths and interpolates the bins onto the integration grid with a
+  Gaussian of `sigma = 0.37478125 * solint` minutes, truncated at
+  2.5 sigma, weighting each bin by the area under that Gaussian inside
+  its [begut, endut] times the solution's own weight. That is why
+  difmap's corplot shows a smooth evolution, and the give-away that it
+  is working is that the corrections vary *within* a bin
+  (`tests/test_calibration_paths.py` pins that). `solint=0` (per
+  integration) and `doone`/`gscale` skip it, as in difmap, and so does
+  scan binning (`nscan > 0`): one solution per scan is a step by
+  construction, and blending across a slew gap would undo the point of
+  it.
+- A gap in a station's data wider than the 2.5-sigma reach leaves
+  integrations with *no* solution: their gain-table entries read
+  1.0 / 0 deg and `gains_used()` is false. Plots must mask on
+  `gains_used()`, not just on the `bad` flag - drawing those entries
+  made an interpolated, perfectly smooth run of corrections look like
+  it jumped to unity and back, which is what `corplot` did until
+  2026-09-11.
 - An identically zero visibility counts as deleted (difmap behaviour),
   which bites when constructing test data: if RR == LL then V == 0 and
   the sample is reported deleted rather than flagged.
@@ -171,15 +277,28 @@ the accumulated gains. Hard-won details, all of them load-bearing:
   truth from a reasonable starting guess but can settle in a local
   minimum (often at the `ratio -> 0` limit) from a far-off start. This
   is expected, not a bug.
+- There is no user-visible tentative model and no `keep`: every
+  binding that adds or fits components (`add_component`, `clean`,
+  `modelfit`) merges `ob.newmod` into `ob.model` before it returns, so
+  `newmod` is only ever non-empty inside `modelfit`. Do not reintroduce
+  a step to establish the model (removed 2026-09-14 at the user's
+  request).
+- `modelfit` partitions the model first (`partition_variable_model`,
+  difmap's obvarmod): components with no free parameter stay in the
+  stream model so the fit sees the residuals after them, components
+  with one are moved to `newmod` and fitted, then merged back. Do not
+  "simplify" it away - dropping the fixed components from the fit (what
+  the port did until 2026-09-10) makes the fit absorb their flux a
+  second time, and merging the result then doubles it.
+  `ncomp` in the result counts the components actually fitted;
+  `total_ncomp` the whole model.
 - On the real 3C345 data the map peak lies outside the inner quarter at
   1024 x 1 mas, so `imstat` (which only scans the cleanable inner
   quarter) reports a different peak from `np.argmax(obs.dmap)`.
 - `tplot` has labelled its y axis with antenna names since b8919f7;
   a report of numbers there means a stale install, not a bug.
-- `selfcal`/`gscale` against an empty established model produce NaN
-  gains and poison the stream. `modelfit` leaves its components
-  *tentative*, so `keep()` is required before self-calibrating against
-  a fitted model.
+- `selfcal`/`gscale` against an empty model produce NaN gains and
+  poison the stream.
 - CASA writes correlations as RR, RL, LR, LL, which is not a regular
   FITS STOKES axis; `save_uvfits` reorders them (see the test in
   `tests/test_realdata.py`).

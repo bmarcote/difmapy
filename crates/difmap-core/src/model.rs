@@ -89,6 +89,13 @@ impl ModComp {
         }
     }
 
+    /// True if `modelfit` would vary any of this component's
+    /// parameters. Components with none are held fixed by being
+    /// established (see `partition_variable_model`).
+    pub fn is_variable(&self) -> bool {
+        crate::modelfit::count_free(self.freepar) > 0
+    }
+
     /// Amplitude and phase of this component at (uu, vv) wavelengths
     /// and frequency `freq` (Hz). Exact port of cmpvis() (modvis.c),
     /// currently without primary-beam attenuation.
@@ -131,46 +138,93 @@ impl ModComp {
     }
 }
 
+/// Accumulate the visibilities of `comps` into `out` (one (re, im) per
+/// row and IF, row-major), scaled by `sign`.
+///
+/// Split out of [`add_to_stream_model`] so that the same kernel can
+/// also fill a scratch buffer - see [`full_model_vis`] - rather than
+/// only the stream's own model array.
+fn accumulate_model(
+    uvw: &[f64],
+    if_freq: &[f64],
+    if_used: &[bool],
+    nif: usize,
+    comps: &[ModComp],
+    out: &mut [(f32, f32)],
+    sign: f64,
+) {
+    out.par_chunks_mut(nif).enumerate().for_each(|(row, mrow)| {
+        let u_sec = uvw[row * 3];
+        let v_sec = uvw[row * 3 + 1];
+        for (cif, m) in mrow.iter_mut().enumerate() {
+            if !if_used[cif] {
+                continue;
+            }
+            let freq = if_freq[cif];
+            let (uu, vv) = (u_sec * freq, v_sec * freq);
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for c in comps {
+                let (amp, phs) = c.vis(freq, uu, vv);
+                let (s, cph) = phs.sin_cos();
+                re += amp * cph;
+                im += amp * s;
+            }
+            m.0 += (sign * re) as f32;
+            m.1 += (sign * im) as f32;
+        }
+    });
+}
+
 /// Add the visibilities of `comps` to (or subtract from) the stream
 /// model arrays of the current selection, at each row/IF's uv
 /// coordinates and effective frequency.
 pub fn add_to_stream_model(ob: &mut Observation, comps: &[ModComp], subtract: bool) {
-    let stream = match ob.stream.as_mut() {
-        Some(s) => s,
-        None => return,
-    };
     if comps.is_empty() {
         return;
     }
     let nif = ob.ifs.len();
     let sign = if subtract { -1.0f64 } else { 1.0f64 };
     let uvw = &ob.uvw;
-    let if_freq = &stream.if_freq;
-    let if_used = &stream.if_used;
-    stream
-        .model
-        .par_chunks_mut(nif)
-        .enumerate()
-        .for_each(|(row, mrow)| {
-            let u_sec = uvw[row * 3];
-            let v_sec = uvw[row * 3 + 1];
-            for (cif, m) in mrow.iter_mut().enumerate() {
-                if !if_used[cif] {
-                    continue;
-                }
-                let freq = if_freq[cif];
-                let (uu, vv) = (u_sec * freq, v_sec * freq);
-                let (mut re, mut im) = (0.0f64, 0.0f64);
-                for c in comps {
-                    let (amp, phs) = c.vis(freq, uu, vv);
-                    let (s, cph) = phs.sin_cos();
-                    re += amp * cph;
-                    im += amp * s;
-                }
-                m.0 += (sign * re) as f32;
-                m.1 += (sign * im) as f32;
-            }
-        });
+    let stream = match ob.stream.as_mut() {
+        Some(s) => s,
+        None => return,
+    };
+    accumulate_model(
+        uvw,
+        &stream.if_freq,
+        &stream.if_used,
+        nif,
+        comps,
+        &mut stream.model,
+        sign,
+    );
+}
+
+/// Visibilities of the *complete* model - `ob.model` and `ob.newmod`
+/// alike - at every row and IF of the current selection.
+///
+/// The stream model holds `ob.model` only. The bindings merge `newmod`
+/// before returning, so the two agree outside a fit, but
+/// [`partition_variable_model`] takes the components being fitted out
+/// of the stream model while `modelfit` runs; this stays right then too.
+pub fn full_model_vis(ob: &Observation) -> Vec<(f32, f32)> {
+    let stream = match ob.stream.as_ref() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let mut out = stream.model.clone();
+    if !ob.newmod.is_empty() {
+        accumulate_model(
+            &ob.uvw,
+            &stream.if_freq,
+            &stream.if_used,
+            ob.ifs.len(),
+            &ob.newmod,
+            &mut out,
+            1.0,
+        );
+    }
+    out
 }
 
 /// Establish the tentative model: Fourier transform `ob.newmod` into
@@ -183,6 +237,36 @@ pub fn merge_model(ob: &mut Observation) {
     let comps = std::mem::take(&mut ob.newmod);
     add_to_stream_model(ob, &comps, false);
     ob.model.extend(comps);
+}
+
+/// Split the model into its fixed and variable parts, as difmap's
+/// obvarmod() does before every fit.
+///
+/// Afterwards the *established* model holds every component with no
+/// free parameter - CLEAN components above all - so its visibilities
+/// are in the stream model and hence removed from the residuals the fit
+/// works on; the *tentative* model holds every component that has one,
+/// established or not, with its contribution taken back out of the
+/// stream model. The fit only ever sees the tentative model, so without
+/// this a fixed component would be missing from the model being fitted
+/// and then merged again afterwards, counting its flux twice.
+///
+/// As in difmap, components taken out of the established model come
+/// first, which preserves their original order.
+pub fn partition_variable_model(ob: &mut Observation) {
+    let (fixed, variable): (Vec<ModComp>, Vec<ModComp>) = std::mem::take(&mut ob.newmod)
+        .into_iter()
+        .partition(|c| !c.is_variable());
+    add_to_stream_model(ob, &fixed, false);
+    ob.model.extend(fixed);
+
+    let (kept, freed): (Vec<ModComp>, Vec<ModComp>) = std::mem::take(&mut ob.model)
+        .into_iter()
+        .partition(|c| !c.is_variable());
+    add_to_stream_model(ob, &freed, true);
+    ob.model = kept;
+    ob.newmod = freed;
+    ob.newmod.extend(variable);
 }
 
 /// Clear models (difmap clrmod). Removing the established model also

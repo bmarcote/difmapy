@@ -88,7 +88,6 @@ def test_clean_restore_wmap(obs, tmp_path):
 def test_model_io(obs, tmp_path):
     obs.add_window(X0_MAS - 2, X0_MAS + 2, Y0_MAS - 2, Y0_MAS + 2)
     obs.clean(300, 0.1)
-    obs.keep()
     path = tmp_path / "test.mod"
     obs.wmodel(str(path))
     flux0 = obs.model_flux
@@ -110,7 +109,6 @@ def test_selfcal(corrupted_uvfits_file):
     o.mapsize(NX, CELL)
     # True model: point source at the phase center offset.
     o.addcmp(FLUX, X0_MAS, Y0_MAS)
-    o.keep()
 
     res = o.selfcal(amp=True, phase=True, float_scale=True)
     assert res["nbadsol"] == 0

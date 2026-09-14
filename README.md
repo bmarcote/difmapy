@@ -113,26 +113,30 @@ for _ in range(4):                     # the classic difmap loop
     obs.clean(200, 0.03)               # prints and returns a summary dict
     obs.selfcal(phase=True)
 obs.gscale()                           # amplitude scale per station
-obs.selfcal(amp=True, phase=True, solint=30)
+obs.selfcal(amp=True, phase=True, solint="scan")
 obs.clean(400, 0.02)
 
 obs.mapplot()                          # interactive; also spelled maplot()
 obs.radplot()                          # amp+phase vs uv-radius, model in red
+obs.projplot(30)                       # vs uv distance projected at PA 30; < / > turn it
 obs.vplot()                            # amp+phase vs time, 3 baselines/page
+obs.fplot()                            # amp+phase vs frequency, time-averaged
 obs.cpplot()                           # closure phases vs the model
-obs.corplot()                          # self-cal gain solutions
+obs.corplot()                          # self-cal gains: amp+phase per antenna
 
 info = obs.mapinfo()                   # beam, peak, model, residual noise
 m = obs.restore()                      # restored map (numpy array)
 obs.wmap("clean.fits")                 # FITS output with WCS + beam
 obs.save("mysession")                  # .uvf + .mod + .win + parameters
+                                       # (+ mysession.ms if loaded from an MS)
 # later: obs = difmapy.Observation.get("mysession")
 
 obs.clearmodel()                       # drop every component and start over
 ```
 
-`clean`, `modelfit` and `gscale` print a short report and return it as a
-dict, so a scripted run can keep the numbers:
+`clean`, `modelfit`, `selfcal` and `gscale` print a short report and
+return it as a dict (and will write it to a file, see `outfile=` below),
+so a scripted run can keep the numbers:
 
 ```python
 res = obs.clean(200, 0.03)
@@ -143,7 +147,39 @@ fit["rchisq"], fit["converged"], fit["components"], fit["errors"]
 
 g = obs.gscale()              # {"gains": {"EF": 1.03, ...}, ...}
 g["gains"]["EF"], g["gains_per_if"]["EF"]
+
+sc = obs.selfcal(phase=True)  # difmap's "fit before/after self-cal"
+sc["fit_before"]["rms"], sc["fit_after"]["rms"], sc["fit_after"]["sigma"]
+sc["map_before"]["max"], sc["map_after"]["rms"]   # when a map exists
 ```
+
+`gscale` reports the same before/after numbers. Note that with its
+default `float_scale=False` (difmap's behaviour) the gains are
+renormalised to preserve the *data's* flux scale rather than pull it
+onto the model, so the corrections can be large while the map peak
+barely moves - the fit statistics are what show that they were applied.
+
+Every one of them also takes `outfile=`, which writes the same result
+to a JSON file:
+
+```python
+obs.clean(200, 0.03, outfile="clean.json")
+obs.selfcal(phase=True, outfile="selfcal1.json")
+obs.mapinfo(outfile="image.json")
+```
+
+`invert`, `clean`, `modelfit`, `selfcal`, `gscale`, `imstat`,
+`noise_stats`, `moddif`, `mapinfo`, `station_gains`,
+`baseline_corrections`, `spectrum`, `closure_phases` and `scans` all
+accept it. Arrays become lists and NaN - which JSON has no syntax for,
+and which means "no solution" here - becomes `null`.
+
+`selfcal` measures the model-data fit on both sides of the solution, as
+difmap does (`obs.moddif()` on its own returns the same numbers), and
+adds the residual-map statistics whenever a map is already there -
+which costs nothing in an imaging loop, because self-cal invalidates the
+map and the next `clean` would have to re-invert anyway. Pass
+`mapstats=False` to skip them or `quiet=True` to print nothing.
 
 With no model at all, `modelfit` seeds itself with a circular Gaussian of
 zero width at the peak of the residual map, so `obs.modelfit()` on a
@@ -163,16 +199,40 @@ obs.save_flags()        # write FLAG (+FLAG_ROW) back into the source MS
 ```
 
 Interactive flagging (`radplot`, `uvplot`, `vplot`): **Shift+drag**
-sweeps a box to flag, **Ctrl+drag** unflags, `f`/`u` act on the nearest
-point, `z`/`r` undo and redo the last edit, and `x` shows or hides the
-flagged points (hidden by default). Plain drag/wheel keep pyqtgraph's
-pan/zoom, and `h` shows the full key legend of whichever plot is in
-front. In `vplot` the space bar switches flagging between the displayed
-baseline and every baseline of its first antenna.
+sweeps a box to flag, **Ctrl+drag** unflags, `f`/`F` act on the nearest
+point, **Ctrl+Z** / **Ctrl+Shift+Z** (or Ctrl+Y) undo and redo the last
+edit, and `x` shows or hides the flagged points (hidden by default).
+Plain drag/wheel keep pyqtgraph's pan/zoom, and `h` shows the full key
+legend of whichever plot is in front. In `vplot` the space bar switches
+flagging between the displayed baseline and every baseline of its first
+antenna.
+
+Plots against time (`vplot`, `tplot`, `corplot`, `cpplot`) cut out any
+gap between integrations longer than 10% of the observation, so scans
+hours apart sit side by side instead of leaving most of the axis empty.
+The cuts are shaded, and the axis still reads real times. Every plot
+opens scaled to show all of its data.
 
 Undo is exact: each edit stores the affected rows of the FLAG column
-before and after, so `z` restores what was there even where the edit
+before and after, so it restores what was there even where the edit
 overlapped data that was already flagged.
+
+Three keys mean the same thing in **every** plot, as they do in difmap:
+
+| key | action |
+| --- | --- |
+| `z` | restore the y axis range (difmap's `Z`); phase panels return to +-180 |
+| `u` | restore the x axis range (difmap's `U`) |
+| `r` | reload the plot from the data, after editing it from the prompt |
+
+`r` matters because a window does not know when the data behind it
+changes: flag, calibrate, `ignore` a station or re-image from the
+prompt, then press `r` to catch up.
+
+Open windows are held for you, so `mapplot()` at the prompt stays alive
+without having to keep the returned object, and they are destroyed when
+the session ends. `difmapy.plots.open_windows()` lists them and
+`close_all_windows()` shuts them all.
 
 Data that are absent from the file (zero weight) count as permanently
 flagged and cannot be unflagged, matching difmap's deleted-data flag.
@@ -202,6 +262,94 @@ own uniform and natural weighting.
 **Map dimensions no longer have to be powers of two** - any multiple of
 four works, since the FFTs handle arbitrary lengths - but powers of two
 (or products of small primes) are still much the fastest.
+
+### Setting a station aside
+
+```python
+obs.ignore("ef")                  # case-insensitive; several names allowed
+obs.ignored                       # ['EF']
+...                               # image, self-cal, fit, plot without it
+obs.unignore()                    # or unignore("EF"); no argument = all
+```
+
+`ignore` flags every baseline of those stations, so imaging, model
+fitting, self-calibration and the plots all skip them - but unlike
+`flag` it remembers their exact flag state first, and `unignore` puts
+that back rather than unflagging wholesale. That is the difference:
+everyone else's data can be flagged and calibrated in the meantime, and
+the station still comes back with its own history intact. An `unflag`
+does not resurrect an ignored station either, whether it comes from the
+prompt or from a rubber-band in a plot.
+
+Two consequences worth knowing. Flag edits made to an ignored station's
+own baselines while it is away are discarded by `unignore`, since it
+restores the remembered state. And self-calibration solved while a
+station is ignored has no solution for it, so it returns uncalibrated
+for those intervals - self-calibrate again, or `selfant` to hold it
+fixed. `selfant()` with no arguments lists every antenna's constraints;
+`selfant("all", weight=...)` (or `"*"`) sets them for the whole array,
+and `fix`/`weight` left out keep their current values.
+
+### Units, and solutions per scan
+
+Every argument that carries a time takes a string with its unit as well
+as a bare number:
+
+```python
+obs.selfcal(phase=True, solint="30s")      # seconds
+obs.selfcal(phase=True, solint="1min")     # 1 minute
+obs.selfcal(amp=True, solint="1.5 hours")
+obs.uvaver("2min")                         # averaging interval
+obs.flag(station="EF", tmin="1h", tmax="1.5h")
+obs.spectrum(tmax="30min")
+```
+
+Units are `s`/`sec`/`second(s)`, `m`/`min`/`minute(s)`,
+`h`/`hr`/`hour(s)` and `d`/`day(s)`. A **bare number keeps the unit that
+argument has always had** - minutes for `selfcal`'s `solint`, as in
+difmap, seconds for time ranges and for `uvaver` - so existing scripts
+are unaffected; a string is how you ask for something else.
+
+A solution interval also accepts scans:
+
+```python
+obs.selfcal(phase=True, solint="scan")     # exactly one solution per scan
+obs.selfcal(phase=True, solint="2scan")    # one per two scans
+```
+
+`"scan"` bins by whole scans rather than by a duration, so each scan
+gets one and only one solution however long it is - which a fixed
+interval cannot guarantee, since its bins are aligned to the clock and
+straddle the gaps. Scans are difmap's definition: two integrations more
+than a gap apart belong to different scans. The default gap is five
+times the median integration spacing (difmap's own default is a flat
+hour, which suits breaking a plot axis rather than self-calibrating),
+and `scangap=` overrides it:
+
+```python
+obs.scans()                                # [{'first':…, 'tmin':…, 'nint':…}, …]
+obs.default_scangap                        # the gap scans() used, in seconds
+obs.selfcal(phase=True, solint="scan", scangap="4min")
+```
+
+With a finite interval the solutions are not applied as steps. As
+difmap does, each bin's solution is smoothed and interpolated onto the
+integrations with a Gaussian of `sigma = 0.375 * solint` truncated at
+2.5 sigma, each bin weighted by the area under that Gaussian within it,
+so `corplot` shows the corrections evolving smoothly rather than
+jumping from one bin to the next. Per-integration solving (`solint=0`)
+has nothing to interpolate, `gscale` is one solution by definition, and
+a scan-based interval is a step per scan by construction - blending
+across a slew gap would undo the point of solving per scan. Where a
+station's data gap is wider than the interpolation can reach, those
+integrations get no solution at all and are left out of the plot.
+
+`selfcal` reports the interval it used and how many solution bins came
+out, so a per-scan solution can be checked at a glance:
+
+```
+selfcal: phase per scan; 8 solution bins, 0 unusable, 0 bad telescope solutions
+```
 
 ### Exporting calibration to CASA
 
@@ -274,9 +422,20 @@ print(res["rchisq"], res["converged"], obs.model, res["errors"])
 
 `niter=-1` (the default) iterates until successive Levenberg-Marquardt
 steps stop improving the reduced chi-squared; pass a positive `niter`
-for a fixed number of steps. With no tentative model, `seed_model()` is
+for a fixed number of steps. With no model at all, `seed_model()` is
 called first: a circular Gaussian of zero width carrying the peak flux,
 placed at the peak of the residual map.
+
+What `addcmp`, `clean`, `rmodel` and `modelfit` produce is part of the
+model straight away: `obs.model` is always the whole model, and there is
+no `keep` step. Components keep their free parameters, so a fit can
+simply be run again to iterate. As in difmap (`obvarmod`), components
+without free parameters - CLEAN components above all - are held fixed,
+their visibilities subtracted before the fit so that it does not absorb
+their flux a second time. `modelfit(free=...)` overrides the masks: a
+list gives one spec per model component; a single spec sets which
+parameters vary on the components that already have free parameters (or
+on every component, if none has).
 
 Like difmap's, this is a local optimizer: it converges from a sensible
 starting guess but can settle in a local minimum from a far-off one, so
@@ -298,12 +457,49 @@ prints the beam it is showing.
 | `d` | delete the window under the cursor |
 | `c` / `i` | CLEAN / re-invert |
 | `1` `2` `3` `4` | residual map, dirty beam, restored map, model |
-| `n` | add a Gaussian: click the centre, then each axis |
+| `m` | add a component: click the centre, then any two points on it |
 | `d` (while adding) | point source, then circular Gaussian |
-| `M` | fit the model to the UV data |
-| `k` / `C` | keep the tentative model / clear every component |
+| `f` | fit the placed components to the UV data (modelfit) |
+| `C` | clear every model component |
+| `l` | logarithmic or linear colour scale |
+| `z` / `u` | restore the y / x axis range |
+| `r` | reload the plot from the data |
 | `x` | close and report the image properties |
 | `h` / `q` | key legend / close |
+
+The same list runs along the bottom of the window as a footnote, and a
+heading over the image names what is being displayed (residual map,
+dirty beam, restored map or model) with its peak.
+
+A component placed with `m` is only *drawn*: the flux it starts from is
+a guess read off the map, so it is held out of the image until `f` fits
+it (or `k` establishes it as it stands). Placing one therefore never
+changes the map underneath it, and `f` never invents a component of its
+own - place one first.
+
+### Amplitude and phase against frequency
+
+`obs.fplot()` is `vplot`'s frequency counterpart: amplitude and phase
+per baseline, every channel of every IF averaged over the whole
+observation (or over `tmin`..`tmax`), `nplot` baselines to a page with
+`n`/`p` to page through them and `reftel=` to keep one station's.
+Amplitudes are scalar-averaged so they do not decorrelate as the fringe
+turns; phases come from the vector average, which is what makes a slope
+across the band visible. `specplot()` shows the same average over all
+baselines at once.
+
+Both draw on `obs.spectrum()`, which averages *all* channels - the
+unselected ones too, so it can be used to choose them - with the
+accumulated calibration applied; `calibrated=False` averages the data
+as it was loaded.
+
+### The colour bar
+
+Drag the two handles on the colour bar to set the displayed range.
+`l` (or `mapplot(scale="log")`) switches the colours to a logarithmic
+scale: the stretch is a redistribution of the colour map, not of the
+pixel values, so the levels and the bar's axis stay in Jy/beam and the
+negative half of a residual map keeps its place.
 
 Beside the colour bar is a histogram of the displayed pixel values with
 a Gaussian fitted to the residual noise, which shows the noise
@@ -314,11 +510,11 @@ peak position and flux, model components, total flux, residual rms.
 ### Other commands
 
 `shift`/`unshift`, `resoff`/`clroff`, `uvaver`, `uvtaper`, `uvrange`,
-`uvzero`, `gscale`, `station_gains`, `uncalib`, `selfant`, `keep`,
+`uvzero`, `gscale`, `station_gains`, `uncalib`, `selfant`,
 `clrmod`, `clearmodel`, `auto_mapsize`, `estimated_resolution`,
 `mapinfo`, `noise_stats`, `wmodel`/`rmodel`, `wwins`/`rwins`, `wobs`,
 `wdmap`, `wbeam`, `imstat`, `spectrum`, `closure_phases`, `specplot`,
-`tplot`.
+`fplot`, `tplot`, `scans`, `ignore`/`unignore`.
 
 ## Layout
 

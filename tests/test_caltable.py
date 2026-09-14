@@ -181,7 +181,6 @@ def test_phase_only_and_amp_only(ms, tmp_path):
     o2.select("I")
     o2.mapsize(1024, 1.0)
     o2.addcmp(1.0, 0.0, 0.0)
-    o2.keep()
     o2.gscale()
     out2 = str(tmp_path / "amp.G")
     o2.savecaltable(out2, quiet=True)

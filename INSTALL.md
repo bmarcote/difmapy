@@ -23,6 +23,20 @@ files take effect immediately, while changes to the Rust code need
 Leave off `--release` for faster compiles while developing, but expect
 the numerics to run roughly 10-30x slower.
 
+Running `cargo build` is *not* enough: it writes into `target/` and never
+refreshes the `_core` extension module that Python imports. Always go
+through `maturin develop`. `cargo` stays useful for the Rust-only loop
+(`cargo check`, `cargo clippy`, `cargo test`).
+
+### Versioning
+
+The release version lives in **one** place, `pyproject.toml`, and
+`difmapy.__version__` reads it back from the installed distribution
+metadata. The Rust workspace version in `Cargo.toml` is independent and
+surfaces as `difmapy._core.__core_version__`; do not re-export it as
+`__version__`, or a version bump in `pyproject.toml` will silently fail
+to show up.
+
 ### Verify the installation
 
 ```sh

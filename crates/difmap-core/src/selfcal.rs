@@ -29,6 +29,12 @@ pub struct SelfcalPars {
     pub dofloat: bool,
     /// Solution interval (minutes); <= 1/60 means per-integration.
     pub solint: f32,
+    /// Solve over this many whole scans per bin instead, so that every
+    /// scan gets exactly one solution (0 = use `solint`). Scans are
+    /// delimited by `scangap`; see [`crate::scans`].
+    pub nscan: usize,
+    /// Scan-delimiting gap in seconds (<= 0 selects the default).
+    pub scangap: f64,
     /// One single solution for the whole time range (difmap gscale).
     pub doone: bool,
     /// selftaper: weight down short baselines by 1-gaussian.
@@ -56,6 +62,8 @@ impl Default for SelfcalPars {
             dophs: true,
             dofloat: false,
             solint: 0.0,
+            nscan: 0,
+            scangap: 0.0,
             doone: false,
             gauval: 0.0,
             gaurad: 0.0,
@@ -468,6 +476,14 @@ pub fn selfcal(ob: &mut Observation, pars: &SelfcalPars) -> Result<SelfcalResult
             s
         }
     };
+    // Bins of whole scans need to know which scan each integration
+    // belongs to; scan numbers are global, so every subarray breaks its
+    // bins at the same places.
+    let scan_of = if pars.nscan > 0 {
+        crate::scans::scan_index(ob, pars.scangap)
+    } else {
+        Vec::new()
+    };
 
     for isub in 0..ob.nsub as u32 {
         let sd = subarray_data(ob, isub);
@@ -504,6 +520,16 @@ pub fn selfcal(ob: &mut Observation, pars: &SelfcalPars) -> Result<SelfcalResult
                 // Find the end of this solution bin (port of endbin()).
                 let utb = if pars.doone {
                     ntime_sub - 1
+                } else if pars.nscan > 0 {
+                    // End the bin with the last integration of the
+                    // nscan'th scan, so a scan is never split across
+                    // two solutions nor shared with the next.
+                    let last = scan_of[sd.itimes[uta]] + pars.nscan as u32 - 1;
+                    let mut utb = uta;
+                    while utb + 1 < ntime_sub && scan_of[sd.itimes[utb + 1]] <= last {
+                        utb += 1;
+                    }
+                    utb
                 } else if utint > 0.0 {
                     let t0 = ob.times[sd.itimes[uta]];
                     let endut = utint * (t0 / utint).floor() + utint;

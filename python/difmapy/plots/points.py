@@ -7,6 +7,8 @@ import numpy as np
 from difmapy.plots.base import (
     HIGHLIGHT_COLOR,
     FlagPlotBase,
+    TimeGaps,
+    install_time_axis,
     run_if_needed,
 )
 
@@ -60,9 +62,17 @@ def _stream_arrays(obs, with_model=True):
         "a2": np.repeat(a2, nif)[used],
     }
     if with_model:
-        model = np.asarray(core.stream_model()).ravel()[used]
+        # The complete model, whatever part of it the stream model holds
+        # (all of it, except while modelfit is working on some).
+        model = np.asarray(core.full_model()).ravel()[used]
         out["model"] = model if np.any(model != 0.0) else None
     return out
+
+
+def _wrap_angle(deg):
+    """A projection angle in [-90, 90) degrees: the projected distance
+    |u sin(phi) + v cos(phi)| repeats every 180 degrees."""
+    return round((float(deg) + 90.0) % 180.0 - 90.0, 9)
 
 
 def _place_corner(vb, item, pad=6):
@@ -105,10 +115,16 @@ class RadPlot(_VisPlot):
     default; ``n``/``p`` walk through the antennas, highlighting every
     baseline of one at a time, and the model (CLEAN components or
     Gaussians) is drawn in red where one is defined.
+
+    As projplot (`projection_deg` given), ``<``/``>`` turn the projection
+    angle by `angle_step` degrees.
     """
 
-    def __init__(self, obs, quantity="ap", colorby="spw", projection_deg=None):
-        self.projection = projection_deg
+    def __init__(self, obs, quantity="ap", colorby="spw", projection_deg=None,
+                 angle_step=10.0):
+        self.projection = (None if projection_deg is None
+                           else _wrap_angle(projection_deg))
+        self.angle_step = float(angle_step)
         self._highlight = None  # antenna index, or None for "all"
         self._hi_items = []
         self._labels = {}
@@ -118,12 +134,6 @@ class RadPlot(_VisPlot):
     def _build_panels(self):
         for i, key in enumerate(self.quantities):
             panel = self._add_panel(i, key)
-            if i == len(self.quantities) - 1:
-                xlabel = ("projected UV distance" if self.projection is not None
-                          else "UV radius")
-                panel.plot.setLabel("bottom", f"{xlabel} (Mλ)")
-            if i > 0:
-                panel.plot.setXLink(self._panels[0].plot)
             # A corner label naming the highlighted antenna. It lives
             # in the view box's pixel frame, so it stays put on zoom.
             lbl = pg.TextItem(anchor=(1, 0), color=HIGHLIGHT_COLOR)
@@ -133,6 +143,34 @@ class RadPlot(_VisPlot):
             )
             _place_corner(panel.vb, lbl)
             self._labels[key] = lbl
+        self._share_x_axis()
+        self._set_xlabel()
+
+    def _set_xlabel(self):
+        if not self._panels:
+            return
+        if self.projection is None:
+            text = "UV radius (Mλ)"
+        else:
+            text = f"projected UV distance, PA {self.projection:g}° (Mλ)"
+        self._panels[-1].plot.setLabel("bottom", text)
+
+    # ---- projection angle ---------------------------------------------
+
+    def rotate_projection(self, step_deg):
+        """Turn the projection angle by `step_deg` degrees and redraw.
+
+        The x axis is rescaled to the new projected distances; the y
+        ranges are left alone, since the projection does not change
+        amplitudes or phases. Returns the new angle, in [-90, 90).
+        """
+        if self.projection is None:
+            raise ValueError("radplot has no projection angle; use projplot")
+        self.projection = _wrap_angle(self.projection + float(step_deg))
+        self.refresh()
+        self._set_xlabel()
+        self.reset_ranges("x")
+        return self.projection
 
     def _collect(self):
         d = _stream_arrays(self.obs)
@@ -180,9 +218,13 @@ class RadPlot(_VisPlot):
             )
 
     def key_help(self):
-        return super().key_help() + [
+        keys = super().key_help() + [
             ("n / p", "highlight the next / previous antenna"),
         ]
+        if self.projection is not None:
+            keys.append(("< / >", f"turn the projection angle by "
+                                  f"-/+{self.angle_step:g} degrees"))
+        return keys
 
     def keyPressEvent(self, ev):
         key = ev.text().lower()
@@ -192,6 +234,9 @@ class RadPlot(_VisPlot):
                 "no antenna highlighted" if ant is None
                 else f"highlighting {self.obs.antennas[ant]}"
             )
+        elif key in ("<", ">") and self.projection is not None:
+            step = self.angle_step if key == ">" else -self.angle_step
+            self._message(f"projection angle {self.rotate_projection(step):g}°")
         else:
             super().keyPressEvent(ev)
 
@@ -200,7 +245,9 @@ class RadPlot(_VisPlot):
         who = ("all antennas" if self._highlight is None
                else f"highlighting {self.obs.antennas[self._highlight]}")
         model = " | model in red" if self.has_model() else ""
-        return f"{who} (n/p) | {base}{model}"
+        proj = ("" if self.projection is None
+                else f"PA {self.projection:g}° (</>) | ")
+        return f"{proj}{who} (n/p) | {base}{model}"
 
 
 class UVPlot(FlagPlotBase):
@@ -240,6 +287,9 @@ class VPlot(_VisPlot):
     the space bar switches between the two.
     """
 
+    #: Tall: a page is several baselines of stacked amp/phase panels.
+    DEFAULT_SIZE = (1200, 950)
+
     def __init__(self, obs, reftel=None, quantity="ap", nplot=3):
         names = obs.antennas
         self.reftel = None
@@ -250,6 +300,9 @@ class VPlot(_VisPlot):
         self.page = 0
         self.by_antenna = False
         self._baselines = []
+        # One cut time axis for the whole observation, so every page
+        # (and every other time plot) breaks at the same places.
+        self.gaps = TimeGaps.of(obs)
         title = "difmapy vplot"
         if self.reftel is not None:
             title += f" ({names[self.reftel]})"
@@ -285,8 +338,8 @@ class VPlot(_VisPlot):
                 )
                 if key == "amp":
                     panel.plot.setLabel("right", "")
-                if row:
-                    panel.plot.setXLink(self._panels[0].plot)
+                install_time_axis(panel.plot, self.gaps)
+        self._share_x_axis()
         if self._panels:
             self._panels[-1].plot.setLabel("bottom", "Time (hours)")
 
@@ -294,7 +347,21 @@ class VPlot(_VisPlot):
         self.glw.clear()
         self._panels = []
         self._items = []
+        # A new page holds different baselines, so it gets its own
+        # auto-scale rather than inheriting the previous page's view.
+        self._scaled = False
         self.refresh()
+
+    def reload(self):
+        """Re-read the baselines as well as the data: ignoring or
+        flagging a station from the prompt can change which baselines
+        there are to page through."""
+        self._baselines = []
+        page = self.page
+        self._relayout()
+        self.page = min(page, self.npages - 1)
+        if self.page != page:
+            self._relayout()
 
     def _collect(self):
         d = _stream_arrays(self.obs)
@@ -309,7 +376,7 @@ class VPlot(_VisPlot):
         out = {k: (v[keep] if isinstance(v, np.ndarray) else v)
                for k, v in d.items() if v is not None}
         out["group"] = group[keep]
-        out["x"] = out["time"] / 3600.0
+        out["x"] = self.gaps.compress(out["time"] / 3600.0)
         out.update(self._vis_columns(out))
         return out
 
@@ -375,8 +442,10 @@ def radplot(obs, quantity="ap", colorby="spw", block=None):
     return p
 
 
-def projplot(obs, angle_deg=0.0, quantity="ap", colorby="spw", block=None):
-    p = RadPlot(obs, quantity=quantity, colorby=colorby, projection_deg=angle_deg)
+def projplot(obs, angle_deg=0.0, quantity="ap", colorby="spw", block=None,
+             step=10.0):
+    p = RadPlot(obs, quantity=quantity, colorby=colorby,
+                projection_deg=angle_deg, angle_step=step)
     run_if_needed(p, block)
     return p
 

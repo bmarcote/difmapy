@@ -22,13 +22,14 @@ import sys
 # The observation methods exposed as bare, difmap-like commands.
 COMMANDS = (
     # selection and data
-    "select", "header", "flag", "unflag", "save_flags", "uvaver",
+    "select", "header", "flag", "unflag", "ignore", "unignore",
+    "save_flags", "uvaver",
     "savecaltable", "gain_snapshot",
     # imaging setup
     "mapsize", "auto_mapsize", "estimated_resolution",
     "uvweight", "uvtaper", "uvrange", "uvzero",
     # imaging
-    "invert", "clean", "keep", "clrmod", "clearmodel", "restore", "imstat",
+    "invert", "clean", "clrmod", "clearmodel", "restore", "imstat",
     "peak_offset", "noise_stats", "mapinfo", "print_mapinfo",
     "add_window", "clear_windows",
     # calibration
@@ -40,11 +41,11 @@ COMMANDS = (
     "shift", "unshift",
     # plots
     "mapplot", "maplot", "radplot", "projplot", "uvplot", "vplot",
-    "cpplot", "tplot", "corplot", "specplot",
+    "cpplot", "tplot", "corplot", "specplot", "fplot",
     # output
     "wobs", "wmap", "wdmap", "wbeam", "wwins", "rwins", "save",
     # data access
-    "closure_phases", "spectrum",
+    "closure_phases", "spectrum", "scans",
 )
 
 

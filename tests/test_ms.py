@@ -1,6 +1,8 @@
 """Measurement Set loading tests, using a CASA-simulated MS containing
 a point source at a known offset (ground truth incl. UVW conventions)."""
 
+import os
+
 import numpy as np
 import pytest
 
@@ -106,3 +108,55 @@ def test_ms_clean_selfcal_smoke(ms_path):
     assert res["nbadsol"] == 0
     stats = o.imstat()
     assert max(abs(stats["min"]), abs(stats["max"])) < 0.05 * FLUX
+
+
+def test_save_writes_an_ms_when_the_session_came_from_one(ms_path, tmp_path):
+    """save() of an MS-loaded session must produce a .ms alongside the
+    .uvf, carrying this session's flags and calibrated data, and leave
+    the MS it was loaded from untouched."""
+    obs = difmapy.Observation.from_ms(ms_path)
+    obs.mapsize(NX, CELL)
+    obs.flag(station="AN0")
+    nflagged = int(np.asarray(obs._core.flags()).sum())
+    assert nflagged > 0
+
+    prefix = str(tmp_path / "session")
+    obs.save(prefix)
+    out = f"{prefix}.ms"
+    assert os.path.isdir(out)
+    assert os.path.exists(f"{prefix}.uvf")
+
+    # The originating MS is not modified.
+    src = difmapy.Observation.from_ms(ms_path)
+    assert int(np.asarray(src._core.flags()).sum()) == 0
+
+    # The flags are in the copy...
+    back = difmapy.Observation.from_ms(out)
+    assert int(np.asarray(back._core.flags()).sum()) == nflagged
+
+    # ...and the calibrated visibilities are in CORRECTED_DATA, while
+    # DATA still holds what CASA simulated.
+    corr = difmapy.Observation.from_ms(out, data_column="CORRECTED_DATA")
+    vis, _ = corr._core.calibrated_cube()
+    ref, _ = obs._core.calibrated_cube()
+    assert np.allclose(np.asarray(vis), np.asarray(ref), atol=1e-5)
+
+
+def test_save_ms_refuses_to_clobber_the_original(ms_path):
+    from difmapy.io.ms import save_ms
+
+    obs = difmapy.Observation.from_ms(ms_path)
+    with pytest.raises(ValueError, match="originating MS"):
+        save_ms(obs._core, ms_path)
+
+
+def test_save_ms_needs_an_ms_to_start_from(uvfits_file, tmp_path):
+    """A UVFITS session has no MS to copy: saying so beats writing a
+    directory that is not a valid Measurement Set."""
+    obs = difmapy.load(uvfits_file)
+    prefix = str(tmp_path / "u")
+    obs.save(prefix)                      # no .ms, and no complaint
+    assert not os.path.exists(f"{prefix}.ms")
+    with pytest.raises(ValueError, match="not loaded from a Measurement Set"):
+        obs.save(prefix, ms=True)
+

@@ -56,7 +56,6 @@ def test_shift_moves_source(obs):
 def test_shift_moves_model_with_data(obs):
     """The model must follow the shift, so residuals stay unchanged."""
     obs.addcmp(FLUX, X0_MAS, Y0_MAS)
-    obs.keep()
     obs.invert()
     rms0 = obs.imstat()["rms"]
 
@@ -83,7 +82,6 @@ def test_shift_survives_flagging(obs):
 def test_resoff_and_clroff(obs):
     """resoff must absorb a baseline-based error that self-cal cannot."""
     obs.addcmp(FLUX, X0_MAS, Y0_MAS)
-    obs.keep()
     obs.invert()
     rms0 = obs.imstat()["rms"]
     n = obs.resoff()
@@ -108,7 +106,6 @@ def test_resoff_corrects_baseline_error(uvfits_file):
     o.select("I")
     o.mapsize(NX, CELL)
     o.addcmp(FLUX, X0_MAS, Y0_MAS)
-    o.keep()
     # The synthetic data are a perfect point source, so the corrections
     # must come out as unity on every baseline.
     o.resoff()
@@ -170,7 +167,6 @@ def test_uvaver_keeps_integrations_intact(obs):
     # Self-cal on the averaged data solves per integration, not per row
     # (nbins counts solution bins per subarray and IF).
     avg.addcmp(FLUX, X0_MAS, Y0_MAS)
-    avg.keep()
     res = avg.selfcal(phase=True)
     assert res["nbins"] == avg._core.ntimes * avg.nif
 
@@ -282,7 +278,6 @@ def test_real_data_resoff_reduces_residuals():
     s = o.imstat()
     px, py = s["maxpos"]
     o.addcmp(s["max"], px - 512, py - 512)
-    o.keep()
     o.invert()
     rms0 = o.imstat()["rms"]
     n = o.resoff()
@@ -293,3 +288,81 @@ def test_real_data_resoff_reduces_residuals():
     o.clroff()
     o.invert()
     assert o.imstat()["rms"] == pytest.approx(rms0, rel=1e-3)
+
+
+# ----------------------------------------------------------------------
+# outfile=: every command that reports numbers can write them out
+# ----------------------------------------------------------------------
+
+
+def test_outfile_writes_the_result_as_json(obs, tmp_path):
+    import json
+
+    obs.invert()
+    obs.addcmp(FLUX, X0_MAS, Y0_MAS, free=["flux", "pos"])
+
+    calls = {
+        "invert": lambda f: obs.invert(outfile=f),
+        "imstat": lambda f: obs.imstat(outfile=f),
+        "noise_stats": lambda f: obs.noise_stats(outfile=f),
+        "moddif": lambda f: obs.moddif(outfile=f),
+        "mapinfo": lambda f: obs.mapinfo(outfile=f),
+        "clean": lambda f: obs.clean(50, 0.05, quiet=True, outfile=f),
+        "selfcal": lambda f: obs.selfcal(phase=True, quiet=True, outfile=f),
+        "gscale": lambda f: obs.gscale(quiet=True, outfile=f),
+        "station_gains": lambda f: obs.station_gains(outfile=f),
+        "spectrum": lambda f: obs.spectrum(outfile=f),
+        "closure_phases": lambda f: obs.closure_phases(outfile=f),
+        "scans": lambda f: obs.scans(outfile=f),
+        "baseline_corrections": lambda f: obs.baseline_corrections(outfile=f),
+    }
+    for name, call in calls.items():
+        path = tmp_path / f"{name}.json"
+        returned = call(str(path))
+        assert path.exists(), name
+        written = json.loads(path.read_text())
+        # The file holds what the call returned, in JSON form.
+        assert type(written) is type(written if isinstance(returned, list) else {})
+        if isinstance(returned, dict):
+            assert set(written) == {str(k) for k in returned}
+        else:
+            assert len(written) == len(returned)
+
+    # modelfit's report includes arrays and NaN errors; both survive.
+    path = tmp_path / "modelfit.json"
+    res = obs.modelfit(niter=5, quiet=True, outfile=str(path))
+    d = json.loads(path.read_text())
+    assert d["ncomp"] == res["ncomp"]
+    assert len(d["components"]) == len(res["components"])
+
+
+def test_outfile_json_is_readable_and_nan_becomes_null(obs, tmp_path):
+    import json
+
+    from difmapy.report import to_jsonable
+
+    assert to_jsonable(np.float32(1.5)) == 1.5
+    assert to_jsonable(np.array([1, 2])) == [1, 2]
+    assert to_jsonable(float("nan")) is None
+    assert to_jsonable(np.bool_(True)) is True
+    assert to_jsonable(complex(1, -2)) == {"re": 1.0, "im": -2.0}
+
+    # A station with no solution reports NaN, which must not break the
+    # file: JSON has no NaN, so it becomes null.
+    obs.mapsize(NX, CELL)
+    obs.invert()
+    obs.addcmp(FLUX, X0_MAS, Y0_MAS)
+    obs.ignore("AN0")            # leaves AN0 without a solution
+    path = tmp_path / "gains.json"
+    res = obs.gscale(quiet=True, outfile=str(path))
+    assert not np.isfinite(res["gains"]["AN0"])
+    text = path.read_text()
+    assert "NaN" not in text
+    json.loads(text)
+
+
+def test_outfile_creates_missing_directories(obs, tmp_path):
+    path = tmp_path / "deep" / "down" / "stats.json"
+    obs.invert()
+    obs.imstat(outfile=str(path))
+    assert path.exists()

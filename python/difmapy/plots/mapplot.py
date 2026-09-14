@@ -9,11 +9,25 @@ Interaction:
 * ``c``: run one CLEAN batch; ``i``: re-invert and redisplay
 * ``1`` / ``2`` / ``3`` / ``4``: residual map / dirty beam / restored
   map / model
-* ``n``: add a Gaussian component by clicking its centre and axes
-* ``M``: fit the model to the UV data (modelfit)
-* ``k`` / ``C``: establish the tentative model / clear all models
+* ``m``: place a model component - click its centre, then any two
+  points on the component. The two points need be neither the major and
+  minor axes nor 90 degrees apart: the longer one sets the major axis
+  and the other is solved for the axial ratio. (``d`` at either step
+  gives a point source or a circular Gaussian.)
+* ``f``: fit the placed components, with the rest of the model, to the
+  UV data (modelfit)
+* ``C``: clear the model
+* ``l``: switch the colours between a linear and a logarithmic scale
 * ``h``: the key legend; ``x``: close, reporting the image properties
 * ``q``: close
+
+The two handles on the colour bar set the displayed range; the log
+scale is a redistribution of the colours only, so the levels and the
+bar's axis stay in Jy/beam and negative residuals keep their place.
+
+A component placed with ``m`` is only *drawn*: its guessed flux is held
+out of the image until ``f`` fits it, so
+placing one never changes the map underneath it.
 
 Windows are kept in sync with ``obs.windows`` (mas units), and the
 panel to the right of the colour bar shows the distribution of pixel
@@ -22,9 +36,10 @@ values over the displayed range, with a Gaussian fitted to the noise.
 
 from __future__ import annotations
 
+
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore
+from pyqtgraph.Qt import QtCore, QtWidgets
 
 from difmapy.plots.base import MODEL_COLOR, PlotWindow, run_if_needed
 
@@ -38,16 +53,56 @@ VIEW_NAMES = {
     "clean": "restored map",
     "model": "model (restored, no residuals)",
 }
+#: The heading over the image, naming what is being shown.
+VIEW_TITLES = {
+    "map": "Residual map",
+    "beam": "Dirty beam",
+    "clean": "Restored CLEAN map",
+    "model": "Model, restored without residuals",
+}
+#: The footnote under the image: the keys worth knowing without ``h``.
+SHORTCUTS = (
+    "double-click: window \u2022 d: delete window \u2022 m: add component \u2022 "
+    "f: modelfit \u2022 c: clean \u2022 i: invert \u2022 "
+    "C: clear model \u2022 1/2/3/4: residual/beam/restored/model \u2022 "
+    "l: log/linear colours \u2022 h: help \u2022 x: close + report \u2022 q: close"
+)
+
+#: Strength of the logarithmic colour stretch (as in DS9's log scale).
+LOG_STRETCH = 1000.0
+
+
+def log_stretch(cmap, a=LOG_STRETCH):
+    """`cmap` with its colours redistributed logarithmically.
+
+    The stretch goes into the colour map's stop positions, not into the
+    pixel values: the image and the colour-bar axis stay in Jy/beam and
+    negative residuals keep their place, while a pixel at fraction `p`
+    of the displayed range takes the colour a linear map would give
+    log(1 + a*p) / log(1 + a). Faint emission therefore gets most of
+    the colour range, which is the point of a log display.
+    """
+    lut = cmap.getLookupTable(0.0, 1.0, 256, alpha=True)
+    y = np.linspace(0.0, 1.0, lut.shape[0])
+    # The stop positions are the inverse of the stretch, so that
+    # colour(p) == cmap(stretch(p)).
+    pos = (np.exp(y * np.log1p(a)) - 1.0) / a
+    pos[0], pos[-1] = 0.0, 1.0  # exact ends, whatever the rounding did
+    return pg.ColorMap(pos, lut)
 
 
 class MapPlot(PlotWindow):
     """The interactive image display."""
 
+    #: Wide enough for a square map beside its colour bar and histogram.
+    DEFAULT_SIZE = (1250, 820)
+
     def __init__(self, obs, what="map", mapsize=None, cellsize=None,
-                 uvweight=None, clean_args=None, quiet=False):
+                 uvweight=None, clean_args=None, quiet=False, scale="linear"):
         super().__init__("difmapy mapplot")
         self.obs = obs
         self.what = what
+        self.scale = "log" if str(scale).lower().startswith("log") else "linear"
         self.clean_args = clean_args or {}
         self.quiet = quiet
         self.result = None
@@ -56,10 +111,29 @@ class MapPlot(PlotWindow):
         self._gauss_stage = None
         self._gauss = {}
         self._model_items = []
+        #: components placed here and not yet fitted (dicts as
+        #: `obs.model` gives them): drawn, but not in the model until
+        #: "f" fits them or the window closes, since their flux is only
+        #: a guess and in the model it would be imaged at once.
+        self._placed = []
         self._apply_imaging(mapsize, cellsize, uvweight)
 
+        central = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(central)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
         self.glw = pg.GraphicsLayoutWidget()
-        self.setCentralWidget(self.glw)
+        lay.addWidget(self.glw, 1)
+        # The footnote: the main shortcuts, always visible, so that the
+        # window explains itself without pressing "h".
+        self.footer = QtWidgets.QLabel(SHORTCUTS)
+        self.footer.setWordWrap(True)
+        self.footer.setStyleSheet(
+            "background: #f4f4f4; color: #333; border-top: 1px solid #ccc;"
+            "padding: 3px 6px; font-size: 10px;"
+        )
+        lay.addWidget(self.footer, 0)
+        self.setCentralWidget(central)
         self.glw.setBackground("w")
         self.plot = self.glw.addPlot(row=0, col=0)
         self.plot.setLabel("bottom", "Relative RA (mas)")
@@ -68,10 +142,18 @@ class MapPlot(PlotWindow):
         self.plot.vb.invertX(True)  # RA increases leftward
         self.img = pg.ImageItem(axisOrder="row-major")
         self.plot.addItem(self.img)
-        self._cbar = pg.ColorBarItem(colorMap=pg.colormap.get("viridis"))
+        self._base_cmap = pg.colormap.get("viridis")
+        cmap = (log_stretch(self._base_cmap) if self.scale == "log"
+                else self._base_cmap)
+        self._cbar = pg.ColorBarItem(colorMap=cmap)
         self._cbar.setImageItem(self.img)
         self.glw.addItem(self._cbar, row=0, col=1)
         self._cbar.sigLevelsChanged.connect(lambda *_: self._update_histogram())
+        # The handles work in steps of `rounding`, which has to follow
+        # the data; see `_tune_rounding`. A drag ends by snapping the
+        # handles back, which is the moment to re-scale the step to
+        # whatever range the user has just zoomed to.
+        self._cbar.sigLevelsChangeFinished.connect(lambda *_: self._tune_rounding())
 
         # Pixel-value histogram over the displayed range, aligned with
         # the colour bar so the two read together.
@@ -137,8 +219,67 @@ class MapPlot(PlotWindow):
             )
         return obs.dmap
 
+    def view_boxes(self):
+        return [self.plot.vb]
+
+    def _tune_rounding(self):
+        """Match the colour-bar handles' step size to the image.
+
+        `ColorBarItem` rounds every level it computes to a multiple of
+        `rounding` and refuses a span narrower than it. Its default of
+        1 is meaningless for a map in Jy/beam: the first drag snaps the
+        levels to whole Janskys - typically (0, 1) - which flattens the
+        image to a single colour and leaves the handles with no step
+        small enough to do anything. A thousandth of the displayed span
+        gives handles that move smoothly instead.
+        """
+        lo, hi = (float(v) for v in self._cbar.levels())
+        span = abs(hi - lo)
+        if not np.isfinite(span) or span <= 0.0:
+            span = 1.0
+        self._cbar.rounding = span / 1000.0
+
+    def set_scale(self, scale):
+        """Show the colours on a "linear" or "log" scale.
+
+        Only the colour map changes: the levels, the image and the
+        colour-bar axis stay in Jy/beam, so a log display of a residual
+        map keeps its negatives.
+        """
+        scale = "log" if str(scale).lower().startswith("log") else "linear"
+        if scale != self.scale:
+            if scale == "log":
+                # Stretch whatever map is showing, so a colour map
+                # picked from the bar's own menu survives the toggle.
+                self._base_cmap = self._cbar.colorMap()
+                self._cbar.setColorMap(log_stretch(self._base_cmap))
+            else:
+                self._cbar.setColorMap(self._base_cmap)
+            self.scale = scale
+        self.refresh()
+        return scale
+
+    def _title(self, data):
+        """The heading over the image: which image this is, and the one
+        number that characterises it."""
+        title = VIEW_TITLES[self.what]
+        if self.scale == "log":
+            title += " (log colours)"
+        if self.what == "beam":
+            bmaj, bmin, bpa = self.obs.estimated_beam
+            return f"{title} \u2014 {bmaj:.4g} x {bmin:.4g} mas at {bpa:.4g} deg"
+        if self.what == "model":
+            model = self.obs.model
+            return (f"{title} \u2014 {len(model)} components, "
+                    f"{self.obs.model_flux:.4g} Jy")
+        valid = self.obs.valid(np.asarray(data))
+        finite = valid[np.isfinite(valid)]
+        peak = float(finite.max()) if finite.size else float("nan")
+        return f"{title} \u2014 peak {peak:.4g} Jy/beam"
+
     def refresh(self):
         data = np.asarray(self._image_data())
+        self.plot.setTitle(self._title(data), size="11pt", color="#222")
         ex = abs(self.obs.extent[0])
         ey = abs(self.obs.extent[3])
         self.img.setImage(data, autoLevels=False)
@@ -150,21 +291,28 @@ class MapPlot(PlotWindow):
             if hi <= lo:
                 hi = lo + 1e-12
             self._cbar.setLevels((float(lo), float(hi)))
+        self._tune_rounding()
         self._sync_rois_from_obs()
         self._draw_model()
         self._update_histogram()
         self._update_status()
 
+    def _message(self, text):
+        self.statusBar().showMessage(text)
+
     def _update_status(self):
         extra = ""
         if self._gauss_stage == "center":
             extra = " | click the component centre"
-        elif self._gauss_stage == "major":
-            extra = " | click to set the major axis (d: point source)"
-        elif self._gauss_stage == "minor":
-            extra = " | click to set the minor axis (d: circular)"
+        elif self._gauss_stage == "first":
+            extra = " | click a point on the component (d: point source)"
+        elif self._gauss_stage == "second":
+            extra = " | click a second point on it (d: circular)"
+        elif self._placed:
+            extra = (f" | {len(self._placed)} placed, not fitted "
+                     "(f: modelfit)")
         model = self.obs.model
-        self.statusBar().showMessage(
+        self._message(
             f"{VIEW_NAMES[self.what]} | {len(model)} components, "
             f"{self.obs.model_flux:.4g} Jy | {len(self.obs.windows)} windows"
             f"{extra} | h: help"
@@ -179,6 +327,7 @@ class MapPlot(PlotWindow):
         data = np.asarray(self.img.image) if self.img.image is not None else None
         if data is None:
             return
+        residual = np.asarray(self.obs.dmap)
         vals = np.asarray(self.obs.valid(data), dtype=np.float64).ravel()
         vals = vals[np.isfinite(vals)]
         if vals.size < 8:
@@ -196,7 +345,7 @@ class MapPlot(PlotWindow):
         self._hist_items.append(curve)
         # A Gaussian fitted to the noise: the sigma-clipped moments of
         # the residuals, which excludes the source emission.
-        noise = self.obs.noise_stats(self.obs.valid(self.obs.dmap))
+        noise = self.obs.noise_stats(self.obs.valid(residual))
         rms = noise["rms"]
         if np.isfinite(rms) and rms > 0:
             width = edges[1] - edges[0]
@@ -254,14 +403,17 @@ class MapPlot(PlotWindow):
             self.plot.vb.removeItem(item)
         self._model_items = []
         deltas_x, deltas_y = [], []
-        for c in self.obs.model:
+        placed = {id(c) for c in self._placed}
+        for c in self.obs.model + self._placed:
             if c["type"] == "delta" or c["major"] <= 0.0:
                 deltas_x.append(c["x"])
                 deltas_y.append(c["y"])
                 continue
             item = pg.PlotCurveItem(
                 *_ellipse(c["x"], c["y"], c["major"], c["ratio"], c["phi"]),
-                pen=pg.mkPen(*MODEL_COLOR, width=2),
+                pen=pg.mkPen(*MODEL_COLOR, width=2, style=(
+                    QtCore.Qt.PenStyle.DashLine if id(c) in placed
+                    else QtCore.Qt.PenStyle.SolidLine)),
             )
             self.plot.vb.addItem(item)
             self._model_items.append(item)
@@ -288,42 +440,98 @@ class MapPlot(PlotWindow):
         g = self._gauss
         if self._gauss_stage == "center":
             g["x"], g["y"] = x, y
-            self._gauss_stage = "major"
-        elif self._gauss_stage == "major":
-            dx, dy = x - g["x"], y - g["y"]
-            r = float(np.hypot(dx, dy))
+            self._gauss_stage = "first"
+        elif self._gauss_stage == "first":
+            r = float(np.hypot(x - g["x"], y - g["y"]))
             if r <= 0.0:
                 return self._add_gaussian(type="delta")
-            # The click marks the half-width, so the FWHM is twice it;
-            # phi is the usual position angle, north through east.
-            g["major"] = 2.0 * r
-            g["phi"] = float(np.rad2deg(np.arctan2(dx, dy)))
-            self._gauss_stage = "minor"
-        elif self._gauss_stage == "minor":
-            dx, dy = x - g["x"], y - g["y"]
-            phi = np.deg2rad(g["phi"])
-            # Distance perpendicular to the major axis.
-            perp = abs(dx * np.cos(phi) - dy * np.sin(phi))
-            ratio = float(np.clip(2.0 * perp / g["major"], 1e-3, 1.0))
-            return self._add_gaussian(type="gauss", ratio=ratio)
+            g["p1"] = (x, y)
+            self._gauss_stage = "second"
+        elif self._gauss_stage == "second":
+            if np.hypot(x - g["x"], y - g["y"]) <= 0.0:
+                return self._add_gaussian(type="gauss", **self._circle_from(g["p1"]))
+            return self._add_gaussian(type="gauss",
+                                      **self._ellipse_from(g["p1"], (x, y)))
         self._update_status()
 
-    def _add_gaussian(self, type="gauss", ratio=1.0):
+    def _circle_from(self, p1):
+        """A circular Gaussian through `p1`."""
         g = self._gauss
-        major = 0.0 if type == "delta" else g.get("major", 0.0)
+        r = float(np.hypot(p1[0] - g["x"], p1[1] - g["y"]))
+        return {"major": 2.0 * r, "ratio": 1.0, "phi": 0.0}
+
+    def _ellipse_from(self, p1, p2):
+        """The FWHM ellipse through two points clicked around a centre.
+
+        The two clicks are just two points *on* the ellipse, at whatever
+        position angles the user picked: neither is required to be the
+        major axis, nor are they required to be 90 degrees apart. The
+        longer of the two fixes the major axis (semi-axis `a` and its
+        position angle), and the shorter must then satisfy the ellipse
+        equation in that frame,
+
+            (x'/a)^2 + (y'/b)^2 = 1,
+
+        which gives the semi-minor axis `b` directly. Because the
+        shorter radius is never longer than `a`, this always yields
+        `b <= a`, i.e. a valid axial ratio.
+
+        Returns the `major` (FWHM), `ratio` and `phi` of the component.
+        """
+        cx, cy = self._gauss["x"], self._gauss["y"]
+        v1 = (p1[0] - cx, p1[1] - cy)
+        v2 = (p2[0] - cx, p2[1] - cy)
+        if np.hypot(*v2) > np.hypot(*v1):
+            v1, v2 = v2, v1
+        a = float(np.hypot(*v1))
+        # Position angle of the major axis, north through east.
+        phi = float(np.arctan2(v1[0], v1[1]))
+        # The shorter radius in the ellipse frame: x' along the major
+        # axis (sin phi, cos phi), y' along the perpendicular.
+        sin, cos = np.sin(phi), np.cos(phi)
+        xp = v2[0] * sin + v2[1] * cos
+        yp = v2[0] * cos - v2[1] * sin
+        denom = 1.0 - (xp / a) ** 2
+        if abs(yp) <= 1e-6 * a or denom <= 1e-6:
+            # The second click sits on the major axis itself, which says
+            # nothing about the minor one: leave it circular rather than
+            # collapsing the component to a line.
+            ratio = 1.0
+        else:
+            b = float(abs(yp) / np.sqrt(denom))
+            ratio = float(np.clip(b / a, 1e-3, 1.0))
+        return {"major": 2.0 * a, "ratio": ratio,
+                "phi": float(np.rad2deg(phi))}
+
+    def _add_gaussian(self, type="gauss", major=0.0, ratio=1.0, phi=0.0):
+        g = self._gauss
+        if type == "delta":
+            major, ratio, phi = 0.0, 1.0, 0.0
         flux = self._flux_guess(g["x"], g["y"], major, ratio)
-        self.obs.addcmp(
-            flux, g["x"], g["y"], type=type, major=major,
-            ratio=ratio, phi=g.get("phi", 0.0),
-            free=["flux", "pos"] if type == "delta" else ["flux", "pos", "major"],
-        )
-        c = self.obs.model[-1]
+        # An elliptical component is placed with its shape meant, so its
+        # axial ratio and orientation are fitted along with its size;
+        # a circular one keeps difmap's circular-Gaussian freedom.
+        if type == "delta":
+            free = ["flux", "pos"]
+        elif ratio < 1.0:
+            free = ["flux", "pos", "shape"]
+        else:
+            free = ["flux", "pos", "major"]
+        from difmapy.observation import _free_mask
+
+        # Drawn, not part of the model, until modelfit gives it a real
+        # flux (see `_placed`).
+        c = {"type": type, "flux": float(flux), "x": float(g["x"]),
+             "y": float(g["y"]), "major": float(major), "ratio": float(ratio),
+             "phi": float(phi), "freq0": 0.0, "spcind": 0.0,
+             "freepar": _free_mask(free)}
+        self._placed.append(c)
         if not self.quiet:
             if type == "delta":
-                print(f"added point component: {c['flux']:.5g} Jy at "
+                print(f"placed point component: {c['flux']:.5g} Jy at "
                       f"({c['x']:.4g}, {c['y']:.4g}) mas")
             else:
-                print(f"added Gaussian component: {c['flux']:.5g} Jy at "
+                print(f"placed Gaussian component: {c['flux']:.5g} Jy at "
                       f"({c['x']:.4g}, {c['y']:.4g}) mas, "
                       f"{c['major']:.4g} x {c['major'] * c['ratio']:.4g} mas "
                       f"at {c['phi']:.4g} deg")
@@ -396,40 +604,49 @@ class MapPlot(PlotWindow):
             ("c", "CLEAN with the current settings"),
             ("i", "re-invert and redisplay"),
             ("1 / 2 / 3 / 4", "residual map / beam / restored map / model"),
-            ("n", "add a Gaussian: click centre, major axis, minor axis"),
+            ("m", "add a component: click its centre, then two points on it"),
             ("d", "while adding: point source, then circular Gaussian"),
-            ("M", "fit the model to the UV data (modelfit)"),
-            ("k", "establish the tentative model (keep)"),
+            ("f", "fit the placed components to the UV data (modelfit)"),
             ("C", "clear every model component"),
+            ("l", "logarithmic or linear colour scale"),
+            ("drag the bar handles", "set the displayed range"),
+            ("z / u", "restore the y / x axis range"),
             ("x", "close and report the image properties"),
         ]
 
     def keyPressEvent(self, ev):
         key = ev.text()
         low = key.lower()
-        if low == "d" and self._gauss_stage in ("major", "minor"):
-            # Force a point source, or a circular Gaussian.
-            self._add_gaussian(type="delta" if self._gauss_stage == "major"
-                               else "gauss")
+        if low == "d" and self._gauss_stage in ("first", "second"):
+            # Force a point source, or a circular Gaussian through the
+            # one point already clicked.
+            if self._gauss_stage == "first":
+                self._add_gaussian(type="delta")
+            else:
+                self._add_gaussian(type="gauss",
+                                   **self._circle_from(self._gauss["p1"]))
         elif low == "d" and self._mouse_pos is not None:
             self._delete_window_at(*self._view_coords(self._mouse_pos))
-        elif low == "n":
+        elif low in ("m", "n"):
             self.start_gaussian()
-        elif key == "M":
+        elif low == "f":
             self.run_modelfit()
-        elif low == "c" and key == "C":
+        elif key == "C":
             self.obs.clearmodel()
+            self._placed = []
             if not self.quiet:
                 print("cleared all model components")
             self.refresh()
         elif low == "c":
             self.run_clean()
-        elif low == "k":
-            self.obs.keep()
-            self.refresh()
         elif low == "i":
             self.obs.invert()
             self.refresh()
+        elif low == "l":
+            self._message(
+                f"{self.set_scale('linear' if self.scale == 'log' else 'log')}"
+                " colour scale"
+            )
         elif key in VIEWS:
             self.what = VIEWS[key]
             self.refresh()
@@ -456,26 +673,58 @@ class MapPlot(PlotWindow):
     def run_clean(self):
         res = self.obs.clean(quiet=self.quiet, **self.clean_args)
         self.refresh()
-        self.statusBar().showMessage(
+        self._message(
             f"clean: {res['niter']} iterations, {res['cleaned_flux']:.4g} Jy "
             f"cleaned, residual rms {res['residual_rms']:.4g}"
         )
         return res
 
     def run_modelfit(self, **kwargs):
+        """Fit the placed components, together with every other component
+        that has free parameters, and show the result (difmap modelfit).
+
+        The placed components join the model here. Unlike
+        `Observation.modelfit`, nothing is seeded: with no component to
+        fit there is no telling where the user wanted one, so the plot
+        asks for one instead of inventing it.
+        """
+        if not self._placed and not self.obs.nvariable:
+            self._message("nothing to fit: press m to place a component")
+            return None
+        before, placed = self.obs.model, list(self._placed)
+        self._commit_placed()
         try:
             res = self.obs.modelfit(quiet=self.quiet, **kwargs)
         except (ValueError, RuntimeError) as exc:
-            self.statusBar().showMessage(f"modelfit: {exc}")
+            # Leave the model as it was, and the placed components placed.
+            self.obs._replace_model(before)
+            self._placed = placed
+            self._message(f"modelfit: {exc}")
             return None
         self.refresh()
-        self.statusBar().showMessage(
+        self._message(
             f"modelfit: reduced chi-squared {res['rchisq']:.4g}, "
             f"{res['ncomp']} components, {res['total_flux']:.4g} Jy"
         )
         return res
 
+    def _commit_placed(self):
+        """Add the placed components to the model."""
+        for c in self._placed:
+            self.obs.addcmp(c["flux"], c["x"], c["y"], type=c["type"],
+                            major=c["major"], ratio=c["ratio"], phi=c["phi"],
+                            free=c["freepar"])
+        self._placed = []
+
     def closeEvent(self, ev):  # pragma: no cover - Qt callback
+        if self._placed:
+            # Placed but not fitted: still part of the model being
+            # built, so they are added rather than thrown away.
+            n = len(self._placed)
+            self._commit_placed()
+            if not self.quiet:
+                print(f"added {n} placed, unfitted component(s) to the model; "
+                      "obs.modelfit() fits them")
         if self.result is None:
             try:
                 self.result = self.obs.mapinfo()
@@ -500,9 +749,10 @@ def _ellipse(x, y, major, ratio, phi_deg, n=64):
 
 
 def mapplot(obs, what="map", mapsize=None, cellsize=None, uvweight=None,
-            block=None, quiet=False, **clean_args):
+            block=None, quiet=False, scale="linear", **clean_args):
     p = MapPlot(obs, what=what, mapsize=mapsize, cellsize=cellsize,
-                uvweight=uvweight, clean_args=clean_args, quiet=quiet)
+                uvweight=uvweight, clean_args=clean_args, quiet=quiet,
+                scale=scale)
     run_if_needed(p, block)
     return p
 

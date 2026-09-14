@@ -12,6 +12,7 @@ os.environ["QT_QPA_PLATFORMTHEME"] = ""  # the gtk3 theme aborts w/o display
 pg = pytest.importorskip("pyqtgraph")
 
 import difmapy
+from difmapy.observation import SHAPE_BITS
 from difmapy.plots.mapplot import MapPlot
 from difmapy.plots.points import RadPlot, UVPlot, VPlot
 
@@ -205,6 +206,55 @@ def test_undo_redo_restores_flags_exactly(obs):
     p.close()
 
 
+def test_stacked_panels_open_on_the_data(obs):
+    """The default view must show the data. The first panel used to be
+    x-linked to itself, which switches pyqtgraph's auto-ranging off and
+    left every stacked plot on the empty default 0-1 view until the user
+    pressed "u" and "z"."""
+    for plot in (RadPlot(obs), VPlot(obs, nplot=1)):
+        for panel in plot._panels:
+            (x0, x1), (y0, y1) = panel.vb.viewRange()
+            d = plot._data
+            sub = plot._panel_mask(panel, d)
+            good = sub & (d["wt"] > 0)
+            assert good.any()
+            # Every point of this panel is inside the opening view.
+            assert x0 <= d["x"][good].min() and x1 >= d["x"][good].max()
+            y = d[panel.key][good]
+            assert y0 <= y.min() and y1 >= y.max()
+        plot.close()
+
+
+def test_flat_amplitudes_are_not_ranged_onto_rounding_noise(obs):
+    """A point source has the same amplitude on every baseline to the
+    last bit of float32. Autoscaling onto that spread showed nothing but
+    noise, with no tick labels at all; the panel keeps a floor of a
+    thousandth of the level instead."""
+    p = RadPlot(obs, quantity="amp")
+    d = p._data
+    amp = d["amp"][d["wt"] > 0]
+    assert np.ptp(amp) < 1e-3 * amp.mean()        # the data really is flat
+    y0, y1 = p._panels[0].vb.viewRange()[1]
+    assert y1 - y0 >= 2e-3 * amp.mean() * 0.99
+    assert y0 <= amp.min() and y1 >= amp.max()
+    p.close()
+
+
+def test_radplot_shows_a_fitted_model(obs):
+    """A fitted model is drawn straight after modelfit. It used to stay
+    out of the plotted model visibilities until it was kept."""
+    (x, y), _ = obs.peak_offset()
+    obs.addcmp(1.0, x, y, free=["flux", "pos"])
+    obs.modelfit(niter=10, quiet=True)
+
+    p = RadPlot(obs)
+    assert p.has_model()
+    good = p._data["wt"] > 0
+    assert np.isfinite(p._data["model_amp"][good]).any()
+    assert np.any(p._data["model_amp"][good] > 0)
+    p.close()
+
+
 def test_radplot_antenna_highlight_cycles(obs):
     """n/p walk through the antennas and label the highlighted one."""
     p = RadPlot(obs)
@@ -225,7 +275,6 @@ def test_radplot_shows_the_model(obs):
     p.close()
     obs.invert()
     obs.clean(50, 0.1, quiet=True)
-    obs.keep()
     q = RadPlot(obs)
     assert q.has_model()
     assert np.isfinite(q._data["model_amp"]).any()
@@ -334,17 +383,18 @@ def test_mapplot_histogram_tracks_the_colorbar(obs):
 
 
 def test_mapplot_gaussian_placement(obs):
-    """n, then clicks for the centre and the two axes, adds a Gaussian;
-    d short-circuits to a point source or a circular Gaussian."""
+    """m, then clicks for the centre and two points on the component,
+    adds a Gaussian; d short-circuits to a point source or a circular
+    Gaussian."""
     p = MapPlot(obs, quiet=True)
     p.start_gaussian()
     assert p._gauss_stage == "center"
     p._gauss_click(1.0, 2.0)
-    assert p._gauss_stage == "major"
+    assert p._gauss_stage == "first"
     p._gauss_click(1.0, 5.0)  # 3 mas due north of the centre
-    assert p._gauss_stage == "minor"
+    assert p._gauss_stage == "second"
     p._gauss_click(2.5, 2.0)  # 1.5 mas due east: the minor axis
-    c = obs.model[-1]
+    c = p._placed[-1]
     assert p._gauss_stage is None
     assert c["type"] == "gauss"
     assert (c["x"], c["y"]) == pytest.approx((1.0, 2.0))
@@ -353,12 +403,54 @@ def test_mapplot_gaussian_placement(obs):
     assert c["ratio"] == pytest.approx(0.5)      # 3 mas minor / 6 mas major
     assert len(p._model_items) >= 1              # the ellipse is drawn
 
-    # "d" at the major-axis stage makes it a point source instead.
+    # "d" at the first-point stage makes it a point source instead.
     p.start_gaussian()
     p._gauss_click(-2.0, 0.0)
     p._add_gaussian(type="delta")
-    assert obs.model[-1]["type"] == "delta"
-    assert obs.model[-1]["major"] == 0.0
+    assert p._placed[-1]["type"] == "delta"
+    assert p._placed[-1]["major"] == 0.0
+    p.close()
+
+
+def test_mapplot_gaussian_clicks_are_two_points_on_the_ellipse(obs):
+    """The two clicks after the centre are just two points *on* the
+    component: either may be the longer, and they need not be 90 degrees
+    apart. Clicking the short axis first used to clip the axial ratio to
+    1 and silently produce a circular Gaussian."""
+    p = MapPlot(obs, quiet=True)
+
+    def place(c, p1, p2):
+        p.start_gaussian()
+        p._gauss_click(*c)
+        p._gauss_click(*p1)
+        p._gauss_click(*p2)
+        return p._placed[-1]
+
+    # Short axis clicked first: still elliptical, and the same ellipse
+    # as clicking them the other way round.
+    a = place((0.0, 0.0), (1.5, 0.0), (0.0, 3.0))
+    b = place((0.0, 0.0), (0.0, 3.0), (1.5, 0.0))
+    assert a["ratio"] == pytest.approx(0.5) and a["ratio"] == b["ratio"]
+    assert a["major"] == pytest.approx(6.0) == b["major"]
+    assert a["phi"] == pytest.approx(0.0) == b["phi"]
+
+    # Clicks 45 degrees apart: the longer sets the major axis, and the
+    # ellipse still passes exactly through the shorter one.
+    c = place((0.0, 0.0), (0.0, 4.0), (2.0, 2.0))
+    assert c["major"] == pytest.approx(8.0)
+    assert c["phi"] == pytest.approx(0.0)
+    sa, sb = c["major"] / 2, c["major"] * c["ratio"] / 2
+    assert (2.0 / sb) ** 2 + (2.0 / sa) ** 2 == pytest.approx(1.0)
+    assert 0.0 < c["ratio"] < 1.0
+
+    # An elliptical component is placed with its shape meant, so the
+    # ratio and orientation are fitted too.
+    assert p._placed[-1]["freepar"] & SHAPE_BITS == SHAPE_BITS
+
+    # A second click along the major axis says nothing about the minor
+    # one, so it stays circular rather than collapsing to a line.
+    d = place((0.0, 0.0), (0.0, 4.0), (0.0, 2.0))
+    assert d["ratio"] == pytest.approx(1.0)
     p.close()
 
 
@@ -378,6 +470,193 @@ def test_mapplot_modelfit_and_report(obs):
     assert info["model"]["ncomp"] == 1
     assert np.isfinite(info["residual"]["rms"])
     p.close()
+
+
+def _press(plot, text):
+    """Send `text` to the plot as a key press."""
+    from pyqtgraph.Qt import QtCore, QtGui
+
+    plot.keyPressEvent(
+        QtGui.QKeyEvent(QtCore.QEvent.Type.KeyPress, 0,
+                        QtCore.Qt.KeyboardModifier.NoModifier, text)
+    )
+
+
+def test_mapplot_m_waits_for_the_clicks_and_f_fits(obs):
+    """m starts the interactive placement rather than dropping a
+    component; f fits what has been placed, and refuses to invent one."""
+    p = MapPlot(obs, quiet=True)
+    _press(p, "f")
+    assert obs.model == []  # nothing placed: no model is seeded
+
+    _press(p, "m")
+    assert p._gauss_stage == "center"
+    assert obs.model == []  # still waiting for the centre click
+    (x, y), _ = obs.peak_offset()
+    p._gauss_click(x, y)
+    p._gauss_click(x, y + 1.0)
+    assert p._gauss_stage == "second"
+    p._gauss_click(x + 0.5, y)
+    assert obs.model == []  # placed, not yet in the model
+    assert len(p._placed) == 1 and p._placed[0]["type"] == "gauss"
+
+    _press(p, "f")
+    assert p._placed == []
+    assert len(obs.model) == 1  # fitted: in the model, nothing to keep
+    p.close()
+
+
+def test_mapplot_placed_component_is_drawn_not_imaged(obs):
+    """A component that has only been placed carries a guessed flux, so
+    it must not be subtracted from the map - not even by a re-invert -
+    until modelfit has fitted it."""
+    p = MapPlot(obs, quiet=True)
+    before = np.array(p.img.image, copy=True)
+    (x, y), peak = obs.peak_offset()
+
+    p.start_gaussian()
+    p._gauss_click(x, y)
+    p._add_gaussian(type="delta")
+    assert obs.model == []
+    assert p._placed[0]["flux"] == pytest.approx(peak, rel=0.05)
+    p.refresh()
+    assert np.array_equal(np.asarray(p.img.image), before)
+
+    _press(p, "i")  # re-invert: still the same map
+    assert float(obs.valid(np.asarray(p.img.image)).max()) == pytest.approx(
+        peak, rel=1e-3
+    )
+
+    # Fitting gives it a real flux, and the source leaves the residuals.
+    p.run_modelfit()
+    assert float(obs.valid().max()) < 0.05 * peak
+    p.close()
+
+
+def test_mapplot_close_adds_placed_components_to_the_model(obs):
+    """A placed component that was never fitted is not thrown away when
+    the window closes: it joins the model, ready for obs.modelfit()."""
+    p = MapPlot(obs, quiet=True)
+    (x, y), peak = obs.peak_offset()
+    p.start_gaussian()
+    p._gauss_click(x, y)
+    p._add_gaussian(type="delta")
+    assert obs.model == []
+    p.close()
+    assert len(obs.model) == 1
+    assert obs.model[0]["flux"] == pytest.approx(peak, rel=0.05)
+    assert obs.model[0]["freepar"] == 3  # flux | pos, as placed
+
+
+def test_mapplot_failed_fit_leaves_the_model_and_placement_alone(obs, monkeypatch):
+    p = MapPlot(obs, quiet=True)
+    (x, y), _ = obs.peak_offset()
+    p.start_gaussian()
+    p._gauss_click(x, y)
+    p._add_gaussian(type="delta")
+
+    def boom(*a, **k):
+        raise RuntimeError("no convergence")
+    monkeypatch.setattr(obs, "modelfit", boom)
+    assert p.run_modelfit() is None
+    assert obs.model == [] and len(p._placed) == 1
+    p._placed = []  # nothing to add on close
+    p.close()
+
+
+def test_mapplot_names_the_image_and_shows_the_shortcuts(obs):
+    """A heading over the image says which image it is, and a footnote
+    under it lists the main keys."""
+    p = MapPlot(obs, quiet=True)
+    assert "Residual map" in p.plot.titleLabel.text
+    assert "peak" in p.plot.titleLabel.text
+    for what, name in (("beam", "Dirty beam"), ("clean", "Restored CLEAN map"),
+                       ("model", "Model")):
+        p.what = what
+        p.refresh()
+        assert name in p.plot.titleLabel.text
+    for key in ("m: add component", "f: modelfit", "c: clean", "q: close"):
+        assert key in p.footer.text()
+    p.close()
+
+
+def test_mapplot_colorbar_handles_track_the_data_range(obs):
+    """The colour-bar handles set the displayed range in steps scaled to
+    the image. ColorBarItem rounds to whole units by default, which on a
+    map in Jy/beam snapped every level to (0, 1) on the first drag and
+    then refused to move."""
+    obs.invert()
+    p = MapPlot(obs, quiet=True)
+    cb = p._cbar
+    lo0, hi0 = (float(v) for v in cb.levels())
+    assert cb.rounding == pytest.approx((hi0 - lo0) / 1000.0)
+
+    # Drag the top handle down, as the mouse does, then release.
+    cb.region.setRegion((63, 150))
+    lo1, hi1 = (float(v) for v in cb.levels())
+    assert hi1 < hi0 and lo1 == pytest.approx(lo0, abs=1e-3 * (hi0 - lo0))
+    assert p.img.getLevels() == pytest.approx([lo1, hi1])
+    cb._regionChanged()
+    # The step follows the new, narrower range, so the next drag still
+    # has somewhere to go.
+    assert cb.rounding == pytest.approx((hi1 - lo1) / 1000.0)
+    cb.region.setRegion((63, 150))
+    assert float(cb.levels()[1]) < hi1
+    p.close()
+
+
+def test_mapplot_log_colour_scale(obs):
+    """l redistributes the colours logarithmically; the levels, and so
+    the colour-bar axis, stay in Jy/beam."""
+    from difmapy.plots.mapplot import log_stretch
+
+    obs.invert()
+    p = MapPlot(obs, quiet=True)
+    assert p.scale == "linear"
+    levels = p._cbar.levels()
+
+    _press(p, "l")
+    assert p.scale == "log"
+    assert p._cbar.levels() == levels          # only the colours changed
+    assert "log colours" in p.plot.titleLabel.text
+    # Colours are pushed towards the faint end: the map's midpoint now
+    # takes a colour the linear map kept for much higher values.
+    cmap = p._cbar.colorMap()
+    assert cmap.pos[len(cmap.pos) // 2] < 0.1
+    assert cmap.pos[0] == 0.0 and cmap.pos[-1] == 1.0
+
+    _press(p, "l")
+    assert p.scale == "linear"
+    assert p._cbar.colorMap() is p._base_cmap
+    p.close()
+
+
+def test_mapplot_opens_on_a_log_scale_when_asked(obs):
+    p = MapPlot(obs, quiet=True, scale="log")
+    assert p.scale == "log"
+    assert "log colours" in p.plot.titleLabel.text
+    p.close()
+
+
+def test_vplot_panels_share_one_x_axis(obs):
+    """Amplitude and phase are read together against one time axis: the
+    panels are linked and only the bottom one keeps its tick labels."""
+    v = VPlot(obs, nplot=2)
+    assert len(v._panels) == 4  # two baselines x (amp, phase)
+    assert not any(panel.plot.getAxis("bottom").style["showValues"]
+                   for panel in v._panels[:-1])
+    assert v._panels[-1].plot.getAxis("bottom").style["showValues"]
+    # Panning or zooming one panel carries the others with it. The
+    # ranges are not identical to the pixel: pyqtgraph compensates for
+    # the panels' different widths so that the *data* lines up.
+    full = list(v._panels[1].vb.viewRange()[0])
+    v._panels[0].vb.setXRange(1.0, 2.0, padding=0)
+    for panel in v._panels[1:]:
+        assert panel.vb.linkedView(panel.vb.XAxis) is v._panels[0].vb
+        lo, hi = panel.vb.viewRange()[0]
+        assert [lo, hi] != full      # it followed the zoom
+        assert lo < 1.5 < hi         # onto the same stretch of time
+    v.close()
 
 
 def test_mapplot_overrides_the_imaging_setup(uvfits_file):
@@ -400,14 +679,301 @@ def test_mapplot_auto_sizes_when_mapsize_was_never_set(uvfits_file):
     p.close()
 
 
+def test_plots_open_large_but_within_the_screen(obs):
+    """These are read in detail, so they open big - clipped to whatever
+    the screen can show (offscreen, that is the virtual screen)."""
+    from difmapy.plots.base import fit_to_screen
+
+    for cls, kw in ((MapPlot, dict(quiet=True)), (VPlot, dict(nplot=2))):
+        p = cls(obs, **kw)
+        assert (p.width(), p.height()) == fit_to_screen(*cls.DEFAULT_SIZE)
+        p.close()
+    assert MapPlot.DEFAULT_SIZE[0] >= 1200   # wider than the old default
+    assert VPlot.DEFAULT_SIZE[1] >= 900
+
+
+def test_z_and_u_restore_the_axis_ranges(obs):
+    """difmap's Z and U: back to the default y and x ranges."""
+    v = VPlot(obs, nplot=1)
+    amp, phase = v._panels[0], v._panels[1]
+
+    # Zooming in fixes both axes of both panels.
+    amp.vb.setRange(xRange=(0.4, 0.5), yRange=(1.0, 1.1), padding=0)
+    phase.vb.setRange(xRange=(0.4, 0.5), yRange=(-10, 10), padding=0)
+    assert amp.vb.autoRangeEnabled() == [False, False]
+
+    _press(v, "z")                                   # y only
+    assert not amp.vb.autoRangeEnabled()[0]          # x left alone
+    # The synthetic point source is flat to float32 rounding, so its
+    # default is the floored range rather than autoscale (which would
+    # zoom onto the noise).
+    flat = v.default_y_range(amp.vb)
+    assert flat is not None
+    assert list(amp.vb.viewRange()[1]) == pytest.approx(list(flat))
+    # A phase panel comes back to +-180, its default view, rather than
+    # to the spread of whatever is displayed.
+    assert list(phase.vb.viewRange()[1]) == pytest.approx([-180, 180], abs=1e-6)
+
+    _press(v, "u")                                   # then x
+    assert amp.vb.autoRangeEnabled()[0]
+    v.close()
+
+
+def test_r_reloads_the_plot_from_the_data(obs):
+    """Data edited from the prompt while a window is open is picked up
+    by r, and nothing else."""
+    v = VPlot(obs, nplot=2)
+    good = int((v._data["wt"] > 0).sum())
+    obs.flag(station="AN0")                          # behind the plot's back
+    assert int((v._data["wt"] > 0).sum()) == good    # not noticed yet
+    _press(v, "r")
+    assert int((v._data["wt"] > 0).sum()) < good
+    v.close()
+
+    p = MapPlot(obs, quiet=True)
+    before = np.array(p.img.image, copy=True)
+    obs.unflag(station="AN0")
+    obs.invert()
+    _press(p, "r")
+    assert not np.array_equal(np.asarray(p.img.image), before)
+    p.close()
+
+
+def test_undo_moved_to_ctrl_z_and_unflag_to_shift_f(obs):
+    """z, u and r are the axis/reload keys now, so the flag editing
+    keys they used to occupy have moved."""
+    from pyqtgraph.Qt import QtCore, QtGui
+
+    def combo(text, key, ctrl=False, shift=False):
+        mods = QtCore.Qt.KeyboardModifier.NoModifier
+        if ctrl:
+            mods |= QtCore.Qt.KeyboardModifier.ControlModifier
+        if shift:
+            mods |= QtCore.Qt.KeyboardModifier.ShiftModifier
+        return QtGui.QKeyEvent(QtCore.QEvent.Type.KeyPress, key, mods, text)
+
+    v = VPlot(obs, nplot=1)
+    panel = v._panels[0]
+    idx = np.nonzero((v._data["group"] == 0) & (v._data["wt"] > 0))[0][:3]
+    v._edit_points(idx, True)
+    assert len(v.history) == 1
+    flagged = int((v._data["wt"] < 0).sum())
+    assert flagged > 0
+
+    v.keyPressEvent(combo("\x1a", QtCore.Qt.Key.Key_Z, ctrl=True))     # undo
+    assert int((v._data["wt"] < 0).sum()) == 0
+    v.keyPressEvent(combo("\x1a", QtCore.Qt.Key.Key_Z, ctrl=True, shift=True))
+    assert int((v._data["wt"] < 0).sum()) == flagged                    # redo
+    v.keyPressEvent(combo("\x19", QtCore.Qt.Key.Key_Y, ctrl=True))     # redo
+    assert int((v._data["wt"] < 0).sum()) == flagged
+
+    # F unflags the nearest point; f flags it again.
+    v._mouse_pos = panel.vb.mapViewToScene(
+        QtCore.QPointF(float(v._data["x"][idx[0]]), float(v._data["amp"][idx[0]]))
+    )
+    v._active = panel
+    v.keyPressEvent(combo("F", QtCore.Qt.Key.Key_F, shift=True))
+    assert int((v._data["wt"] < 0).sum()) == flagged - 1
+    v.close()
+
+
+def test_windows_are_destroyed_before_the_interpreter_exits(obs):
+    """The exit crash: Python collecting a live plot window during
+    shutdown makes Qt tear down its scene after the Python halves of
+    the items in it are gone, and it aborts (SIGTRAP). Windows are
+    therefore kept alive deliberately and destroyed on the way out."""
+    from difmapy.plots import base
+
+    p = MapPlot(obs, quiet=True)
+    v = VPlot(obs, nplot=1)
+    # Tracked, so that nothing relies on the user keeping a reference,
+    # and the exit handler is in place.
+    assert p in base.open_windows() and v in base.open_windows()
+    assert base._ATEXIT_DONE
+
+    # Closing asks Qt to destroy the window, but it is still tracked
+    # until that has actually happened: a closed window is still a live
+    # QMainWindow, and would crash the exit just the same.
+    p.close()
+    assert base._alive(p)
+
+    base.close_all_windows()
+    assert base.open_windows() == []
+    assert not base._alive(p) and not base._alive(v)
+
+    # And a new window afterwards works, with the dead ones forgotten.
+    q = MapPlot(obs, quiet=True)
+    assert base.open_windows() == [q]
+    base.close_all_windows()
+
+
+@pytest.mark.parametrize("run", range(4))
+def test_a_session_that_opened_a_plot_exits_cleanly(uvfits_file, run):
+    """End to end: the reported crash was intermittent (about half of
+    the runs), so this goes through the real command a few times."""
+    import subprocess
+    import sys
+
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_QPA_PLATFORMTHEME="")
+    proc = subprocess.run(
+        [sys.executable, "-m", "difmapy.cli", uvfits_file],
+        input="mapsize(256, 0.25)\ninvert()\nmapplot(block=False)\nexit\n",
+        capture_output=True, text=True, env=env, timeout=180,
+    )
+    assert proc.returncode == 0, (
+        f"session exited {proc.returncode} "
+        f"({'SIGTRAP' if proc.returncode == 133 else 'crash'})\n"
+        + proc.stdout[-2000:] + proc.stderr[-2000:]
+    )
+
+
 def test_help_overlay_lists_the_keys(obs):
     p = MapPlot(obs, quiet=True)
     assert p._help is None
     assert p.toggle_help() is True
     assert p._help is not None
     text = p.help_text()
-    for key in ("n", "M", "c", "h", "q"):
+    for key in ("m", "f", "c", "h", "q", "z / u", "r"):
         assert f"<b>{key}</b>" in text
     assert p.toggle_help() is False
     assert p._help is None
     p.close()
+
+
+# ---- time axes with the gaps between scans cut out ---------------------
+
+def test_time_gaps_cut_only_the_long_gaps():
+    from difmapy.plots.base import TimeGaps
+
+    # Evenly sampled, or with a gap under 10% of the range: nothing cut,
+    # and plot coordinates are the times themselves.
+    g = TimeGaps(np.arange(0.0, 10.0, 0.1))
+    assert not g and g.breaks == []
+    assert np.allclose(g.compress([1.5, 3.0]), [1.5, 3.0])
+    assert not TimeGaps(np.r_[np.linspace(0, 5, 50), np.linspace(5.5, 10, 50)])
+
+    # Three 1-hour scans 5 and 10 hours apart.
+    t = np.r_[np.linspace(0, 1, 61), np.linspace(6, 7, 61), np.linspace(17, 18, 61)]
+    g = TimeGaps(t)
+    assert g.segments == [(0.0, 1.0), (6.0, 7.0), (17.0, 18.0)]
+    x = g.compress(t)
+    assert np.allclose(g.expand(x), t)            # exact inverse
+    assert x.min() == 0.0                         # first scan unshifted
+    # Each scan keeps its width; each cut shrinks to 2% of the 3 h kept.
+    assert x.max() == pytest.approx(3.0 + 2 * 0.06)
+    assert len(g.breaks) == 2 and not g.in_break(x).any()
+    lo, hi = g.breaks[0]
+    assert g.in_break((lo + hi) / 2)
+
+
+@pytest.fixture()
+def scanned_obs(scanned_uvfits_file):
+    o = difmapy.load(scanned_uvfits_file[0])
+    o.select("I")
+    o.mapsize(NX, CELL)
+    return o
+
+
+def test_vplot_cuts_the_gaps_between_scans(scanned_obs):
+    """Scans far apart share one axis with the dead time cut out; the
+    axis still reads real times, and flagging still hits the points
+    under the box."""
+    from difmapy.plots.base import TimeGapAxis
+
+    v = VPlot(scanned_obs, nplot=1)
+    assert len(v.gaps.segments) == 4 and len(v.gaps.breaks) == 3
+    d = v._data
+    hours = d["time"] / 3600.0
+    # The drawn axis is narrower than the observation by the gaps cut.
+    assert np.ptp(d["x"]) < 0.9 * np.ptp(hours)
+    assert np.allclose(v.gaps.expand(d["x"]), hours)
+
+    bottom = v._panels[-1].plot.getAxis("bottom")
+    assert isinstance(bottom, TimeGapAxis)
+    # A tick in the last scan is labelled with its real time.
+    x_last = float(d["x"].max())
+    label = bottom.tickStrings([x_last], 1.0, 0.1)[0]
+    assert float(label) == pytest.approx(hours.max(), abs=0.1)
+    # ... and one inside a cut is not labelled at all.
+    lo, hi = v.gaps.breaks[0]
+    assert bottom.tickStrings([(lo + hi) / 2], 1.0, 0.1) == [""]
+
+    # Flag everything in the last scan by a box in plot coordinates.
+    a, b = v.gaps.segments[-1]
+    x0, x1 = v.gaps.compress([a, b])
+    panel = v._panels[0]
+    n = v._apply_box(panel, x0 - 1e-9, x1 + 1e-9, -1e9, 1e9, flag=True)
+    in_last = (hours >= a) & (hours <= b)
+    assert n > 0  # counts FLAG cells (channels x polarizations), not points
+    assert (v._data["wt"][in_last] < 0).all()
+    assert (v._data["wt"][~in_last] > 0).all()
+    v.close()
+
+
+def test_diagnostic_time_plots_share_the_cut_axis(scanned_obs):
+    from difmapy.plots.base import TimeGapAxis
+    from difmapy.plots.diagnostics import CorPlot, CpPlot, TPlot
+
+    scanned_obs.addcmp(2.5, 0.0, 0.0)
+    scanned_obs.selfcal(phase=True, quiet=True)
+    t = TPlot(scanned_obs)
+    c = CorPlot(scanned_obs, nplot=1)
+    k = CpPlot(scanned_obs, nplot=1)
+    for plot in (t.plot, *(p for p, _ in c._plots), *(p for p, _ in k._plots)):
+        assert isinstance(plot.getAxis("bottom"), TimeGapAxis)
+        assert len(plot.getAxis("bottom").gaps.breaks) == 3
+    # The samples of tplot sit on the same compressed coordinates.
+    xs = np.concatenate([i.getData()[0] for i in t.plot.items
+                         if isinstance(i, pg.ScatterPlotItem)])
+    assert np.isclose(xs.max(), TimeGapAxis(t.plot.getAxis("bottom").gaps)
+                      .gaps.compress(np.asarray(scanned_obs._core.times()) / 3600).max())
+    for w in (t, c, k):
+        w.close()
+
+
+def test_projplot_angle_keys_rotate_the_projection(obs):
+    """< and > turn a projplot's projection angle, recompute the
+    projected distances and rescale the x axis to them."""
+    p = RadPlot(obs, projection_deg=0.0)
+    u, v = p._data["u"].copy(), p._data["v"].copy()
+
+    def projected(deg):
+        phi = np.deg2rad(deg)
+        return np.abs(u * np.sin(phi) + v * np.cos(phi)) / 1e6
+
+    assert np.allclose(p._data["x"], projected(0.0))
+    _press(p, ">")
+    assert p.projection == pytest.approx(10.0)
+    assert np.allclose(p._data["x"], projected(10.0))
+    assert "PA 10°" in p._panels[-1].plot.getAxis("bottom").labelText
+    _press(p, "<")
+    _press(p, "<")
+    assert p.projection == pytest.approx(-10.0)
+    assert np.allclose(p._data["x"], projected(-10.0))
+
+    # The x axis follows the new distances.
+    good = p._data["wt"] > 0
+    x0, x1 = p._panels[0].vb.viewRange()[0]
+    assert x0 <= p._data["x"][good].min() and x1 >= p._data["x"][good].max()
+
+    # Half a turn is a full turn of the projection: the angle wraps.
+    p.projection = 85.0
+    _press(p, ">")
+    assert p.projection == pytest.approx(-85.0)
+    assert np.allclose(p._data["x"], projected(95.0))
+    assert any(k == "< / >" for k, _ in p.key_help())
+    p.close()
+
+    # A custom step, from the entry point.
+    q = difmapy.plots.projplot(obs, angle_deg=30.0, step=2.5, block=False)
+    _press(q, "<")
+    assert q.projection == pytest.approx(27.5)
+    q.close()
+
+    # radplot has no angle to turn.
+    r = RadPlot(obs)
+    x = r._data["x"].copy()
+    _press(r, ">")
+    assert r.projection is None and np.array_equal(r._data["x"], x)
+    assert not any(k == "< / >" for k, _ in r.key_help())
+    r.close()

@@ -258,7 +258,6 @@ def test_clearmodel_returns_to_the_dirty_map(template):
     o.invert()
     dirty_peak = o.imstat()["max"]
     o.clean(100, 0.1, quiet=True)
-    o.keep()
     assert o.model_flux > 0
     assert o.imstat()["max"] < dirty_peak  # emission was subtracted
 

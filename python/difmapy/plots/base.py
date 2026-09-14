@@ -4,9 +4,11 @@ Interaction conventions (all point-based plots):
 
 * Shift + drag: flag the points inside the rubber band
 * Ctrl + drag: unflag the points inside the rubber band
-* hover + ``f`` / ``u``: flag / unflag the nearest point
-* ``z`` / ``r``: undo / redo the last flag edit
+* hover + ``f`` / ``F``: flag / unflag the nearest point
+* Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y): undo / redo the last flag edit
 * ``x``: show or hide the flagged points (hidden by default)
+* ``z`` / ``u``: restore the y / x axis range, as difmap's Z and U do
+* ``r``: reload the plot from the data
 * ``h``: the key legend of the active plot
 * ``q``: close the window
 
@@ -18,9 +20,11 @@ undo restores precisely what was there before.
 
 from __future__ import annotations
 
+import atexit
+
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 IF_COLORS = [
     (31, 119, 180), (255, 127, 14), (44, 160, 44), (148, 103, 189),
@@ -31,6 +35,96 @@ FLAG_COLOR = (220, 40, 40)
 UNFLAG_COLOR = (40, 160, 40)
 HIGHLIGHT_COLOR = (255, 140, 0)
 MODEL_COLOR = (214, 30, 30)
+
+
+# ----------------------------------------------------------------------
+# window lifetime
+# ----------------------------------------------------------------------
+
+#: Every plot window whose C++ object still exists, open or merely
+#: closed. These are *strong* references on purpose: a window nobody
+#: kept ("mapplot()" at the prompt, with the result discarded) would
+#: otherwise be collected at some arbitrary later moment, and Qt does
+#: not survive having a live window destroyed from under it. Closing a
+#: window does not remove it from here - a closed window is still a
+#: live QMainWindow, and still crashes the interpreter on the way out
+#: if nobody destroys it first.
+_OPEN_WINDOWS: list = []
+_ATEXIT_DONE = False
+
+
+def _alive(win) -> bool:
+    """False once the window's C++ half has been destroyed."""
+    try:
+        win.isVisible()
+        return True
+    except RuntimeError:  # shiboken/sip: the C++ object is gone
+        return False
+
+
+def _register_window(win):
+    """Keep `win` alive, and arrange for a clean teardown at exit."""
+    global _ATEXIT_DONE
+    # Windows that have really gone can be forgotten; closed ones are
+    # kept until their deferred deletion has actually happened, so that
+    # the exit handler can still finish them off.
+    _OPEN_WINDOWS[:] = [w for w in _OPEN_WINDOWS if _alive(w)]
+    _OPEN_WINDOWS.append(win)
+    if not _ATEXIT_DONE:
+        # atexit handlers run last-registered-first, and Qt's own
+        # module shutdown was registered when QtCore was imported -
+        # before this - so ours goes first, which is what we need.
+        atexit.register(close_all_windows)
+        _ATEXIT_DONE = True
+
+
+def close_all_windows():
+    """Close every open plot window and destroy it, now.
+
+    Left to itself, the interpreter garbage-collects a live plot window
+    during shutdown: Python frees the wrappers of the items inside the
+    scene, then the QMainWindow's destructor tears the scene down and
+    Qt walks into ~QGraphicsItem on objects whose Python halves are
+    already gone. On macOS that aborts the process with SIGTRAP - "zsh:
+    trace trap" after an otherwise clean session.
+
+    Deleting the C++ objects here, while the interpreter is still
+    healthy, leaves nothing for the shutdown to destroy.
+    """
+    windows, _OPEN_WINDOWS[:] = list(_OPEN_WINDOWS), []
+    app = QtWidgets.QApplication.instance()
+    for win in windows:
+        try:
+            win.close()
+        except Exception:  # pragma: no cover - already half gone
+            pass
+    for win in windows:
+        try:
+            win.deleteLater()
+        except Exception:  # pragma: no cover
+            pass
+    if app is not None and windows:
+        # deleteLater only posts an event; without an event loop to run
+        # it, ask for the deferred deletions explicitly.
+        app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def open_windows() -> list:
+    """The plot windows that still exist, open or closed."""
+    return [w for w in _OPEN_WINDOWS if _alive(w)]
+
+
+def fit_to_screen(width, height, margin=0.92):
+    """(width, height), reduced to what the screen can actually show."""
+    try:
+        geo = QtGui.QGuiApplication.primaryScreen().availableGeometry()
+        if geo.width() > 0 and geo.height() > 0:
+            return (min(int(width), int(geo.width() * margin)),
+                    min(int(height), int(geo.height() * margin)))
+    except Exception:  # pragma: no cover - no screen (offscreen tests)
+        pass
+    return (int(width), int(height))
 
 
 def ensure_app():
@@ -152,19 +246,88 @@ def _qt_loop_hooked() -> bool:
 
 
 class PlotWindow(QtWidgets.QMainWindow):
-    """Base window: a key legend on ``h`` and closing on ``q``."""
+    """Base window: a key legend on ``h`` and closing on ``q``.
+
+    Also the home of the axis and reload keys every plot shares: ``z``
+    and ``u`` put the y and x ranges back to their defaults, as
+    difmap's ``Z`` and ``U`` do, and ``r`` rebuilds the plot from the
+    data, for when it has been changed from the prompt behind the
+    window's back.
+    """
+
+    #: Default window size, clipped to the screen. These plots are read
+    #: in detail - a page of stacked panels, or a map beside its colour
+    #: bar and histogram - so they open large.
+    DEFAULT_SIZE = (1150, 800)
 
     def __init__(self, title):
         ensure_app()
         super().__init__()
         self.setWindowTitle(title)
         self._help = None
+        self.resize(*fit_to_screen(*self.DEFAULT_SIZE))
+        _register_window(self)
 
     # Subclasses list their own keys first; these are appended.
     COMMON_KEYS = (
+        ("z / u", "restore the y / x axis range"),
+        ("r", "reload the plot from the data"),
         ("h", "show or hide this help"),
         ("q", "close the window"),
     )
+
+    # ---- axis ranges and reloading ------------------------------------
+
+    def view_boxes(self) -> list:
+        """The view boxes ``z`` and ``u`` act on."""
+        return []
+
+    def default_y_range(self, vb):
+        """The y range ``z`` restores for `vb`; None to autoscale.
+
+        Phase panels come back to +-180 rather than to the spread of
+        whatever is displayed, which is their default view.
+        """
+        return None
+
+    def reset_ranges(self, axis="both") -> int:
+        """Put the axis ranges back to their defaults, on every panel.
+
+        Returns how many panels were reset.
+        """
+        boxes = self.view_boxes()
+        for vb in boxes:
+            auto = False
+            if axis in ("y", "both"):
+                r = self.default_y_range(vb)
+                if r is None:
+                    vb.enableAutoRange(axis=vb.YAxis)
+                    auto = True
+                else:
+                    vb.setYRange(*r, padding=0)
+            # Stacked panels share one x axis: auto-ranging the panel
+            # that owns it is what moves the page, and re-enabling it on
+            # a follower only fights the link.
+            if axis in ("x", "both") and vb.linkedView(vb.XAxis) is None:
+                vb.enableAutoRange(axis=vb.XAxis)
+                auto = True
+            if auto:
+                # pyqtgraph only works out what "auto" means at the next
+                # paint. Do it now, so that the range a plot opens with
+                # is decided here rather than by paint timing.
+                vb.updateAutoRange()
+        return len(boxes)
+
+    def reload(self):
+        """Rebuild the plot from the data (difmap's ``L``).
+
+        The data can be edited from the prompt while a window is open -
+        flagged, calibrated, re-imaged - and nothing tells the window
+        about it; ``r`` is how you catch up.
+        """
+        refresh = getattr(self, "refresh", None)
+        if callable(refresh):
+            refresh()
 
     def key_help(self) -> list[tuple[str, str]]:  # pragma: no cover - trivial
         """The keys this plot understands, as (key, description) pairs."""
@@ -209,12 +372,29 @@ class PlotWindow(QtWidgets.QMainWindow):
         super().resizeEvent(ev)
         self._place_help()
 
+    def closeEvent(self, ev):
+        """Ask Qt to destroy the window once it is out of the way.
+
+        The C++ object goes when the event loop next runs, rather than
+        whenever Python happens to collect the wrapper - which, at
+        interpreter shutdown, is too late to be safe. See
+        `close_all_windows`.
+        """
+        super().closeEvent(ev)
+        self.deleteLater()
+
     def keyPressEvent(self, ev):
         key = ev.text().lower()
         if key == "h":
             self.toggle_help()
         elif key == "q":
             self.close()
+        elif key == "z":
+            self.reset_ranges("y")
+        elif key == "u":
+            self.reset_ranges("x")
+        elif key == "r":
+            self.reload()
         else:
             super().keyPressEvent(ev)
 
@@ -264,6 +444,10 @@ class EditHistory:
                 [int(r) for r in rr], flag,
                 if_index=None if cif is None else int(cif), sel_chan=True,
             )
+        # Ignored stations stay ignored, even if an edit unflagged
+        # part of their data; do it before the snapshot so that undo
+        # restores what was really there.
+        self.obs._reapply_ignores()
         after = np.array(core.flags_rows(rows), copy=True)
         nchanged = int((before != after).sum())
         if nchanged:
@@ -417,6 +601,7 @@ class FlagPlotBase(PlotWindow):
         self._data = None
         self._mouse_pos = None
         self._active = None
+        self._scaled = False
 
         central = QtWidgets.QWidget()
         lay = QtWidgets.QHBoxLayout(central)
@@ -482,6 +667,25 @@ class FlagPlotBase(PlotWindow):
         self._panels.append(panel)
         return panel
 
+    def _share_x_axis(self):
+        """Stack the panels on one common x axis.
+
+        Every panel *but the first* is tied to it, and only the bottom
+        one keeps its tick labels, so the panels of a page read as one
+        plot with a single time (or UV radius) axis rather than as
+        separate ones.
+
+        The first panel must never be linked to itself: pyqtgraph
+        answers a link by taking its range from the other view and
+        switching auto-ranging off, so a self-link freezes the whole
+        page at the empty default view and no data is ever shown.
+        """
+        for panel in self._panels[:-1]:
+            panel.plot.getAxis("bottom").setStyle(showValues=False)
+            panel.plot.setLabel("bottom", "")
+        for panel in self._panels[1:]:
+            panel.plot.setXLink(self._panels[0].plot)
+
     def _build_panels(self):  # pragma: no cover - abstract
         raise NotImplementedError
 
@@ -532,6 +736,13 @@ class FlagPlotBase(PlotWindow):
                         ),
                     )
             self._decorate(panel, d, sub, good)
+        if not self._scaled:
+            # Open on the data, not on pyqtgraph's empty default view:
+            # the panels are built and filled inside this first refresh,
+            # so this is the earliest point at which the extent of the
+            # data is known.
+            self._scaled = True
+            self.reset_ranges()
         self._update_status()
 
     def _panel_mask(self, panel, d):
@@ -574,36 +785,87 @@ class FlagPlotBase(PlotWindow):
         n = self._apply_box(panel, x0, x1, y0, y1, flag)
         self._message(f"{'flagged' if flag else 'unflagged'} {n} samples")
 
+    def view_boxes(self):
+        return [panel.vb for panel in self._panels]
+
+    def default_y_range(self, vb):
+        panel = getattr(vb, "panel", None)
+        if panel is None:
+            return None
+        if panel.key == "phase":
+            return (-180, 180)
+        if panel.key == "amp":
+            return self._flat_amp_range(panel)
+        return None
+
+    def _flat_amp_range(self, panel):
+        """A fixed range for an amplitude panel too flat to autoscale.
+
+        A point source, or data scaled by one gain, can be constant to
+        the last bit of float32; autoscaling that zooms onto rounding
+        noise and pyqtgraph drops the tick labels altogether. Such a
+        panel is ranged to a thousandth of its level instead (the floor
+        corplot uses). Anything with real spread gets None, i.e. normal
+        autoscaling.
+        """
+        d = self._data
+        if d is None or panel.key not in d:
+            return None
+        m = self._panel_mask(panel, d) & (d["wt"] > 0)
+        vals = [np.asarray(d[panel.key])[m]]
+        model = self._model(d, panel.key)
+        if model is not None:
+            vals.append(np.asarray(model)[m])
+        v = np.concatenate(vals)
+        v = v[np.isfinite(v)]
+        if v.size == 0:
+            return None
+        lo, hi = float(v.min()), float(v.max())
+        floor = 1e-3 * abs(0.5 * (lo + hi))
+        if hi - lo >= floor:
+            return None
+        pad = max(floor, 1e-12)
+        return (lo - pad, hi + pad)
+
     def key_help(self):
         return [
             ("shift+drag", "flag the points inside the box"),
             ("ctrl+drag", "unflag the points inside the box"),
-            ("f / u", "flag / unflag the point nearest the cursor"),
-            ("z / r", "undo / redo the last flag edit"),
+            ("f / F", "flag / unflag the point nearest the cursor"),
+            ("ctrl+z / ctrl+shift+z", "undo / redo the last flag edit"),
             ("x", "show or hide the flagged points"),
             ("drag / wheel", "pan / zoom"),
         ]
 
+    def _undo_redo(self, redo):
+        n = self.history.redo() if redo else self.history.undo()
+        what = "redo" if redo else "undo"
+        self.refresh()
+        self._message(f"nothing to {what}" if n is None
+                      else f"{'redid' if redo else 'undid'} an edit of "
+                           f"{n} samples")
+
     def keyPressEvent(self, ev):
-        key = ev.text().lower()
-        if key == "x":
+        key = ev.text()
+        low = key.lower()
+        mods = ev.modifiers()
+        ctrl = bool(mods & QtCore.Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & QtCore.Qt.KeyboardModifier.ShiftModifier)
+        # Undo/redo take the modifier every other application uses,
+        # which leaves z, u and r for the axis and reload keys difmap
+        # binds them to.
+        if ctrl and ev.key() == QtCore.Qt.Key.Key_Z:
+            self._undo_redo(redo=shift)
+        elif ctrl and ev.key() == QtCore.Qt.Key.Key_Y:
+            self._undo_redo(redo=True)
+        elif low == "x":
             self._show_flagged = not self._show_flagged
             self.refresh()
-        elif key in ("f", "u") and self._mouse_pos is not None:
+        elif key in ("f", "F") and self._mouse_pos is not None:
             panel = self._active or (self._panels[0] if self._panels else None)
             if panel is not None:
                 x, y = self._view_coords(panel, self._mouse_pos)
                 self._flag_nearest(panel, x, y, flag=(key == "f"))
-        elif key == "z":
-            n = self.history.undo()
-            self.refresh()
-            self._message("nothing to undo" if n is None
-                          else f"undid an edit of {n} samples")
-        elif key == "r":
-            n = self.history.redo()
-            self.refresh()
-            self._message("nothing to redo" if n is None
-                          else f"redid an edit of {n} samples")
         else:
             super().keyPressEvent(ev)
 
@@ -660,3 +922,162 @@ class FlagPlotBase(PlotWindow):
 
     def _update_status(self):
         self._message(self._status())
+
+
+# ----------------------------------------------------------------------
+# time axes with the dead time cut out
+# ----------------------------------------------------------------------
+
+class TimeGaps:
+    """Maps observing time onto an x axis with the long gaps cut out.
+
+    VLBI scans are often separated by far more time than they last, and
+    a continuous time axis then spends most of its width on nothing.
+    Any gap between consecutive integrations longer than `min_frac` of
+    the whole time range is cut down to `gap_frac` of the time that is
+    kept, so the scans sit side by side on one axis.
+
+    Inside a segment the mapping is a plain shift - an hour of data is
+    still an hour wide - and the first segment is not shifted at all,
+    so with nothing to cut plot coordinates are simply the times.
+    Times are in whatever unit they are given in (the plots use hours).
+    """
+
+    def __init__(self, times, min_frac=0.10, gap_frac=0.02):
+        t = np.unique(np.asarray(times, dtype=float))
+        t = t[np.isfinite(t)]
+        self.segments: list[tuple[float, float]] = []
+        self.offsets: list[float] = []
+        if t.size == 0:
+            return
+        span = float(t[-1] - t[0])
+        cuts = (np.nonzero(np.diff(t) > min_frac * span)[0]
+                if span > 0 else np.zeros(0, dtype=int))
+        starts = np.concatenate(([0], cuts + 1))
+        ends = np.concatenate((cuts, [t.size - 1]))
+        segs = [(float(t[a]), float(t[b])) for a, b in zip(starts, ends)]
+        kept = sum(b - a for a, b in segs)
+        if len(segs) > 1 and kept <= 0.0:
+            # Nothing but isolated instants: no width to scale the cuts
+            # by, and nothing a cut would make easier to read.
+            segs = [(float(t[0]), float(t[-1]))]
+        width = gap_frac * kept
+        x = segs[0][0]
+        for a, b in segs:
+            self.offsets.append(x - a)
+            x += (b - a) + width
+        self.segments = segs
+
+    @classmethod
+    def of(cls, obs, **kwargs):
+        """The cut time axis of an observation, in hours."""
+        return cls(np.asarray(obs._core.times()) / 3600.0, **kwargs)
+
+    def __bool__(self):
+        """True if anything was cut."""
+        return len(self.segments) > 1
+
+    @property
+    def breaks(self) -> list[tuple[float, float]]:
+        """The blank stretches the cuts leave, in plot coordinates."""
+        return [
+            (b0 + o0, a1 + o1)
+            for (_, b0), o0, (a1, _), o1 in zip(
+                self.segments[:-1], self.offsets[:-1],
+                self.segments[1:], self.offsets[1:],
+            )
+        ]
+
+    def _index(self, starts, values):
+        idx = np.searchsorted(starts, values, side="right") - 1
+        return np.clip(idx, 0, len(starts) - 1)
+
+    def compress(self, t):
+        """Times -> plot coordinates."""
+        t = np.asarray(t, dtype=float)
+        if not self.segments:
+            return t.copy()
+        starts = np.array([a for a, _ in self.segments])
+        return t + np.asarray(self.offsets)[self._index(starts, t)]
+
+    def expand(self, x):
+        """Plot coordinates -> times (the inverse of `compress`)."""
+        x = np.asarray(x, dtype=float)
+        if not self.segments:
+            return x.copy()
+        starts = np.array([a + o for (a, _), o in zip(self.segments, self.offsets)])
+        return x - np.asarray(self.offsets)[self._index(starts, x)]
+
+    def in_break(self, x):
+        """True where a plot coordinate falls in a cut."""
+        x = np.asarray(x, dtype=float)
+        out = np.zeros(x.shape, dtype=bool)
+        for lo, hi in self.breaks:
+            out |= (x > lo) & (x < hi)
+        return out
+
+
+class TimeGapAxis(pg.AxisItem):
+    """A bottom axis over `TimeGaps` coordinates, labelled with the
+    real times; ticks that land in a cut are left unlabelled."""
+
+    def __init__(self, gaps, **kwargs):
+        super().__init__(orientation="bottom", **kwargs)
+        self.gaps = gaps
+
+    def tickValues(self, minVal, maxVal, size):
+        """Round-number times within each scan, rather than ticks spaced
+        evenly over the cut axis - which would label every scan at some
+        arbitrary offset from its start."""
+        levels = super().tickValues(minVal, maxVal, size)
+        if not self.gaps:
+            return levels
+        out = []
+        for spacing, _ in levels:
+            ticks = []
+            for (a, b), off in zip(self.gaps.segments, self.gaps.offsets):
+                # The part of this scan in view, in real time.
+                lo, hi = max(a, minVal - off), min(b, maxVal - off)
+                if lo > hi:
+                    continue
+                first = np.ceil(lo / spacing - 1e-9) * spacing
+                real = np.arange(first, hi + 1e-9 * spacing, spacing)
+                ticks.extend(real + off)
+            out.append((spacing, ticks))
+        return out
+
+    def tickStrings(self, values, scale, spacing):
+        values = np.asarray(values, dtype=float)
+        labels = super().tickStrings(self.gaps.expand(values), scale, spacing)
+        blank = self.gaps.in_break(values)
+        return ["" if b else s for s, b in zip(labels, blank)]
+
+
+#: Shading of a cut in a time axis.
+BREAK_BRUSH = (120, 120, 120, 45)
+
+
+def install_time_axis(plot, gaps):
+    """Give a PlotItem a time axis with `gaps` cut out, and shade the
+    cuts so that they read as breaks rather than as missing data.
+
+    Returns the shading items added (none when nothing was cut). The
+    axis is installed either way, so tick labels are always real times.
+    """
+    old = plot.getAxis("bottom")
+    label, grid = old.labelText, old.grid
+    axis = TimeGapAxis(gaps)
+    plot.setAxisItems({"bottom": axis})
+    axis.setGrid(grid)
+    if label:
+        plot.setLabel("bottom", label)
+    items = []
+    for lo, hi in gaps.breaks:
+        region = pg.LinearRegionItem(
+            values=(lo, hi), movable=False, brush=pg.mkBrush(*BREAK_BRUSH),
+            pen=pg.mkPen(120, 120, 120, 140, style=QtCore.Qt.PenStyle.DashLine),
+        )
+        region.setZValue(-10)
+        plot.addItem(region, ignoreBounds=True)
+        items.append(region)
+    return items

@@ -1,7 +1,9 @@
 //! modelfit tests: fitting must recover the parameters of a known
 //! synthetic model (point source and elliptical gaussian).
 
-use difmap_core::model::{recompute_stream_model, CmpType, ModComp};
+use difmap_core::model::{
+    merge_model, partition_variable_model, recompute_stream_model, CmpType, ModComp,
+};
 use difmap_core::modelfit::{fit_uvmodel, M_CENT, M_FLUX, M_MAJOR, M_PHI, M_RATIO};
 use difmap_core::obs::{Antenna, IfBand, Observation, Source};
 use difmap_core::stokes::{Cvis, Stokes};
@@ -226,4 +228,71 @@ fn fit_respects_uvrange_and_errors() {
     // No free parameters is an error.
     let mut fixed = vec![ModComp::delta(1.0, 0.0, 0.0)];
     assert!(fit_uvmodel(&ob, &mut fixed, 10, 0.0, 0.0).is_err());
+}
+
+#[test]
+fn fixed_components_are_established_before_fitting() {
+    // difmap's obvarmod(): a fixed component (a CLEAN delta, say) sits
+    // in the tentative model beside the one being fitted. It must be
+    // established, so that the fit sees the residuals after it - not
+    // dropped, which would leave its flux to be fitted a second time
+    // and then counted twice once the tentative model is merged.
+    let fixed = ModComp::delta(3.0, 0.0, 0.0);
+    let extra = ModComp::delta(0.8, (5.0 * MAS) as f32, (2.0 * MAS) as f32);
+    let mut ob = obs_from_model(&[fixed, extra]);
+    ob.stream = Some(Stream::select(&ob, Stokes::RR, &[]).unwrap());
+
+    ob.newmod = vec![
+        fixed,
+        ModComp {
+            freepar: M_FLUX | M_CENT,
+            ..ModComp::delta(0.5, (4.0 * MAS) as f32, (1.0 * MAS) as f32)
+        },
+    ];
+    partition_variable_model(&mut ob);
+    assert_eq!(ob.model.len(), 1); // the fixed one, now established
+    assert_eq!(ob.newmod.len(), 1); // the variable one, to be fitted
+
+    let mut comps = std::mem::take(&mut ob.newmod);
+    let res = fit_uvmodel(&ob, &mut comps, 50, 0.0, 0.0).expect("fit");
+    assert!(res.rchisq < 1e-6, "reduced chi-squared = {}", res.rchisq);
+    assert!((comps[0].flux - extra.flux).abs() < 5e-3, "flux = {}", comps[0].flux);
+
+    // The whole model now accounts for the data exactly once: 3.8 Jy,
+    // not 3.0 + 3.8.
+    ob.newmod = comps;
+    merge_model(&mut ob);
+    let total: f32 = ob.model.iter().map(|c| c.flux).sum();
+    assert!(
+        (total - (fixed.flux + extra.flux)).abs() < 1e-2,
+        "total flux = {total}"
+    );
+}
+
+#[test]
+fn variable_components_are_taken_back_out_of_the_established_model() {
+    // The other half of obvarmod: an established component with free
+    // parameters is pulled back into the tentative model (and out of
+    // the stream model) so that it can be re-fitted.
+    let truth = ModComp::delta(1.7, (2.5 * MAS) as f32, (-1.25 * MAS) as f32);
+    let mut ob = obs_from_model(&[truth]);
+    ob.stream = Some(Stream::select(&ob, Stokes::RR, &[]).unwrap());
+    ob.model = vec![ModComp {
+        freepar: M_FLUX | M_CENT,
+        ..ModComp::delta(1.0, (1.0 * MAS) as f32, 0.0)
+    }];
+    recompute_stream_model(&mut ob);
+
+    partition_variable_model(&mut ob);
+    assert!(ob.model.is_empty());
+    assert_eq!(ob.newmod.len(), 1);
+    // Its visibilities are out of the stream model again, so the fit
+    // starts from the full data.
+    let stream = ob.stream.as_ref().unwrap();
+    assert!(stream.model.iter().all(|m| m.0.abs() < 1e-4 && m.1.abs() < 1e-4));
+
+    let mut comps = std::mem::take(&mut ob.newmod);
+    let res = fit_uvmodel(&ob, &mut comps, 50, 0.0, 0.0).expect("fit");
+    assert!(res.rchisq < 1e-6);
+    assert!((comps[0].flux - truth.flux).abs() < 1e-3);
 }

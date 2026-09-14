@@ -39,7 +39,6 @@ def test_wobs_applies_calibration(corrupted_uvfits_file, tmp_path):
     o = difmapy.load(path_in)
     o.select("I")
     o.addcmp(FLUX, X0_MAS, Y0_MAS)
-    o.keep()
     o.selfcal(amp=True, phase=True, float_scale=True)
 
     out = str(tmp_path / "cal.uvf")
@@ -50,7 +49,6 @@ def test_wobs_applies_calibration(corrupted_uvfits_file, tmp_path):
     o2 = difmapy.load(out)
     o2.select("I")
     o2.addcmp(FLUX, X0_MAS, Y0_MAS)
-    o2.keep()
     vis, wt = o2._core.stream_vis()
     model = o2._core.stream_model()
     good = wt > 0
@@ -76,7 +74,6 @@ def test_save_get(uvfits_file, tmp_path):
     o.mapsize(NX, CELL)
     o.add_window(X0_MAS - 2, X0_MAS + 2, Y0_MAS - 2, Y0_MAS + 2)
     o.clean(300, 0.1)
-    o.keep()
     prefix = str(tmp_path / "session")
     o.save(prefix)
 

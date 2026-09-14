@@ -85,6 +85,10 @@ pub fn closure_phases(
         None => (0..nif).filter(|&c| stream.if_used[c]).collect(),
     };
 
+    // The complete model, including any components held apart from the
+    // stream model while they are being fitted.
+    let model = crate::model::full_model_vis(ob);
+
     for &(a, b, c) in &triangles {
         for &cif in &cifs {
             if !stream.if_used[cif] {
@@ -128,9 +132,9 @@ pub fn closure_phases(
                 let phs = phs - tau * ((phs / tau + 0.5).floor());
 
                 // Model closure phase, if a model exists.
-                let m_ab = stream.model[row_ab * nif + cif];
-                let m_bc = stream.model[row_bc * nif + cif];
-                let m_ca = stream.model[row_ca * nif + cif];
+                let m_ab = model[row_ab * nif + cif];
+                let m_bc = model[row_bc * nif + cif];
+                let m_ca = model[row_ca * nif + cif];
                 let mphs = if (m_ab.0 != 0.0 || m_ab.1 != 0.0)
                     && (m_bc.0 != 0.0 || m_bc.1 != 0.0)
                     && (m_ca.0 != 0.0 || m_ca.1 != 0.0)
@@ -193,10 +197,19 @@ pub struct Spectrum {
 ///
 /// `baseline` optionally restricts to one baseline (global antenna
 /// indices, unordered); `time_range` restricts the averaging window.
+///
+/// With `calibrated`, the antenna gains, baseline corrections and
+/// accumulated phase-center shift are applied per channel, exactly as
+/// `Stream::apply_calibration_rows` applies them to the selected
+/// stream - otherwise the average would ignore self-cal and a
+/// vector-averaged spectrum of calibrated data would be meaningless.
+/// The channel's own frequency is used for the shift phase, where the
+/// stream can only use its IF's effective frequency.
 pub fn spectrum(
     ob: &Observation,
     baseline: Option<(u32, u32)>,
     time_range: Option<(f64, f64)>,
+    calibrated: bool,
 ) -> Spectrum {
     let polop = match ob.stream.as_ref() {
         Some(s) => s.polop,
@@ -216,6 +229,19 @@ pub fn spectrum(
     let mut swt = vec![0.0f64; nct];
     let mut pvis = vec![crate::stokes::Cvis::default(); ob.npol()];
 
+    // Which IF each global channel belongs to, and its frequency.
+    let mut chan_if = vec![0usize; nct];
+    let mut freq = vec![0.0f64; nct];
+    for (cif, band) in ob.ifs.iter().enumerate() {
+        for ch in 0..band.nchan {
+            chan_if[band.coff + ch] = cif;
+            freq[band.coff + ch] = band.chan_freq(ch);
+        }
+    }
+    let bcor = ob.bcor.as_ref().filter(|b| !b.is_identity());
+    let (east, north) = (ob.geom.east, ob.geom.north);
+    let doshift = calibrated && (east != 0.0 || north != 0.0);
+
     for row in 0..ob.nrow {
         if let Some((ba, bb)) = baseline {
             let (a1, a2) = (ob.ant1[row], ob.ant2[row]);
@@ -229,24 +255,48 @@ pub fn spectrum(
                 continue;
             }
         }
+        let it = ob.time_idx[row] as usize;
+        let (a1, a2) = (ob.ant1[row] as usize, ob.ant2[row] as usize);
         for gc in 0..nct {
             ob.pvis(row, gc, &mut pvis);
-            let v = polop.get(&pvis);
+            let mut v = polop.get(&pvis);
             if v.wt <= 0.0 {
                 continue; // flagged or absent
+            }
+            if calibrated {
+                let cif = chan_if[gc];
+                let ia = ob.gains.idx(it, cif, a1);
+                let ib = ob.gains.idx(it, cif, a2);
+                if ob.gains.bad[ia] || ob.gains.bad[ib] {
+                    continue; // an unusable solution flags the sample
+                }
+                let mut ampcor = ob.gains.amp[ia] * ob.gains.amp[ib];
+                let mut phscor = ob.gains.phs[ia] - ob.gains.phs[ib];
+                if let Some(bc) = bcor {
+                    if let Some(k) = bc.index(ob.ant1[row], ob.ant2[row], cif) {
+                        ampcor *= bc.amp[k];
+                        phscor += bc.phs[k];
+                    }
+                }
+                if doshift {
+                    let f = freq[gc];
+                    let (us, vs) = (ob.uvw[row * 3], ob.uvw[row * 3 + 1]);
+                    phscor +=
+                        (std::f64::consts::TAU * (us * f * east + vs * f * north)) as f32;
+                }
+                if ampcor != 1.0 || phscor != 0.0 {
+                    let (s, c) = phscor.sin_cos();
+                    let (re, im) = (v.re, v.im);
+                    v.re = ampcor * (re * c - im * s);
+                    v.im = ampcor * (re * s + im * c);
+                    v.wt /= ampcor * ampcor;
+                }
             }
             let w = v.wt as f64;
             sre[gc] += w * v.re as f64;
             sim[gc] += w * v.im as f64;
             samp[gc] += w * ((v.re * v.re + v.im * v.im).sqrt() as f64);
             swt[gc] += w;
-        }
-    }
-
-    let mut freq = vec![0.0f64; nct];
-    for band in &ob.ifs {
-        for ch in 0..band.nchan {
-            freq[band.coff + ch] = band.chan_freq(ch);
         }
     }
     Spectrum {
