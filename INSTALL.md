@@ -1,5 +1,8 @@
 # Installing difmapy
 
+
+NOTE THAT ALL THE INFORMATION BELOW IS WRONG
+
 ## 1. For your own use / manual testing
 
 You need a Rust toolchain only to *build* difmapy; once built, it is a

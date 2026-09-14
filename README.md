@@ -50,8 +50,7 @@ not.
 ```sh
 pip install maturin
 maturin develop --release          # builds the Rust core into your env
-pip install ".[plot]"              # pyqtgraph + PySide6 for plots
-pip install ".[ms]"                # casatools for Measurement Sets
+pip install .              # pyqtgraph + PySide6 for plots
 ```
 
 See `INSTALL.md` for building redistributable wheels and for publishing
