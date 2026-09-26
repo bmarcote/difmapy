@@ -329,7 +329,7 @@ def test_requires_a_measurement_set(tmp_path):
     o = difmapy.load(UVF)
     o.select("I")
     with pytest.raises(ValueError, match="Measurement Set is needed"):
-        o.savecaltable(str(tmp_path / "x.G"), quiet=True)
+        o.savecaltable(str(tmp_path / "x.G"), outformat="CASA", quiet=True)
     # With a reference MS it works: antennas are matched by name.
     info = o.savecaltable(str(tmp_path / "y.G"), ms=SRC_MS, quiet=True)
     assert info["nrows"] > 0

@@ -113,7 +113,7 @@ def load_uvfits(path, wtscale=1.0):
         )
         if not an_tables:
             raise ValueError("UVFITS file lacks an AIPS AN antenna table")
-        ant_names, ant_xyz, ant_sub = [], [], []
+        ant_names, ant_xyz, ant_sub, ant_nosta = [], [], [], []
         # Map (subarray, antenna_number) -> global index.
         index_of = {}
         for isub, an in enumerate(an_tables):
@@ -125,6 +125,7 @@ def load_uvfits(path, wtscale=1.0):
                 ant_names.append(names[k] or f"ANT{int(nosta[k])}")
                 ant_xyz.append(xyz[k])
                 ant_sub.append(isub)
+                ant_nosta.append(int(nosta[k]))
         ant_xyz = np.asarray(ant_xyz, dtype=np.float64)
 
         # ---- group parameters ----
@@ -213,7 +214,7 @@ def load_uvfits(path, wtscale=1.0):
         dec = np.deg2rad(float(hdr[f"CRVAL{iax_dec}"])) if iax_dec else 0.0
         epoch = float(hdr.get("EQUINOX", hdr.get("EPOCH", 2000.0)))
 
-        return CoreObservation(
+        core = CoreObservation(
             source,
             ra,
             dec,
@@ -235,6 +236,14 @@ def load_uvfits(path, wtscale=1.0):
             float(ref_mjd),
             flag=np.ascontiguousarray(flag),
         )
+    # What a calibration table needs to refer back to this file: the
+    # AIPS station numbers (an SN table is keyed by them, not by name).
+    core._cal_origin = {
+        "format": "uvfits",
+        "path": path,
+        "ant_numbers": ant_nosta,
+    }
+    return core
 
 
 def save_uvfits(core, path, overwrite=True, freeze_shift=False):

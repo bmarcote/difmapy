@@ -28,7 +28,8 @@ Differences from the original by design:
 * **flags are stored in an explicit FLAG column**, the MS convention,
   and can be written straight back into the MS with `save_flags()`
   instead of having to write out a new UV file.
-* **Calibration tables can be stored as CASA calibration files** via `savecaltable()`. The stored table compiles all calibration corrections performed to the data in the Difmapy session. You can then use this table inside CASA (or other software package) to apply it to other data sets.
+* **Calibration tables can be exported for CASA and AIPS** via `savecaltable()`: a CASA "G Jones" table and/or an AIPS SN table in a TASAV FITS file (by default whichever matches the data you loaded). The table compiles all calibration corrections performed to the data in the Difmapy session, so it can be applied inside CASA or AIPS to other data sets, such as the other sources of the observation.
+* **Bayesian station amplitude calibration** with `bayes_gscale()`: `gscale` with each station left out of the source model in turn, several source models compared, and the corrections shrunk towards the a-priori calibration, with a JSON report, a diagnostic figure and a calibration table (see below).
 * native **multi-IF / multi-channel** handling: all subbands (IFs /
   SPWs) are gridded together (multi-frequency synthesis), and each may
   have a different number of channels
@@ -69,7 +70,8 @@ difmapy                                   # empty interactive session
 difmapy mysource.uvfits                   # load and select Stokes I
 difmapy data.ms --stokes I --mapsize 2048 --cell 0.5
 difmapy data.ms --channels 0-31           # channel ranges
-difmapy big.uvfits --average 10s          # time-average on load
+difmapy big.uvfits --timeavg 10s          # time-average on load
+difmapy big.ms --freqavg all              # one channel per IF on load
 difmapy data.ms -c "clean(200, 0.03)"     # run commands on startup
 difmapy data.ms --batch -c "wmap('m.fits')"   # scripted, no prompt
 ```
@@ -98,7 +100,9 @@ commands. `--batch` makes the same commands usable from shell scripts.
 import difmapy
 
 obs = difmapy.load("mysource.uvfits")  # or a .ms directory; difmapy.observe
-obs = difmapy.load("big.uvfits", average="10s") # time-average on load (also difmapy.uvaver)
+obs = difmapy.load("big.uvfits", timeavg="10s") # time-average on load (also difmapy.uvaver)
+obs = difmapy.load("big.ms", freqavg=4)        # average 4 channels at a time (also chanaver)
+obs = difmapy.load("big.ms", channels=[(2, 29)], freqavg="all")  # drop edges, then average
 print(obs.header())                    # is the same function
 print(obs.pols)                        # ['RR', 'LL', 'RL', 'LR']
 
@@ -356,13 +360,20 @@ out, so a per-scan solution can be checked at a glance:
 selfcal: phase per scan; 8 solution bins, 0 unusable, 0 bad telescope solutions
 ```
 
-### Exporting calibration to CASA
+### Exporting calibration to CASA and AIPS
 
 difmapy never rewrites an MS's visibilities: `DATA`/`CORRECTED_DATA` are
 only ever read, corrections live in a separate gain table in memory, and
 the only column written back is `FLAG` (see `save_flags`). That is the
-same separation CASA makes, so the gains can be handed over as a
-calibration table:
+same separation CASA and AIPS make, so the gains can be handed over as a
+calibration table. `savecaltable(path, outformat=...)` writes a CASA
+table (`"CASA"`), an AIPS SN table in a TASAV FITS file (`"AIPS"`), or
+both (`"both"`; case does not matter). By default it writes the one that
+matches the data: CASA for a Measurement Set, AIPS for UVFITS (or, if
+you pass only `ms=` or only `uvfits=`, the one that file is for). With
+`"both"`, `path` names the CASA table and the AIPS file is
+`<path>.TASAV.FITS` (or give a `.fits` path, and the CASA table drops
+the extension).
 
 ```python
 obs.selfcal(phase=True)
@@ -407,6 +418,87 @@ Notes and limits:
 * exporting from UVFITS-loaded data works with `ms=`, but timestamps in
   a UVFITS file can differ from the MS's by a fraction of an
   integration, so prefer exporting from the MS-loaded observation.
+
+#### AIPS
+
+```python
+obs = difmapy.load("mysource.uvfits")
+obs.selfcal(amp=True, phase=True, solint=30)
+obs.savecaltable("mysource.TASAV.FITS")   # AIPS SN table (the default here)
+```
+
+```
+FITLD  the TASAV file                      -> MYSRC.TASAV.1
+TACOP  inext 'SN' from it onto the UV data
+single-source data: DOCAL 1, GAINUSE <that SN version> (SPLIT, IMAGR...)
+multi-source data:  CLCAL first, to turn it into a new CL table
+```
+
+The file is laid out as AIPS 31DEC24's own TASAV/FITTP output: one dummy
+visibility plus the FQ, AN and SN (revision 11) tables. An SN table
+refers to AIPS **station numbers** and counts time in days from the
+file's reference date, so both are taken from the UV file the table is
+meant for: the one loaded, or another given as `uvfits=` (antennas
+matched by name). For data loaded from an MS, antennas are numbered in
+ANTENNA-table order from 1, as CASA's `exportuvfits` does. `SOURCE ID`
+is 0, so the table applies to every source once copied onto a
+multi-source file.
+
+AIPS multiplies the data by `conj(g_p)·g_q` - the same amplitude
+convention as difmapy but the opposite phase sign - so the SN table
+holds `g = conj(c)`. The test suite checks this in AIPS itself when it
+is installed: FITLD, TACOP and SPLIT with `DOCAL 1` reproduce difmapy's
+corrected visibilities to float32 precision.
+
+### Bayesian amplitude calibration
+
+`gscale` finds one amplitude correction per station against a model -
+but that model was built from the same data, so a station whose
+amplitude scale is wrong has already pulled the model towards its error.
+`bayes_gscale` breaks that circle and puts error bars on the result:
+
+```python
+r = obs.bayes_gscale(prefix="3C345_bayes")  # runs, applies, writes report
+print(r)                                    # the summary again
+r.plot()                                    # the diagnostic figure
+```
+
+1. **Leave one station out.** For each station (and once for the full
+   array) the source model is rebuilt with that station ignored, phase
+   self-calibrating as it goes. The station is then brought back, phased
+   up against that fixed model, and the whole array `gscale`d, so its
+   correction comes from a model it had no say in. The runs that leave
+   out the *other* stations give a jackknife spread. Where leaving a
+   station out moves its own estimate a lot, that shift counts as
+   systematic uncertainty too: it may mean the full-array model had
+   absorbed the station's error, or just that the station's baselines
+   reach spatial frequencies nobody else constrains.
+2. **Compare source models** (`models=`, default CLEAN and one to three
+   Gaussians; also `pointN`, `cleanN` and `current`) by the Bayesian
+   information criterion on the full array, with the chi-squared
+   rescaled by the best model's reduced chi-squared (VLBI weights are
+   rarely absolute). The corrections are averaged over models by their
+   posterior probabilities.
+3. **Shrink to the prior**: a Gaussian on each log-amplitude correction
+   of width `prior_sigma` (default 10%, the a-priori calibration
+   accuracy). The Bayes factor between "a correction is needed" and "it
+   is not" gives `P(needed)` for every station, and what is applied is
+   the posterior average over both, so corrections the data do not
+   demand are left out.
+
+Every run works on its own copy of the observation and releases the GIL
+in the heavy steps, so the runs go in parallel threads (`workers=`; 36
+runs on the 3C345 test data take 2 s on 10 cores). `timeavg=` averages
+the working copy first for long tracks. `prefix` writes
+`<prefix>.json` (settings, per-model evidence, per-station and per-IF
+corrections with uncertainties and probabilities, the influence matrix,
+every run, and the findings in words), `<prefix>.png` (the diagnostics:
+corrections against the prior, `P(needed)`, model evidence, the
+leave-one-out influence matrix, per-station fit before/after) and a
+calibration table of the constant corrections. The table goes to
+`<prefix>.G` and/or `<prefix>.TASAV.FITS` (`outformat=`, `ms=` and
+`uvfits=` as for `savecaltable`), ready to apply to the other sources.
+The figure needs matplotlib.
 
 ### Notebooks and pipelines
 

@@ -836,6 +836,78 @@ impl CoreObservation {
         self.mb = None;
     }
 
+    /// Multiply constant corrections into every integration of the gain
+    /// table: `amp[nif, nant]` scales the amplitude corrections and
+    /// `phs[nif, nant]` (radians) is added to the phase corrections.
+    /// This is how a calibration solved elsewhere (a whole-observation
+    /// gain set, as gscale produces) is applied; entries that are not
+    /// the identity are marked as solved, as gscale marks its own.
+    #[pyo3(signature = (amp, phs=None))]
+    fn apply_gain_factors(
+        &mut self,
+        py: Python<'_>,
+        amp: PyReadonlyArray2<f32>,
+        phs: Option<PyReadonlyArray2<f32>>,
+    ) -> PyResult<()> {
+        let (nif, nant) = (self.ob.gains.nif, self.ob.gains.nant);
+        let amp = amp.as_array();
+        if amp.shape() != [nif, nant] {
+            return Err(PyValueError::new_err(format!(
+                "amp must be [nif, nant] = [{nif}, {nant}]"
+            )));
+        }
+        if amp.iter().any(|a| !(a.is_finite() && *a > 0.0)) {
+            return Err(PyValueError::new_err(
+                "amplitude factors must be finite and positive",
+            ));
+        }
+        let phs: Vec<f32> = match &phs {
+            None => vec![0.0; nif * nant],
+            Some(p) => {
+                let p = p.as_array();
+                if p.shape() != [nif, nant] {
+                    return Err(PyValueError::new_err(format!(
+                        "phs must be [nif, nant] = [{nif}, {nant}]"
+                    )));
+                }
+                p.iter().cloned().collect()
+            }
+        };
+        let amp: Vec<f32> = amp.iter().cloned().collect();
+        py.detach(|| {
+            let g = &mut self.ob.gains;
+            for it in 0..g.ntime {
+                for cif in 0..nif {
+                    for ia in 0..nant {
+                        let (a, p) = (amp[cif * nant + ia], phs[cif * nant + ia]);
+                        if a == 1.0 && p == 0.0 {
+                            continue;
+                        }
+                        let gi = g.idx(it, cif, ia);
+                        g.amp[gi] *= a;
+                        g.phs[gi] += p;
+                        g.used[gi] = true;
+                    }
+                }
+            }
+            let mut stream = self.ob.stream.take();
+            if let Some(s) = stream.as_mut() {
+                s.apply_calibration(&self.ob);
+            }
+            self.ob.stream = stream;
+        });
+        self.mb = None;
+        Ok(())
+    }
+
+    /// An independent deep copy: data, flags, gains, models, selection
+    /// and the current map. Attributes set from Python (the provenance
+    /// in `__dict__`) are not copied here; `Observation.copy()` does it.
+    fn copy(&self, py: Python<'_>) -> CoreObservation {
+        let (ob, mb) = py.detach(|| (self.ob.clone(), self.mb.clone()));
+        CoreObservation { ob, mb }
+    }
+
     // ---------------- editing / flagging ----------------
 
     /// Flag or unflag visibilities matching the given criteria

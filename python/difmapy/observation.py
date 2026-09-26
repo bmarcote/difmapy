@@ -19,6 +19,8 @@ radians internally.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from difmapy._core import CoreObservation
@@ -106,7 +108,7 @@ def _comp_dict(comp, freepar=0) -> dict:
     }
 
 
-__all__ = ["Observation", "load", "observe", "uvaver"]
+__all__ = ["Observation", "load", "observe", "uvaver", "chanaver"]
 
 
 class Observation:
@@ -141,21 +143,40 @@ class Observation:
 
     @classmethod
     def from_uvfits(cls, path, wtscale=1.0, stokes="I", channels=None,
-                    average=None, scatter=False) -> "Observation":
+                    timeavg=None, freqavg=None, scatter=False,
+                    average=None) -> "Observation":
         from difmapy.io.uvfits import load_uvfits
 
-        obs = cls(load_uvfits(path, wtscale=wtscale))
-        obs._initial_select(stokes, channels)
-        return obs._averaged(average, scatter)
+        return cls(load_uvfits(path, wtscale=wtscale))._on_load(
+            stokes, channels, timeavg, freqavg, scatter, average)
 
     @classmethod
-    def from_ms(cls, path, stokes="I", channels=None, average=None,
-                scatter=False, **kwargs) -> "Observation":
+    def from_ms(cls, path, stokes="I", channels=None, timeavg=None,
+                freqavg=None, scatter=False, average=None,
+                **kwargs) -> "Observation":
         from difmapy.io.ms import load_ms
 
-        obs = cls(load_ms(path, **kwargs))
+        return cls(load_ms(path, **kwargs))._on_load(
+            stokes, channels, timeavg, freqavg, scatter, average)
+
+    def _on_load(self, stokes, channels, timeavg, freqavg, scatter,
+                 average=None):
+        """The selection and averaging asked for at load time, in the
+        order that costs least: channels are averaged first (only the
+        requested `channels` go into the averages, so band edges can be
+        dropped), then the Stokes selection, then the time averaging."""
+        if average is not None:
+            if timeavg is not None and timeavg != average:
+                raise ValueError("give the time averaging as timeavg= only "
+                                 "(average= is its older name)")
+            timeavg = average
+        obs = self
+        if freqavg is not None and freqavg is not False:
+            obs = obs.chanaver(None if freqavg is True else freqavg,
+                               channels=channels)
+            channels = None
         obs._initial_select(stokes, channels)
-        return obs._averaged(average, scatter)
+        return obs._averaged(timeavg, scatter)
 
     def _averaged(self, average, scatter=False):
         """This observation time-averaged by `uvaver`, or itself when
@@ -1112,6 +1133,36 @@ class Observation:
             self._print_fit(res)
         return self._report(res, outfile)
 
+    def bayes_gscale(self, models=("clean", "gauss1", "gauss2", "gauss3"),
+                     prior_sigma=0.10, jackknife=True, per_if=True,
+                     float_scale=False, nloop=2, solint=0.0, clean_gain=0.05,
+                     sigma_floor=0.01, timeavg=None, workers=None, apply=True,
+                     prefix=None, outformat=None, ms=None, uvfits=None,
+                     plot=None, quiet=False):
+        """Bayesian amplitude calibration of every station: `gscale`
+        with each station left out of the source model in turn, several
+        source models weighed against each other, and the result shrunk
+        towards the a-priori calibration (`prior_sigma`). Corrections
+        the data do not call for are not applied.
+
+        See `difmapy.bayescal` for the method and every parameter. The
+        runs are independent and go in parallel threads (`workers`).
+        With `apply` the corrections are applied like `gscale`'s; with
+        `prefix` the JSON report, the diagnostic figure and the
+        calibration table of the constant corrections (for other sources
+        of the observation; `outformat` as for `savecaltable`) are
+        written. Returns a `BayesGainResult`: print it for the summary,
+        ``.plot()`` for the diagnostics.
+        """
+        from difmapy.bayescal import bayes_gscale
+
+        return bayes_gscale(
+            self, models=models, prior_sigma=prior_sigma, jackknife=jackknife,
+            per_if=per_if, float_scale=float_scale, nloop=nloop, solint=solint,
+            clean_gain=clean_gain, sigma_floor=sigma_floor, timeavg=timeavg,
+            workers=workers, apply=apply, prefix=prefix, outformat=outformat,
+            ms=ms, uvfits=uvfits, plot=plot, quiet=quiet)
+
     def _gain_amps(self, fill=np.nan):
         """The gain-table amplitudes and their "solved" mask, both
         [ntimes, nif, nant]; `fill` replaces unsolved entries."""
@@ -1315,26 +1366,79 @@ class Observation:
         """
         from difmapy.average import uvaver
 
-        new = Observation(
+        return self._derived(
             uvaver(self._core, parse_time(aver_time, "s"), bool(doscatter))
         )
-        # The averaged rows no longer map onto an MS's rows, so it cannot
-        # be written back; remember where it came from to say so.
+
+    def chanaver(self, nchan=None, channels=None):
+        """Return a new observation with every `nchan` adjacent channels
+        of each IF averaged into one (AIPS AVSPC, CASA split's `width`).
+
+        `nchan` must divide each IF's number of channels; ``None`` (or
+        ``"all"``) averages every IF down to a single channel.
+        `channels` lists inclusive global channel ranges, as for
+        `select`, to average only those - the way band edges are left
+        out. As with `uvaver`, the calibrated data are averaged and the
+        new observation starts uncalibrated; the channel selection is
+        reset to all (averaged) channels, keeping the Stokes selection.
+        """
+        from difmapy.average import chanaver
+
+        chlist = [(int(a), int(b)) for a, b in (channels or [])]
+        return self._derived(chanaver(self._core, nchan, chlist or None),
+                             same_channels=False)
+
+    def _derived(self, core, same_channels=True):
+        """A new observation around `core` - made from this one's data by
+        averaging - with this one's imaging setup, windows, selection
+        and provenance.
+
+        The rows (time averaging) or channels (frequency averaging) no
+        longer map onto the source file's, so the data cannot be written
+        back to a Measurement Set; `_from_ms` remembers where it came
+        from to say so. The calibration provenance (`_cal_origin`) still
+        holds, since calibration tables refer to antennas, IFs and times
+        rather than rows.
+        """
+        new = Observation(core)
         origin = getattr(self._core, "_ms_origin", None)
         new._from_ms = origin["path"] if origin else getattr(self, "_from_ms", None)
+        cal_origin = getattr(self._core, "_cal_origin", None)
+        if cal_origin is not None:
+            core._cal_origin = cal_origin
         # Carry over the imaging setup and selection.
         new._nx, new._ny = self._nx, self._ny
         new._xinc, new._yinc = self._xinc, self._yinc
         new._binwid, new._errpow, new._dorad = self._binwid, self._errpow, self._dorad
+        new._robust = self._robust
+        new._mapsize_set = self._mapsize_set
         new._gauval, new._gaurad = self._gauval, self._gaurad
         new._uvmin, new._uvmax = self._uvmin, self._uvmax
         new._uvzero = self._uvzero
         new.windows = list(self.windows)
         try:
             sel = self._core.selection()
-            new.select(sel["stokes"], channels=[tuple(r) for r in sel["chlist"]])
+            chans = [tuple(r) for r in sel["chlist"]] if same_channels else None
+            new.select(sel["stokes"], channels=chans)
         except RuntimeError:
             pass
+        return new
+
+    def copy(self) -> "Observation":
+        """An independent copy of this observation: data, flags, gains,
+        model, selection, map and every imaging setting. Changing one
+        never affects the other (which is what lets calibration
+        experiments run side by side, see `bayes_gscale`)."""
+        import copy as _copy
+
+        new = Observation.__new__(Observation)
+        state = {k: v for k, v in self.__dict__.items() if k != "_core"}
+        new.__dict__.update(_copy.deepcopy(state))
+        new._core = self._core.copy()
+        # Provenance attached from Python (_ms_origin, _cal_origin); it
+        # describes the source file and is never modified, so it can be
+        # shared.
+        new._core.__dict__.update(self._core.__dict__)
         return new
 
     # ------------------------------------------------------------------
@@ -1521,40 +1625,124 @@ class Observation:
                 nt, nif, nant).copy(),
         }
 
-    def savecaltable(self, path, ms=None, spw_ids=None,
-                     flag_uncalibrated=False, overwrite=True, quiet=False,
-                     since=None):
-        """Export the accumulated antenna gains as a CASA calibration
-        table, applicable with CASA's `applycal`.
+    #: `savecaltable` output formats, by the names it accepts.
+    CALTABLE_FORMATS = {"casa": ("casa",), "aips": ("aips",),
+                        "both": ("casa", "aips")}
+
+    def caltable_formats(self, outformat=None, ms=None, uvfits=None) -> tuple:
+        """The formats `savecaltable` writes for `outformat`: by default
+        the native one of the file the data came from - a CASA table for
+        a Measurement Set, an AIPS SN table for UVFITS - unless a
+        reference file of the other kind is given (`ms`/`uvfits`), which
+        says which table is wanted."""
+        if outformat is None or str(outformat).lower() == "auto":
+            if ms and not uvfits:
+                return ("casa",)
+            if uvfits and not ms:
+                return ("aips",)
+            origin = getattr(self._core, "_cal_origin", None) or {}
+            if origin.get("format") == "ms" or getattr(
+                    self._core, "_ms_origin", None):
+                return ("casa",)
+            return ("aips",)
+        key = str(outformat).strip().lower()
+        if key not in self.CALTABLE_FORMATS:
+            raise ValueError(
+                f"unknown outformat {outformat!r}; use 'CASA', 'AIPS' or "
+                "'both' (case does not matter)"
+            )
+        return self.CALTABLE_FORMATS[key]
+
+    @staticmethod
+    def caltable_paths(path, formats) -> dict:
+        """Where each format goes. A single format is written to `path`
+        itself. With both, a `path` ending in ``.fits`` is the AIPS file
+        and the CASA table is that name without ``.fits`` (and without a
+        ``.TASAV`` before it); any other `path` is the CASA table, and
+        the AIPS file is ``<path>.TASAV.FITS``."""
+        path = os.fspath(path)
+        if len(formats) == 1:
+            return {formats[0]: path}
+        if path.lower().endswith(".fits"):
+            base = path[:-5]
+            if base.lower().endswith(".tasav"):
+                base = base[:-6]
+            return {"casa": base, "aips": path}
+        return {"casa": path, "aips": f"{path}.TASAV.FITS"}
+
+    def savecaltable(self, path, outformat=None, ms=None, uvfits=None,
+                     spw_ids=None, flag_uncalibrated=False, overwrite=True,
+                     quiet=False, since=None, solutions=None):
+        """Export the accumulated antenna gains as a calibration table
+        that CASA or AIPS can apply to the data.
+
+        `outformat` is ``"CASA"`` (a "G Jones" table for `applycal`),
+        ``"AIPS"`` (an SN table inside a TASAV FITS file, for FITLD and
+        TACOP) or ``"both"``, in any case. By default it follows the
+        data: a Measurement Set gets a CASA table, a UVFITS file an AIPS
+        one - or, given only `ms` or only `uvfits`, the table that file is
+        for. See `caltable_paths` for where `path` puts each of the two.
 
         The table is a snapshot of every correction applied so far (the
-        gains accumulate over `selfcal`/`gscale` calls), holding the
-        reciprocal of difmapy's corrections so that CASA's
-        ``CORRECTED_DATA = DATA / (G_p conj(G_q))`` reproduces what
-        difmapy shows.
+        gains accumulate over `selfcal`/`gscale` calls). CASA divides
+        the data by its gains, so a CASA table holds the reciprocal of
+        difmapy's corrections; AIPS multiplies by them, so an SN table
+        holds them as they are. Either way, applying the table
+        reproduces what difmapy shows.
 
-        `ms` defaults to the Measurement Set the data came from and is
-        required for UVFITS input; antennas are matched by name, so a
-        different but compatible MS may be given. Baseline corrections
-        (`resoff`) and phase-centre `shift`s cannot be expressed in such
-        a table and are reported instead of being dropped silently.
+        `ms` is the Measurement Set a CASA table refers to (default: the
+        one the data came from; required for UVFITS input), and
+        `uvfits` the UVFITS file an SN table is numbered for (default:
+        the one the data came from; for MS input, antennas are numbered
+        in ANTENNA-table order as exportuvfits does). In both cases
+        antennas are matched by name, so a different but compatible
+        file - another source of the same observation - may be given.
+        Baseline corrections (`resoff`) and phase-centre `shift`s cannot
+        be expressed in such a table and are reported instead of being
+        dropped silently.
 
         Pass `since=obs.gain_snapshot()` (taken earlier) to write only
         the calibration accumulated since then, giving one table per
-        self-cal round in the CASA style; applying the chain together is
-        equivalent to applying one cumulative table.
+        self-cal round; applying the chain together is equivalent to
+        applying one cumulative table. `solutions` writes a given set of
+        gains instead of the gain table (`bayes_gscale` uses it).
+
+        Returns the writer's summary (`path`, `nrows`, `nflagged`,
+        `warnings`, `format`); with both formats, one per format under
+        ``"casa"`` and ``"aips"``, and the warnings once at the top.
         """
+        from difmapy.io.aips import save_sntable
         from difmapy.io.caltable import save_caltable
 
-        info = save_caltable(self, path, ms=ms, spw_ids=spw_ids,
-                             flag_uncalibrated=flag_uncalibrated,
-                             overwrite=overwrite, since=since)
+        formats = self.caltable_formats(outformat, ms=ms, uvfits=uvfits)
+        paths = self.caltable_paths(path, formats)
+        infos = {}
+        for fmt in formats:
+            if fmt == "casa":
+                info = save_caltable(self, paths[fmt], ms=ms, spw_ids=spw_ids,
+                                     flag_uncalibrated=flag_uncalibrated,
+                                     overwrite=overwrite, since=since,
+                                     solutions=solutions)
+            else:
+                info = save_sntable(self, paths[fmt], uvfits=uvfits,
+                                    flag_uncalibrated=flag_uncalibrated,
+                                    overwrite=overwrite, since=since,
+                                    solutions=solutions)
+            info["format"] = fmt
+            infos[fmt] = info
         if not quiet:
-            print(f"Wrote {info['path']}: {info['nrows']} solutions "
-                  f"({info['nflagged']} flagged)")
-            for w in info["warnings"]:
+            label = {"casa": "CASA G table", "aips": "AIPS SN table (TASAV)"}
+            for fmt, info in infos.items():
+                print(f"Wrote {label[fmt]} {info['path']}: {info['nrows']} "
+                      f"rows ({info['nflagged']} flagged solutions)")
+            for w in next(iter(infos.values()))["warnings"]:
                 print(f"  warning: {w}")
-        return info
+        if len(infos) == 1:
+            return next(iter(infos.values()))
+        out = dict(infos)
+        out["warnings"] = next(iter(infos.values()))["warnings"]
+        out["path"] = [info["path"] for info in infos.values()]
+        return out
 
     def save_flags(self, path=None, flag_row=True):
         """Write the FLAG column back to the source Measurement Set.
@@ -1969,29 +2157,46 @@ class Observation:
         return self
 
 
-def load(path, stokes="I", channels=None, average=None, scatter=False,
-         **kwargs) -> Observation:
+def load(path, stokes="I", channels=None, timeavg=None, freqavg=None,
+         scatter=False, average=None, **kwargs) -> Observation:
     """Load a UVFITS file or Measurement Set (difmap observe).
 
     Unlike difmap, the total intensity is selected straight away, since
     that is how nearly every session starts; pass ``stokes=None`` to
     load without a selection, and `select()` can change it at any time.
 
-    `average` time-averages the data straight after loading, as difmap's
-    `observe` does with its bin width: ``average="10s"`` (or seconds as
+    `timeavg` time-averages the data straight after loading, as difmap's
+    `observe` does with its bin width: ``timeavg="10s"`` (or seconds as
     a number) is `uvaver` applied on load, and `scatter=True` derives
-    the weights from the scatter of the averaged samples. Averaging a
-    long, finely sampled observation first makes every later step
-    faster. Note that an averaged Measurement Set can no longer be
-    written back as one (see `save`).
+    the weights from the scatter of the averaged samples. `average` is
+    its older name and still works.
+
+    `freqavg` averages channels on load (`chanaver`): an integer number
+    of adjacent channels per output channel, which must divide each
+    IF's channel count, or ``"all"``/``True`` for one channel per IF.
+    Only the `channels` given go into the averages, so
+    ``channels=[(2, 29), (34, 61)], freqavg="all"`` drops the band edges
+    of two 32-channel IFs before averaging them; the selection then
+    covers every averaged channel.
+
+    Averaging a long, finely sampled observation first makes every
+    later step faster. Note that averaged data can no longer be written
+    back to the Measurement Set (see `save`), although calibration
+    tables for it still can (`savecaltable`).
     """
     import os
 
+    opts = dict(stokes=stokes, channels=channels, timeavg=timeavg,
+                freqavg=freqavg, scatter=scatter, average=average)
     if os.path.isdir(path):
-        return Observation.from_ms(path, stokes=stokes, channels=channels,
-                                   average=average, scatter=scatter, **kwargs)
-    return Observation.from_uvfits(path, stokes=stokes, channels=channels,
-                                   average=average, scatter=scatter, **kwargs)
+        return Observation.from_ms(path, **opts, **kwargs)
+    return Observation.from_uvfits(path, **opts, **kwargs)
+
+
+def chanaver(obs, nchan=None, channels=None) -> Observation:
+    """Average every `nchan` channels of each IF into one, returning a
+    new observation; the same as ``obs.chanaver(nchan, channels)``."""
+    return obs.chanaver(nchan, channels=channels)
 
 
 def uvaver(obs, aver_time, scatter=False) -> Observation:

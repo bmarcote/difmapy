@@ -256,6 +256,17 @@ def load_ms(path, field=None, data_column="DATA", wtscale=1.0):
         # Antenna table row of each difmapy antenna entry.
         "ant_ids": [int(k) % nant_tab for k in range(len(ant_names))],
     }
+    # The part of that which survives averaging (the rows change, the
+    # antennas, spectral windows and field do not), for savecaltable.
+    # AIPS numbers antennas from 1 in ANTENNA-table order, which is what
+    # CASA's exportuvfits writes.
+    core._cal_origin = {
+        "format": "ms",
+        "path": path,
+        "field_id": int(field_id),
+        "spw_ids": list(core._ms_origin["spw_ids"]),
+        "ant_numbers": [a + 1 for a in core._ms_origin["ant_ids"]],
+    }
     return core
 
 

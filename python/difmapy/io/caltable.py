@@ -138,9 +138,22 @@ def _scan_and_observation(tb, ms_path, times_mjds, field_id):
     return scan[idx], obs[idx]
 
 
+def _ms_path(obs, ms):
+    """The Measurement Set a table refers to: `ms`, or the one the data
+    came from (also after averaging, which keeps the provenance)."""
+    core = obs._core
+    if ms:
+        return ms
+    origin = getattr(core, "_ms_origin", None)
+    if origin:
+        return origin["path"]
+    cal = getattr(core, "_cal_origin", None) or {}
+    return cal.get("path") if cal.get("format") == "ms" else None
+
+
 def save_caltable(obs, path, ms=None, spw_ids=None, flag_uncalibrated=False,
-                  overwrite=True, since=None):
-    """Write the accumulated antenna gains as a CASA "G Jones" table.
+                  overwrite=True, since=None, solutions=None):
+    """Write antenna gains as a CASA "G Jones" table.
 
     Parameters
     ----------
@@ -171,6 +184,9 @@ def save_caltable(obs, path, ms=None, spw_ids=None, flag_uncalibrated=False,
         resulting chain of tables together, as CASA does with
         ``gaintable=[t1, t2, ...]``, is equivalent to applying one
         cumulative table.
+    solutions : difmapy.io.solutions.GainSolutions | None
+        Write these instead of the observation's gain table (for
+        instance the constant gains of `bayes_gscale`).
     """
     try:
         import casatools
@@ -179,56 +195,24 @@ def save_caltable(obs, path, ms=None, spw_ids=None, flag_uncalibrated=False,
             "writing CASA calibration tables requires casatools"
         ) from exc
 
+    from difmapy.io.solutions import from_gain_table
+
     core = obs._core
-    origin = getattr(core, "_ms_origin", None)
-    ms_path = ms or (origin or {}).get("path")
+    origin = getattr(core, "_ms_origin", None) or getattr(core, "_cal_origin", None)
+    ms_path = _ms_path(obs, ms)
     if not ms_path:
         raise ValueError(
-            "a Measurement Set is needed to write a calibration table "
+            "a Measurement Set is needed to write a CASA calibration table "
             "(its antenna, spectral window and field metadata are "
-            "referenced); pass ms=... for UVFITS-loaded data"
+            "referenced); pass ms=... for UVFITS-loaded data, or write an "
+            "AIPS SN table instead (outformat='aips')"
         )
     if not os.path.isdir(ms_path):
         raise ValueError(f"not a Measurement Set: {ms_path}")
 
-    warnings = []
-    if any(abs(v) > 0 for v in core.shift_total):
-        e, n = obs.total_shift
-        warnings.append(
-            f"a phase-centre shift of ({e:.4g}, {n:.4g}) mas is in effect; "
-            "a calibration table cannot express it (use CASA's phaseshift, "
-            "or wobs(freeze_shift=True) to bake it into the data)"
-        )
-    bls, bamp, bphs = core.baseline_corrections()
-    if len(bls) and not (np.allclose(bamp, 1.0) and np.allclose(bphs, 0.0)):
-        warnings.append(
-            "baseline-based corrections from resoff() are in effect; these "
-            "have no antenna-based equivalent and are NOT included in the "
-            "table (use wobs() to write data with them applied)"
-        )
-
-    nant = len(core.antenna_names)
-    nif = core.nif
-    ntimes = core.ntimes
-    amp, phs, bad = (np.asarray(x) for x in core.gains())
-    amp = amp.reshape(ntimes, nif, nant).astype(np.float64)
-    phs = phs.reshape(ntimes, nif, nant).astype(np.float64)
-    bad = bad.reshape(ntimes, nif, nant)
-    used = np.asarray(core.gains_used()).reshape(ntimes, nif, nant)
-
-    if since is not None:
-        # Export only what has been accumulated since the snapshot, by
-        # dividing out the corrections that were already in place.
-        amp0, phs0, used0 = since["amp"], since["phs"], since["used"]
-        if amp0.shape != amp.shape:
-            raise ValueError(
-                "the gain snapshot does not match this observation "
-                f"(snapshot {amp0.shape}, now {amp.shape}); it must come "
-                "from the same observation without a reselection"
-            )
-        amp = np.where(amp0 != 0, amp / np.where(amp0 != 0, amp0, 1.0), amp)
-        phs = phs - phs0
-        del used0  # `used` still means "a solution was applied here"
+    sol = solutions if solutions is not None else from_gain_table(obs, since)
+    warnings = list(sol.warnings)
+    ntimes, nif, nant = sol.shape
 
     if spw_ids is None:
         spw_ids = (origin or {}).get("spw_ids") or list(range(nif))
@@ -241,12 +225,8 @@ def save_caltable(obs, path, ms=None, spw_ids=None, flag_uncalibrated=False,
     ant_ids = _antenna_index_by_name(tb, ms_path, core.antenna_names)
 
     # Solution times as MJD seconds, matching the Measurement Set.
-    times_mjds = core.ref_mjd * 86400.0 + np.asarray(core.times())
-    # Solution interval: the integration length, from the data.
-    inttime = np.asarray(core.inttimes(), dtype=np.float64)
-    tidx = np.asarray(core.time_index())
-    interval = np.zeros(ntimes)
-    np.maximum.at(interval, tidx, inttime)
+    times_mjds = sol.ref_mjd * 86400.0 + sol.times
+    interval = sol.interval
     scan, obsid = _scan_and_observation(tb, ms_path, times_mjds, field_id)
 
     # One row per (time, IF, antenna), as CASA's own G tables have.
@@ -259,11 +239,9 @@ def save_caltable(obs, path, ms=None, spw_ids=None, flag_uncalibrated=False,
     a1_col = np.tile(np.asarray(ant_ids, dtype=np.int32), ntimes * nif)
 
     # The gain is the reciprocal of the correction difmapy applies.
-    corr = amp * np.exp(1j * phs)
+    corr = sol.correction()
     gain = np.where(np.abs(corr) > 0, 1.0 / corr, 1.0 + 0j).ravel()
-    flag = bad.ravel().copy()
-    if flag_uncalibrated:
-        flag |= ~used.ravel()
+    flag = sol.flags(flag_uncalibrated).ravel()
     # A flagged solution must not carry a meaningful value.
     gain = np.where(flag, 1.0 + 0j, gain)
 

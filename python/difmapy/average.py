@@ -1,9 +1,10 @@
-"""Time averaging of UV data (difmap `uvaver`).
+"""Time and frequency averaging of UV data.
 
-Averages the *calibrated* visibilities into coarser integrations,
-returning a new observation. Flagged samples are excluded from the
-average; an output sample is flagged only if none of its inputs were
-usable.
+`uvaver` (difmap's own command) averages the *calibrated* visibilities
+into coarser integrations, and `chanaver` averages adjacent channels of
+each IF (AIPS AVSPC, CASA split's `width`); both return a new
+observation. Flagged samples are excluded from the average; an output
+sample is flagged only if none of its inputs were usable.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import numpy as np
 
 from difmapy._core import CoreObservation
 
-__all__ = ["uvaver"]
+__all__ = ["uvaver", "chanaver"]
 
 
 def uvaver(core: CoreObservation, aver_time: float, doscatter: bool = False):
@@ -151,3 +152,112 @@ def uvaver(core: CoreObservation, aver_time: float, doscatter: bool = False):
         flag=np.ascontiguousarray(out_flag[rorder]),
     )
     return new
+
+
+def chanaver(core: CoreObservation, nchan=None, chlist=None):
+    """Return a new CoreObservation with every `nchan` adjacent channels
+    of each IF averaged into one.
+
+    Parameters
+    ----------
+    nchan : int | str | None
+        Channels per output channel. It must divide every IF's number
+        of channels, since an IF's channels are equally spaced by
+        construction. ``None``, ``0`` or ``"all"`` average each IF down
+        to a single channel.
+    chlist : list[(int, int)] | None
+        Inclusive global channel ranges to use (as for `select`); the
+        other channels are left out of the averages, which is how band
+        edges are dropped before averaging. Default: all channels.
+
+    As with `uvaver`, what is averaged is what the user currently sees -
+    gains, baseline corrections and any shift applied, the shift at each
+    channel's own frequency - and the result starts uncalibrated.
+
+    The weights of the inputs add. A sample is good if any of its inputs
+    was; a bin whose inputs were all flagged keeps the average of those
+    (flagged, so `unflag` can bring it back), and only a bin with no
+    data at all is deleted.
+    """
+    vis, wt = core.calibrated_cube(apply_shift=True)  # signed wt: <0 flagged
+    vis = np.asarray(vis)
+    wt = np.asarray(wt)
+    nrow, nctotal, npol = vis.shape
+    use = np.ones(nctotal, dtype=bool)
+    if chlist:
+        use[:] = False
+        for a, b in chlist:
+            a, b = int(a), int(b)
+            if a > b or a < 0 or b >= nctotal:
+                raise ValueError(f"invalid channel range {a}-{b} "
+                                 f"(there are {nctotal} channels)")
+            use[a:b + 1] = True
+    good = (wt > 0) & use[None, :, None]
+    present = (wt != 0) & use[None, :, None]
+
+    out_vis, out_wt, out_flag = [], [], []
+    freqs, widths, counts = [], [], []
+    coff = 0
+    for cif, (f0, df, nch) in enumerate(core.ifs):
+        if nchan in (None, 0) or str(nchan).lower() == "all":
+            n = nch
+        else:
+            n = int(nchan)
+            if n < 1:
+                raise ValueError("nchan must be a positive number of channels")
+            n = min(n, nch)
+        if nch % n:
+            raise ValueError(
+                f"IF {cif + 1} has {nch} channels, which cannot be averaged "
+                f"in groups of {n}: the averaged channels must stay equally "
+                "spaced, so use a divisor of the number of channels"
+            )
+        nout = nch // n
+        sl = slice(coff, coff + nch)
+        shape = (nrow, nout, n, npol)
+        v = vis[:, sl].reshape(shape)
+        w = np.abs(wt[:, sl]).reshape(shape)
+        g = good[:, sl].reshape(shape)
+        p = present[:, sl].reshape(shape)
+        # Good inputs if there are any; otherwise the flagged ones.
+        anygood = g.any(axis=2, keepdims=True)
+        take = np.where(anygood, g, p)
+        wsum = np.where(take, w, 0.0).sum(axis=2, dtype=np.float64)
+        vsum = np.where(take, w * v, 0.0).sum(axis=2)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            avg = np.where(wsum > 0, vsum / np.maximum(wsum, 1e-300), 0.0)
+        out_vis.append(avg.astype(np.complex64))
+        out_wt.append(wsum.astype(np.float32))
+        out_flag.append(~anygood[:, :, 0, :])
+        # The centre of the first output channel, and the new spacing.
+        freqs.append(float(f0 + 0.5 * (n - 1) * df))
+        widths.append(float(df * n))
+        counts.append(nout)
+        coff += nch
+
+    out_vis = np.concatenate(out_vis, axis=1)
+    out_wt = np.concatenate(out_wt, axis=1)
+    out_flag = np.concatenate(out_flag, axis=1) | (out_wt <= 0)
+    time, a1, a2, us, vs, ws = core.rows()
+    return CoreObservation(
+        core.source_name,
+        core.ra,
+        core.dec,
+        2000.0,
+        core.antenna_names,
+        np.asarray(core.antenna_xyz),
+        list(core.antenna_subarrays),
+        freqs,
+        widths,
+        counts,
+        list(core.pols),
+        np.ascontiguousarray(np.asarray(time, dtype=np.float64)),
+        np.ascontiguousarray(np.asarray(core.inttimes(), dtype=np.float32)),
+        np.ascontiguousarray(np.asarray(a1, dtype=np.uint32)),
+        np.ascontiguousarray(np.asarray(a2, dtype=np.uint32)),
+        np.ascontiguousarray(np.column_stack([us, vs, ws]).astype(np.float64)),
+        np.ascontiguousarray(out_vis),
+        np.ascontiguousarray(out_wt),
+        core.ref_mjd,
+        flag=np.ascontiguousarray(out_flag),
+    )

@@ -34,6 +34,7 @@ pub enum SelectError {
     Empty,
 }
 
+#[derive(Clone)]
 pub struct Stream {
     pub stokes: Stokes,
     /// The polarization construction used.

@@ -100,6 +100,7 @@ impl Default for InvertPars {
 
 /// The result of `invert`: residual dirty map and dirty beam
 /// (both `[ny * nx]`, row-major), plus beam/noise estimates.
+#[derive(Clone)]
 pub struct MapBeam {
     pub geom: MapGeom,
     pub map: Vec<f32>,

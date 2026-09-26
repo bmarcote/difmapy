@@ -241,6 +241,57 @@ the accumulated gains. Hard-won details, all of them load-bearing:
   file has flagged junk at |V| ~ 2000 where float32 rounding dwarfs
   physical tolerances.
 
+## AIPS SN tables (TASAV)
+
+`python/difmapy/io/aips.py` writes an SN table inside a TASAV FITS file;
+`savecaltable(outformat=...)` picks CASA/AIPS/both, defaulting to the
+loaded file's native format. Established against AIPS 31DEC24 itself:
+
+- **Convention**: AIPS multiplies the data by `conj(g_p)·g_q`, difmapy
+  by `c_p·conj(c_q)`, so `SN = conj(c)` - same amplitude, phase negated.
+  Not the reciprocal (that is CASA). `tests/test_aips_sntable.py` runs
+  FITLD/TACOP/SPLIT(DOCAL 1)/FITTP in AIPS and compares with difmapy's
+  corrected cube; it needs `/opt/aips/LOGIN.SH` (or
+  `$DIFMAPY_AIPS_LOGIN`) and empties AIPS user 7301's catalog.
+- The layout copies what AIPS's own CALIB -> TASAV -> FITTP writes: one
+  all-zero dummy group whose data axes match the target UV file, then
+  FQ, AN, SN (REVISION 11, with the DISP/DDISP columns).
+- SN antennas are AIPS station numbers and times are days from the
+  target file's reference date (AN `RDATE`), so both come from a UVFITS
+  file (`uvfits=`, default the one loaded) matched by name. UVFITS
+  loading therefore keeps the NOSTA numbers.
+- Driving AIPS from a script: `aips notv < cmds`, first line the user
+  number, POPS lines short (a long line fails with "LINE SIZE"), file
+  names in upper case (AIPS upper-cases what it writes), and it exits
+  through signal 11 after `kleenex` - judge success from the log.
+
+Calibration provenance lives in `core._cal_origin` (format, path, spw
+ids, field, AIPS antenna numbers). Unlike `_ms_origin`, which maps rows
+and so is dropped by averaging, it survives `uvaver`/`chanaver`/`copy`,
+which is why averaged data can still export tables.
+
+## Bayesian gain calibration
+
+`bayescal.bayes_gscale` runs one job per (source model, station left
+out), each on `Observation.copy()` (a Rust clone), in threads - the
+heavy bindings release the GIL, and the result must not depend on the
+number of workers (a test pins it). Things that look odd but are meant:
+
+- The per-station estimate is the *leave-own-out* gscale; its variance
+  adds the jackknife over the other exclusions, a floor, and
+  `(loo - full)^2 / 4`. That last term is what stops a station with
+  unique uv coverage (T6 on the 3C345 data: x1.9 when left out) from
+  being "corrected" by an extrapolated model.
+- Model evidence is BIC on the full-array runs with chi-squared
+  rescaled by the best model's reduced chi-squared; CLEAN counts three
+  parameters per distinct component position.
+- What is applied is `P(needed) * posterior mean` in log amplitude, so
+  on noiseless test data the applied value is the gscale value times
+  `tau^2/(tau^2 + sigma^2)`, not the gscale value itself.
+- The figure (`bayesplot.py`) is matplotlib, not pyqtgraph, and is drawn
+  inside an `rc_context` that turns `text.usetex` off: with LaTeX on,
+  every "%" in a label starts a comment and truncates it.
+
 ## Known behaviour worth remembering
 
 - **Only the inner quarter of a map is meaningful.** Outside it the

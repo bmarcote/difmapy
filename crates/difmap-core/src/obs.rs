@@ -127,6 +127,7 @@ impl GainTable {
     }
 }
 
+#[derive(Clone)]
 pub struct Observation {
     pub source: Source,
     pub antennas: Vec<Antenna>,
