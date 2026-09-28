@@ -110,6 +110,25 @@ def _antenna_index_by_name(tb, ms_path, names):
     return out
 
 
+def _field_index_by_name(tb, ms_path, source, default):
+    """FIELD_ID of `source` in `ms_path`, matched by name.
+
+    A table written for a *different* Measurement Set than the data came
+    from (another source of the observation, or the multi-source parent
+    of a split) must carry that file's field number, not the split's.
+    Falls back to `default` when the name is not found there.
+    """
+    tb.open(os.path.join(ms_path, "FIELD"))
+    try:
+        names = [str(n).strip().upper() for n in tb.getcol("NAME")]
+    finally:
+        tb.close()
+    key = str(source or "").strip().upper()
+    if key in names:
+        return names.index(key)
+    return int(default)
+
+
 def _scan_and_observation(tb, ms_path, times_mjds, field_id):
     """The SCAN_NUMBER and OBSERVATION_ID in force at each solution time.
 
@@ -219,10 +238,10 @@ def save_caltable(obs, path, ms=None, spw_ids=None, flag_uncalibrated=False,
     spw_ids = [int(s) for s in spw_ids]
     if len(spw_ids) != nif:
         raise ValueError(f"spw_ids has {len(spw_ids)} entries for {nif} IFs")
-    field_id = int((origin or {}).get("field_id", 0))
-
     tb = casatools.table()
     ant_ids = _antenna_index_by_name(tb, ms_path, core.antenna_names)
+    field_id = _field_index_by_name(tb, ms_path, core.source_name,
+                                    int((origin or {}).get("field_id", 0)))
 
     # Solution times as MJD seconds, matching the Measurement Set.
     times_mjds = sol.ref_mjd * 86400.0 + sol.times
@@ -311,6 +330,39 @@ def save_caltable(obs, path, ms=None, spw_ids=None, flag_uncalibrated=False,
             tb.putkeyword(sub, f"Table: {dest}")
         finally:
             tb.close()
+        if sub == "SPECTRAL_WINDOW":
+            _collapse_spectral_window(tb, dest)
 
     return {"path": path, "nrows": n, "nflagged": int(flag.sum()),
             "warnings": warnings}
+
+
+def _collapse_spectral_window(tb, path):
+    """Reduce every spectral window of a caltable to a single channel.
+
+    A G Jones solution has one value per IF, and CASA's own gaincal tables
+    describe their windows that way (NUM_CHAN 1, CHAN_FREQ the band centre,
+    CHAN_WIDTH the whole band). Copying the multi-channel window of the parent
+    Measurement Set instead makes applycal validate a (npol, 1) solution
+    against an (npol, nchan) window and abort with an ArrayShapeError.
+    """
+    tb.open(path, nomodify=False)
+    try:
+        for row in range(tb.nrows()):
+            freqs = np.atleast_1d(np.asarray(tb.getcell("CHAN_FREQ", row), dtype=np.float64))
+            widths = np.atleast_1d(np.asarray(tb.getcell("CHAN_WIDTH", row), dtype=np.float64))
+            if freqs.size <= 1:
+                continue
+            total = float(np.sum(np.abs(widths)))
+            centre = float(0.5 * (freqs.min() - 0.5 * abs(widths[0]) + freqs.max() + 0.5 * abs(widths[-1])))
+            tb.putcell("NUM_CHAN", row, 1)
+            tb.putcell("CHAN_FREQ", row, np.array([centre]))
+            tb.putcell("REF_FREQUENCY", row, centre)
+            for col in ("CHAN_WIDTH", "EFFECTIVE_BW", "RESOLUTION"):
+                if col in tb.colnames():
+                    tb.putcell(col, row, np.array([total]))
+            if "TOTAL_BANDWIDTH" in tb.colnames():
+                tb.putcell("TOTAL_BANDWIDTH", row, total)
+        tb.flush()
+    finally:
+        tb.close()
