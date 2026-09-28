@@ -110,6 +110,75 @@ def _comp_dict(comp, freepar=0) -> dict:
 
 __all__ = ["Observation", "load", "observe", "uvaver", "chanaver"]
 
+# The parameters every loader takes, documented once: `_load_doc`
+# substitutes them into load(), observe() and the from_* constructors,
+# so that help() on any of them lists everything that can be passed.
+_LOAD_PARAMETERS = """\
+stokes : str | None, default "I"
+    Polarization to select once loaded: "I", "Q", "U", "V", or a
+    recorded one ("RR", "LL", "RL", "LR", "XX", ...). "I" uses difmap's
+    permissive combination (a visibility survives when only one
+    parallel hand is usable); Q/U/V are strict. ``None`` (or "none")
+    loads without a selection, as difmap's `observe` does; `select()`
+    changes it at any time.
+channels : list of (int, int) | None, default None
+    Inclusive, 0-based channel ranges over the global channel axis (all
+    IFs concatenated), e.g. ``[(0, 31), (64, 95)]``, as `select` takes
+    them. With `freqavg`, only these channels go into the averages - the
+    way band edges are dropped - and the selection then covers every
+    averaged channel. ``None``: all channels.
+timeavg : float | str | None, default None
+    Time-average straight after loading (difmap `uvaver`): seconds as a
+    number, or a string with its unit ("10s", "2min"). ``None``: keep
+    the original integrations.
+freqavg : int | "all" | bool | None, default None
+    Average this many adjacent channels into one (`chanaver`); it must
+    divide every IF's number of channels. ``"all"`` or ``True`` averages
+    each IF down to a single channel. ``None``/``False``: no averaging.
+scatter : bool, default False
+    With `timeavg`: derive the output weights from the scatter of the
+    averaged samples instead of summing the input weights.
+wtscale : float, default 1.0
+    Factor applied to the data weights as they are read.
+field : str | int | None, default None
+    Measurement Sets only: the field (name or FIELD_ID) to load. Needed
+    when the MS has several fields; difmapy, like difmap, is
+    single-source.
+data_column : str, default "DATA"
+    Measurement Sets only: the visibility column to read, "DATA" or
+    "CORRECTED_DATA".
+average : float | str | None, default None
+    The older name of `timeavg`, still accepted."""
+
+_LOAD_NOTES = """\
+The work is done in the cheapest order: channels are averaged first,
+then the Stokes selection is made, then the time averaging. Averaged
+data can no longer be written back into the Measurement Set (see
+`save`), but calibration tables for it still can (`savecaltable`)."""
+
+
+def _load_doc(fn):
+    """Put the shared loader parameters (and notes) into `fn`'s
+    docstring, at the ``{LOAD_PARAMETERS}``/``{LOAD_NOTES}`` lines and
+    at their indentation."""
+    import textwrap
+
+    # UVFITS has no fields or data columns: its block leaves them out.
+    ms_only = _LOAD_PARAMETERS[_LOAD_PARAMETERS.index("field :"):
+                               _LOAD_PARAMETERS.index("average :")]
+    doc = fn.__doc__
+    for key, text in (("{LOAD_PARAMETERS}", _LOAD_PARAMETERS),
+                      ("{LOAD_PARAMETERS_UVFITS}",
+                       _LOAD_PARAMETERS.replace(ms_only, "")),
+                      ("{LOAD_NOTES}", _LOAD_NOTES)):
+        for line in doc.splitlines():
+            if line.strip() == key:
+                indent = line[: len(line) - len(line.lstrip())]
+                doc = doc.replace(line, textwrap.indent(text, indent))
+                break
+    fn.__doc__ = doc
+    return fn
+
 
 class Observation:
     """An in-memory interferometric observation (difmap-style)."""
@@ -142,21 +211,58 @@ class Observation:
     # ------------------------------------------------------------------
 
     @classmethod
+    @_load_doc
     def from_uvfits(cls, path, wtscale=1.0, stokes="I", channels=None,
                     timeavg=None, freqavg=None, scatter=False,
                     average=None) -> "Observation":
+        """Load a random-groups UVFITS file (single source).
+
+        Parameters
+        ----------
+        path : str
+            The UVFITS file.
+        {LOAD_PARAMETERS_UVFITS}
+
+        Returns
+        -------
+        Observation
+
+        Notes
+        -----
+        {LOAD_NOTES}
+        """
         from difmapy.io.uvfits import load_uvfits
 
         return cls(load_uvfits(path, wtscale=wtscale))._on_load(
             stokes, channels, timeavg, freqavg, scatter, average)
 
     @classmethod
+    @_load_doc
     def from_ms(cls, path, stokes="I", channels=None, timeavg=None,
-                freqavg=None, scatter=False, average=None,
-                **kwargs) -> "Observation":
+                freqavg=None, scatter=False, average=None, wtscale=1.0,
+                field=None, data_column="DATA") -> "Observation":
+        """Load a CASA Measurement Set (single field; needs casatools).
+
+        Parameters
+        ----------
+        path : str
+            The Measurement Set directory.
+        {LOAD_PARAMETERS}
+
+        Returns
+        -------
+        Observation
+
+        Notes
+        -----
+        {LOAD_NOTES}
+        Autocorrelations are dropped, as difmap uses cross-correlations
+        only.
+        """
         from difmapy.io.ms import load_ms
 
-        return cls(load_ms(path, **kwargs))._on_load(
+        return cls(load_ms(path, field=field, data_column=data_column,
+                           wtscale=wtscale))._on_load(
             stokes, channels, timeavg, freqavg, scatter, average)
 
     def _on_load(self, stokes, channels, timeavg, freqavg, scatter,
@@ -1361,8 +1467,18 @@ class Observation:
         """Return a new observation with the calibrated data averaged
         into `aver_time` integrations (difmap uvaver).
 
-        `aver_time` is in seconds as a bare number, or carries its own
-        unit as a string: ``"30s"``, ``"2min"``.
+        Parameters
+        ----------
+        aver_time : float | str
+            The new integration time: seconds as a bare number, or a
+            string carrying its unit (``"30s"``, ``"2min"``).
+        doscatter : bool, default False
+            Derive the output weights from the scatter of the averaged
+            samples instead of summing the input weights.
+
+        The gains, baseline corrections and any shift are applied before
+        averaging, and the new observation starts uncalibrated, with this
+        one's selection, imaging setup and windows.
         """
         from difmapy.average import uvaver
 
@@ -1374,13 +1490,19 @@ class Observation:
         """Return a new observation with every `nchan` adjacent channels
         of each IF averaged into one (AIPS AVSPC, CASA split's `width`).
 
-        `nchan` must divide each IF's number of channels; ``None`` (or
-        ``"all"``) averages every IF down to a single channel.
-        `channels` lists inclusive global channel ranges, as for
-        `select`, to average only those - the way band edges are left
-        out. As with `uvaver`, the calibrated data are averaged and the
-        new observation starts uncalibrated; the channel selection is
-        reset to all (averaged) channels, keeping the Stokes selection.
+        Parameters
+        ----------
+        nchan : int | "all" | None, default None
+            Channels per output channel; it must divide each IF's number
+            of channels. ``None`` (or ``"all"``) averages every IF down
+            to a single channel.
+        channels : list of (int, int) | None, default None
+            Inclusive global channel ranges, as for `select`, to average
+            only those - the way band edges are left out. ``None``: all.
+
+        As with `uvaver`, the calibrated data are averaged and the new
+        observation starts uncalibrated; the channel selection is reset
+        to all (averaged) channels, keeping the Stokes selection.
         """
         from difmapy.average import chanaver
 
@@ -1816,6 +1938,11 @@ class Observation:
 
         `scale` is "linear" or "log" for the colour scale, which the
         "l" key also toggles.
+
+        The "Weighting" box at the top of the window switches between
+        difmap's own `uvweight` scheme and robust -2, -1, 0, +1, +2, and
+        re-images at once; like `uvweight()`, the choice stays in effect
+        after the window closes.
         """
         from difmapy.plots import mapplot
 
@@ -2157,54 +2284,88 @@ class Observation:
         return self
 
 
+@_load_doc
 def load(path, stokes="I", channels=None, timeavg=None, freqavg=None,
-         scatter=False, average=None, **kwargs) -> Observation:
-    """Load a UVFITS file or Measurement Set (difmap observe).
+         scatter=False, wtscale=1.0, field=None, data_column="DATA",
+         average=None) -> Observation:
+    """Load a UVFITS file or a Measurement Set (difmap `observe`).
 
     Unlike difmap, the total intensity is selected straight away, since
-    that is how nearly every session starts; pass ``stokes=None`` to
-    load without a selection, and `select()` can change it at any time.
+    that is how nearly every session starts.
 
-    `timeavg` time-averages the data straight after loading, as difmap's
-    `observe` does with its bin width: ``timeavg="10s"`` (or seconds as
-    a number) is `uvaver` applied on load, and `scatter=True` derives
-    the weights from the scatter of the averaged samples. `average` is
-    its older name and still works.
+    Parameters
+    ----------
+    path : str
+        A random-groups UVFITS file, or a Measurement Set directory
+        (read with casatools); a directory is taken to be an MS. Both
+        must hold a single source.
+    {LOAD_PARAMETERS}
 
-    `freqavg` averages channels on load (`chanaver`): an integer number
-    of adjacent channels per output channel, which must divide each
-    IF's channel count, or ``"all"``/``True`` for one channel per IF.
-    Only the `channels` given go into the averages, so
-    ``channels=[(2, 29), (34, 61)], freqavg="all"`` drops the band edges
-    of two 32-channel IFs before averaging them; the selection then
-    covers every averaged channel.
+    Returns
+    -------
+    Observation
 
-    Averaging a long, finely sampled observation first makes every
-    later step faster. Note that averaged data can no longer be written
-    back to the Measurement Set (see `save`), although calibration
-    tables for it still can (`savecaltable`).
+    Notes
+    -----
+    {LOAD_NOTES}
+
+    Examples
+    --------
+    >>> obs = difmapy.load("mysource.uvfits")
+    >>> obs = difmapy.load("big.ms", timeavg="10s", freqavg="all")
+    >>> obs = difmapy.load("big.ms", channels=[(2, 29)], freqavg="all",
+    ...                    field="3C345", data_column="CORRECTED_DATA")
     """
     import os
 
     opts = dict(stokes=stokes, channels=channels, timeavg=timeavg,
-                freqavg=freqavg, scatter=scatter, average=average)
+                freqavg=freqavg, scatter=scatter, average=average,
+                wtscale=wtscale)
     if os.path.isdir(path):
-        return Observation.from_ms(path, **opts, **kwargs)
-    return Observation.from_uvfits(path, **opts, **kwargs)
+        return Observation.from_ms(path, field=field,
+                                   data_column=data_column, **opts)
+    if field is not None or str(data_column).upper() != "DATA":
+        raise ValueError(
+            f"field= and data_column= apply to Measurement Sets only, and "
+            f"{path} is a UVFITS file"
+        )
+    return Observation.from_uvfits(path, **opts)
 
 
 def chanaver(obs, nchan=None, channels=None) -> Observation:
-    """Average every `nchan` channels of each IF into one, returning a
-    new observation; the same as ``obs.chanaver(nchan, channels)``."""
+    """Average adjacent channels of each IF, returning a new observation
+    (`obs` is left as it is); the same as ``obs.chanaver(nchan,
+    channels)``.
+
+    Parameters
+    ----------
+    obs : Observation
+        The observation to average.
+    nchan : int | "all" | None, default None
+        Channels per output channel; it must divide every IF's number
+        of channels. ``None``/``"all"``: one channel per IF.
+    channels : list of (int, int) | None, default None
+        Inclusive global channel ranges to use; the others are left out
+        of the averages. ``None``: all channels.
+    """
     return obs.chanaver(nchan, channels=channels)
 
 
 def uvaver(obs, aver_time, scatter=False) -> Observation:
     """Time-average an observation into `aver_time` integrations (difmap
-    uvaver), returning a new one; `obs` is left as it is.
+    uvaver), returning a new one; `obs` is left as it is. The same as
+    ``obs.uvaver(aver_time, doscatter=scatter)``.
 
-    `aver_time` is seconds, or a string with its unit ("10s", "2min").
-    The same as ``obs.uvaver(aver_time, doscatter=scatter)``.
+    Parameters
+    ----------
+    obs : Observation
+        The observation to average (its calibration is applied first).
+    aver_time : float | str
+        The new integration time: seconds, or a string with its unit
+        ("10s", "2min").
+    scatter : bool, default False
+        Derive the weights from the scatter of the averaged samples
+        instead of summing the input weights.
     """
     return obs.uvaver(aver_time, doscatter=scatter)
 

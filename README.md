@@ -72,9 +72,13 @@ difmapy data.ms --stokes I --mapsize 2048 --cell 0.5
 difmapy data.ms --channels 0-31           # channel ranges
 difmapy big.uvfits --timeavg 10s          # time-average on load
 difmapy big.ms --freqavg all              # one channel per IF on load
+difmapy multi.ms --field 3C345 --data-column CORRECTED_DATA
 difmapy data.ms -c "clean(200, 0.03)"     # run commands on startup
 difmapy data.ms --batch -c "wmap('m.fits')"   # scripted, no prompt
 ```
+
+`difmapy --help` lists every option; the loading ones are the parameters
+of `difmapy.load`, which `help(difmapy.load)` documents one by one.
 
 This opens an IPython session with the observation bound to `obs` and
 the difmap-style commands available as bare functions, so a session
@@ -265,7 +269,9 @@ beam size on typical VLBI data.
 **Briggs robust weighting** is available as a single number,
 `obs.uvweight(robust=R)` with R from -2 (uniform, sharpest beam) to +2
 (natural, lowest noise); it supersedes `binwid`/`errpow` while set, and
-`mapplot(uvweight=R)` is the same knob. The two ends reproduce difmap's
+`mapplot(uvweight=R)` - or the "Weighting" box at the top of the
+mapplot window, which offers difmap's own scheme and R = -2, -1, 0, +1,
++2 - is the same knob. The two ends reproduce difmap's
 own uniform and natural weighting.
 
 **Map dimensions no longer have to be powers of two** - any multiple of
@@ -461,7 +467,15 @@ amplitude scale is wrong has already pulled the model towards its error.
 r = obs.bayes_gscale(prefix="3C345_bayes")  # runs, applies, writes report
 print(r)                                    # the summary again
 r.plot()                                    # the diagnostic figure
+r.factors                                   # [IF, station] corrections applied
 ```
+
+Like `gscale`, it solves every IF separately (`per_if=True`, the
+default): the summary has one column per IF with the correction, its
+1-sigma uncertainty and a mark where it is needed (`*`, P >= 0.95) or
+probably needed (`?`, P >= 0.75), the findings name the IFs, and the
+figure shows each station's IFs side by side. `per_if=False` combines
+them into one correction per station.
 
 1. **Leave one station out.** For each station (and once for the full
    array) the source model is rebuilt with that station ignored, phase
@@ -570,7 +584,10 @@ covariances.
 `uvweight=` (a Briggs robustness), which override the current imaging
 setup. With none given and `mapsize()` never called, it images 4096
 pixels of a tenth of the estimated resolution (lambda / B_max), and it
-prints the beam it is showing.
+prints the beam it is showing. The "Weighting" box above the image
+switches between difmap's `uvweight` scheme and Briggs robust -2 ... +2
+and re-images straight away (the choice stays set, as `uvweight()`
+would leave it).
 
 | key | action |
 | --- | --- |

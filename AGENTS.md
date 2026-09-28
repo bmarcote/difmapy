@@ -130,6 +130,14 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
   `PlotWindow.__init_subclass__`), which is how a notebook avoids
   showing an unchanged plot twice.
 - `vplot` takes difmap's argument order: `vplot(nplot, reftel, ...)`.
+- mapplot's "Weighting" box (difmap uvweight / robust -2..2) has
+  `NoFocus`: with keyboard focus a combo box eats the single-key
+  shortcuts and changes the weighting on "c", "i", ... It re-syncs on
+  every `refresh()`, so a `uvweight()` typed at the prompt shows up.
+- The loaders document their parameters from one block,
+  `_LOAD_PARAMETERS`, substituted by `_load_doc`; a test checks that
+  every parameter of every loader appears in its docstring, so a new
+  one must be added there.
 - `ignore(station)` is a flag edit with a memory: it snapshots the FLAG
   rows of that station's baselines (as they would be with *nothing*
   ignored - see `_flags_without_ignores`, which matters for a baseline
@@ -288,6 +296,11 @@ number of workers (a test pins it). Things that look odd but are meant:
 - What is applied is `P(needed) * posterior mean` in log amplitude, so
   on noiseless test data the applied value is the gscale value times
   `tau^2/(tau^2 + sigma^2)`, not the gscale value itself.
+- Everything is per (IF, station) when `per_if=True`, and the report
+  must show it that way: a station-level median hid opposite
+  corrections in two IFs (x0.76 and x1.25 read as "x0.98"). Medians over
+  IFs exist in `station_table()` only for sorting; the summary, the
+  findings and the figure go per IF.
 - The figure (`bayesplot.py`) is matplotlib, not pyqtgraph, and is drawn
   inside an `rc_context` that turns `text.usetex` off: with LaTeX on,
   every "%" in a label starts a comment and truncates it.

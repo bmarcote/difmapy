@@ -109,42 +109,55 @@ def _draw(res, path, show):
         f"{100 * res.settings['prior_sigma']:.0f}%",
         color=INK, fontsize=12, x=0.07, ha="left")
 
+    # Every IF of a station side by side (IF1 on the left), unless the
+    # IFs share one correction.
+    per_if = bool(res.settings.get("per_if", True)) and len(res.if_freqs) > 1
+    ifs = list(range(len(res.if_freqs))) if per_if else [0]
+    nslot = len(ifs)
+    step = 0.8 / nslot
+    xs = x[:, None] + (np.arange(nslot)[None, :] - (nslot - 1) / 2) * step
+
+    def pick(arr):
+        """[len(idx), nslot] of a [nif, nant] array."""
+        return arr[ifs][:, idx].T
+
     # -- corrections --------------------------------------------------
     ax = fig.add_subplot(gs[0, :])
     _style(ax)
+    ax.grid(False, axis="x")
     tau = res.settings["prior_sigma"]
     ax.axhspan(math.exp(-tau), math.exp(tau), color=NEUTRAL, zorder=0,
                label=f"prior +-1 sigma ({100 * tau:.0f}%)")
     ax.axhline(1.0, color=AXIS, linewidth=1, zorder=1)
-    naive = np.exp(_median_ifs(res.naive))[idx]
-    loo = np.exp(_median_ifs(res.mean))[idx]
-    app = _median_ifs(res.applied_log)[idx]
-    sig = _median_ifs(res.applied_sigma)[idx]
-    ax.plot(x - 0.18, naive, "o", ms=8, mfc="none", mec=ORANGE, mew=2,
-            label="gscale, full-array model", zorder=3)
-    ax.plot(x, loo, "s", ms=8, color=AQUA, mec=SURFACE, mew=1,
-            label="leave-one-out (model-averaged)", zorder=3)
-    ax.errorbar(x + 0.18, np.exp(app),
-                yerr=[np.exp(app) - np.exp(app - sig),
-                      np.exp(app + sig) - np.exp(app)],
-                fmt="D", ms=8, color=BLUE, mec=SURFACE, mew=1, elinewidth=2,
+    for k in range(1, len(idx)):
+        ax.axvline(k - 0.5, color=GRID, linewidth=0.8, zorder=0)
+    naive, loo = np.exp(pick(res.naive)), np.exp(pick(res.mean))
+    app, sig = pick(res.applied_log), pick(res.applied_sigma)
+    off = 0.28 * step
+    ms = 8 if nslot <= 2 else 6
+    ax.plot((xs - off).ravel(), naive.ravel(), "o", ms=ms, mfc="none",
+            mec=ORANGE, mew=1.8, label="gscale, full-array model", zorder=3)
+    ax.plot(xs.ravel(), loo.ravel(), "s", ms=ms, color=AQUA, mec=SURFACE,
+            mew=1, label="leave-one-out (model-averaged)", zorder=3)
+    ax.errorbar((xs + off).ravel(), np.exp(app).ravel(),
+                yerr=[(np.exp(app) - np.exp(app - sig)).ravel(),
+                      (np.exp(app + sig) - np.exp(app)).ravel()],
+                fmt="D", ms=ms, color=BLUE, mec=SURFACE, mew=1, elinewidth=2,
                 capsize=0, label="applied (Bayesian) +-1 sigma", zorder=4)
-    # Per-IF applied values, faint, behind.
-    for k, a in enumerate(idx):
-        v = res.applied_log[:, a]
-        v = v[np.isfinite(v)]
-        ax.plot(np.full(v.size, x[k] + 0.18), np.exp(v), ".", ms=4,
-                color=BLUE, alpha=0.35, zorder=2)
     ax.set_yscale("log")
     ax.set_xticks(x, names)
+    ax.set_xlim(-0.5, len(idx) - 0.5)
     ax.set_ylabel("amplitude correction (multiplies the data)", color=INK2,
                   fontsize=9)
-    ax.set_title("Station corrections (median over IFs; dots: each IF)",
-                 fontsize=10, loc="left")
+    what = (f"per IF - IF1 ... IF{nslot} left to right in each station"
+            if per_if else "one per station, all IFs")
+    ax.set_title(f"Station corrections ({what})", fontsize=10, loc="left")
     ax.legend(fontsize=8, frameon=False, ncol=4, loc="upper left",
               labelcolor=INK2)
-    lo = np.nanmin(np.concatenate([naive, loo, np.exp(app - sig)]))
-    hi = np.nanmax(np.concatenate([naive, loo, np.exp(app + sig)]))
+    lo = np.nanmin(np.concatenate([naive.ravel(), loo.ravel(),
+                                   np.exp(app - sig).ravel()]))
+    hi = np.nanmax(np.concatenate([naive.ravel(), loo.ravel(),
+                                   np.exp(app + sig).ravel()]))
     ax.set_ylim(min(lo, math.exp(-tau)) / 1.08, max(hi, math.exp(tau)) * 1.2)
     ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter("%.2f"))
     ax.yaxis.set_minor_formatter(matplotlib.ticker.FormatStrFormatter("%.2f"))
@@ -152,16 +165,20 @@ def _draw(res, path, show):
     # -- probability a correction is needed -------------------------
     ax = fig.add_subplot(gs[1, 0])
     _style(ax)
-    p = _median_ifs(res.p_correction)[idx]
-    ax.bar(x, p, width=0.6, color=BLUE, edgecolor=SURFACE, linewidth=2)
+    p = pick(res.p_correction)
+    ax.bar(xs.ravel(), np.nan_to_num(p.ravel()), width=0.9 * step,
+           color=BLUE, edgecolor=SURFACE, linewidth=1 if nslot > 2 else 2)
     for level, text in ((0.5, "no preference"), (0.95, "needed")):
         ax.axhline(level, color=MUTED, linewidth=1, linestyle="--")
         ax.text(len(x) - 0.5, level + 0.015, text, color=MUTED, fontsize=7,
-                ha="right", va="bottom")
+                ha="right", va="bottom", zorder=5,
+                bbox={"facecolor": SURFACE, "edgecolor": "none", "pad": 1})
     ax.set_ylim(0, 1.05)
+    ax.set_xlim(-0.5, len(idx) - 0.5)
     ax.set_xticks(x, names, fontsize=8)
     ax.set_ylabel("P(correction needed)", color=INK2, fontsize=9)
-    ax.set_title("Is a correction warranted? (Bayes factor vs prior)",
+    ax.set_title("Is a correction warranted?"
+                 + (" (bars: IF1 ... IF%d)" % nslot if per_if else ""),
                  fontsize=10, loc="left")
 
     # -- model evidence -----------------------------------------------

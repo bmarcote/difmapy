@@ -14,6 +14,7 @@ pg = pytest.importorskip("pyqtgraph")
 import difmapy
 from difmapy.observation import SHAPE_BITS
 from difmapy.plots.mapplot import MapPlot
+from pyqtgraph.Qt import QtCore
 from difmapy.plots.points import RadPlot, UVPlot, VPlot
 
 CELL = 0.25
@@ -353,6 +354,32 @@ def test_mapplot_windows_and_clean(obs):
     for what in ("beam", "clean", "model", "map"):
         p.what = what
         p.refresh()
+    p.close()
+
+
+def test_mapplot_weighting_box(obs):
+    """The box at the top re-images with robust -2 ... 2, and goes back
+    to difmap's own weighting."""
+    obs.uvweight(0, -1)          # natural, difmap style
+    p = MapPlot(obs, quiet=True)
+    box = p.weighting
+    assert box.focusPolicy() == QtCore.Qt.FocusPolicy.NoFocus
+    assert [box.itemData(i) for i in range(box.count())] == \
+        [None, -2.0, -1.0, 0.0, 1.0, 2.0]
+    assert box.currentIndex() == 0 and "0, -1" in box.itemText(0)
+    beams = {}
+    for r in (-2.0, 2.0):
+        box.setCurrentIndex(box.findData(r))
+        assert obs.robust == r and obs._invert_result is not None
+        beams[r] = obs.estimated_beam[0]
+    assert beams[-2.0] < beams[2.0], "uniform gives the sharper beam"
+    box.setCurrentIndex(0)
+    assert obs.robust is None
+    assert (obs._binwid, obs._errpow) == (0.0, -1.0)
+    # A robustness set at the prompt shows up in the box.
+    obs.uvweight(robust=0.5)
+    p.refresh()
+    assert box.itemData(box.currentIndex()) == 0.5
     p.close()
 
 

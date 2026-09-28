@@ -56,6 +56,58 @@ def test_recovers_injected_station_gains(corrupted_uvfits_file):
                                np.median(r.factors, axis=0), rtol=1e-5)
 
 
+@pytest.fixture()
+def per_if_errors(uvfits_file):
+    """Gain errors that differ between the IFs - opposite ones, for
+    most stations - baked into the data (by averaging, which applies
+    the gain table and starts afresh). AN2's second IF is exact."""
+    err = np.array([[1.30, 0.75, 1.10, 0.90, 1.05],
+                    [0.80, 1.25, 1.00, 1.15, 0.95]], np.float32)
+    o = _load(uvfits_file)
+    o._core.apply_gain_factors(err)
+    return o.uvaver(60), err
+
+
+def test_corrections_are_per_if(per_if_errors):
+    o, err = per_if_errors
+    r = o.bayes_gscale(models=("point1", "gauss1"), quiet=True, plot=False)
+    truth = 1.0 / err
+    truth /= truth.mean(axis=1, keepdims=True)   # gscale's norm, per IF
+    np.testing.assert_allclose(np.exp(r.naive), truth, rtol=2e-3)
+    # Each IF gets its own correction, and is applied as such.
+    assert r.factors.shape == err.shape
+    np.testing.assert_allclose(r.factors, truth, rtol=0.01)
+    amp, _ = o._gain_amps(fill=np.nan)
+    np.testing.assert_allclose(np.nanmedian(amp, axis=0), r.factors, rtol=1e-5)
+    # The exact IF is left alone; the rest are needed.
+    p = r.p_correction
+    assert p[1, 2] < 0.75 and np.delete(p.ravel(), 7).min() > 0.99
+
+    rows = {row["station"]: row for row in r.station_table()}
+    per_if = rows["AN0"]["per_if"]
+    assert [d["if"] for d in per_if] == [1, 2]
+    assert per_if[0]["correction"] == pytest.approx(r.factors[0, 0])
+    assert per_if[1]["correction"] == pytest.approx(r.factors[1, 0])
+
+    # The report shows every IF, not a median over them.
+    text = r.summary()
+    assert "IF1" in text and "IF2" in text
+    line = next(ln for ln in text.splitlines() if ln.strip().startswith("AN0"))
+    assert f"{r.factors[0, 0]:.3f}" in line and f"{r.factors[1, 0]:.3f}" in line
+    assert any("AN0: a correction is needed in IF1" in f for f in r.findings())
+
+
+def test_one_correction_for_all_ifs_averages_them(per_if_errors):
+    """per_if=False: one correction per station; with opposite errors in
+    the two IFs the combined estimate is uncertain and near unity."""
+    o, _ = per_if_errors
+    r = o.bayes_gscale(models=("point1",), quiet=True, plot=False,
+                       per_if=False, apply=False)
+    np.testing.assert_array_equal(r.factors[0], r.factors[1])
+    assert (r.sigma[:, :2] > 0.05).all()
+    assert "all IFs" in r.summary()
+
+
 def test_leaves_well_calibrated_data_alone(uvfits_file):
     o = _load(uvfits_file)
     r = o.bayes_gscale(models=MODELS, quiet=True, plot=False)

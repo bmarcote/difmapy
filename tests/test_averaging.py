@@ -115,3 +115,31 @@ def test_apply_gain_factors_scales_the_data(uvfits_file):
     np.testing.assert_allclose(after[~has1], before[~has1], rtol=1e-6)
     with pytest.raises(ValueError):
         o._core.apply_gain_factors(np.zeros((o.nif, nant), np.float32))
+
+
+@pytest.mark.parametrize("fn", [
+    difmapy.load, difmapy.observe, difmapy.Observation.from_uvfits,
+    difmapy.Observation.from_ms, difmapy.uvaver, difmapy.chanaver,
+    difmapy.Observation.uvaver, difmapy.Observation.chanaver,
+], ids=lambda f: f.__qualname__)
+def test_every_loader_parameter_is_documented(fn):
+    """help() on a loader must list everything that can be passed."""
+    import inspect
+
+    doc = fn.__doc__
+    assert "{" not in doc, "an unfilled placeholder"
+    for name in inspect.signature(fn).parameters:
+        if name in ("self", "cls"):
+            continue
+        assert f"{name} :" in doc, f"{fn.__qualname__}: {name} undocumented"
+
+
+def test_ms_only_options_are_refused_for_uvfits(uvfits_file):
+    with pytest.raises(ValueError, match="Measurement Sets only"):
+        difmapy.load(uvfits_file, field=0)
+    with pytest.raises(ValueError, match="Measurement Sets only"):
+        difmapy.load(uvfits_file, data_column="CORRECTED_DATA")
+    o = difmapy.load(uvfits_file, wtscale=2.0, stokes=None)
+    ref = difmapy.load(uvfits_file, stokes=None)
+    np.testing.assert_allclose(np.asarray(o._core.calibrated_cube()[1]),
+                               2 * np.asarray(ref._core.calibrated_cube()[1]))

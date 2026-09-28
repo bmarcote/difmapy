@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import functools
 import sys
 
 # The observation methods exposed as bare, difmap-like commands.
@@ -87,7 +88,17 @@ def build_parser():
     p.add_argument("--freqavg", metavar="N",
                    help="average N adjacent channels on load, or 'all' for "
                         "one channel per IF (only --channels are averaged)")
-    p.add_argument("--mapsize", type=int, help="map size in pixels (power of 2)")
+    p.add_argument("--scatter", action="store_true",
+                   help="with --timeavg: weights from the scatter of the "
+                        "averaged samples instead of summing them")
+    p.add_argument("--wtscale", type=float, default=1.0, metavar="F",
+                   help="multiply the data weights by F as they are read")
+    p.add_argument("--field", metavar="NAME|ID",
+                   help="Measurement Sets: the field to load (needed if "
+                        "the MS has several)")
+    p.add_argument("--data-column", default="DATA", metavar="COLUMN",
+                   help="Measurement Sets: DATA (default) or CORRECTED_DATA")
+    p.add_argument("--mapsize", type=int, help="map size in pixels (a multiple of 4; powers of 2 are fastest)")
     p.add_argument("--cell", type=float, help="pixel size in mas")
     p.add_argument("--uvweight", nargs=2, type=float, metavar=("BINWID", "ERRPOW"),
                    help="gridding weights, e.g. --uvweight 0 -1 for natural")
@@ -112,14 +123,18 @@ def _qt_available() -> bool:
 
 
 def _load(path, stokes, channels, mapsize, cell, uvweight, robust=None,
-          timeavg=None, freqavg=None):
+          timeavg=None, freqavg=None, scatter=False, wtscale=1.0, field=None,
+          data_column="DATA"):
     """Load an observation and apply the startup options."""
     import difmapy
 
     if freqavg is not None and str(freqavg).lower() != "all":
         freqavg = int(freqavg)
+    if field is not None and str(field).isdigit():
+        field = int(field)  # a FIELD_ID rather than a name
     obs = difmapy.load(path, stokes=stokes, channels=channels,
-                       timeavg=timeavg, freqavg=freqavg)
+                       timeavg=timeavg, freqavg=freqavg, scatter=scatter,
+                       wtscale=wtscale, field=field, data_column=data_column)
     if mapsize or cell:
         obs.mapsize(mapsize or 256, cell or 1.0)
     if uvweight:
@@ -139,8 +154,10 @@ def make_namespace(obs=None):
 
     ns = {"difmapy": difmapy, "np": np, "numpy": np, "obs": obs}
 
+    @functools.wraps(difmapy.load)
     def load(path, **kwargs):
-        """Load a new observation and rebind the commands to it."""
+        # difmapy.load's signature and docstring (every parameter it
+        # takes), plus: the commands are rebound to the new observation.
         new = difmapy.load(path, **kwargs)
         ns["obs"] = new
         ns.update(bind_commands(new))
@@ -200,7 +217,9 @@ def main(argv=None) -> int:
         try:
             obs = _load(path, args.stokes, _parse_channels(args.channels),
                         args.mapsize, args.cell, args.uvweight, args.robust,
-                    timeavg=args.timeavg, freqavg=args.freqavg)
+                    timeavg=args.timeavg, freqavg=args.freqavg,
+                    scatter=args.scatter, wtscale=args.wtscale,
+                    field=args.field, data_column=args.data_column)
         except Exception as exc:  # a bad file should not show a traceback
             print(f"difmapy: could not load {path}: {exc}", file=sys.stderr)
             return 1

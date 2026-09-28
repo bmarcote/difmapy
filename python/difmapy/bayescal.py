@@ -304,35 +304,78 @@ class BayesGainResult:
     def best_model(self) -> str:
         return self.models[int(np.argmax(self.model_prob))]
 
-    def station_table(self) -> list[dict]:
-        """One row per station: the correction applied (median over IFs),
-        its uncertainty, the probability that it is needed, the naive
-        gscale value and the leave-one-out shift, all as factors."""
-        rows = []
+    def _if_label(self, i):
+        return f"IF{i + 1}"
+
+    def _per_if(self, a):
+        """The per-IF numbers of station `a` (None where it has no
+        data in that IF)."""
         bi = int(np.argmax(self.model_prob))
+        out = []
+        for i, freq in enumerate(self.if_freqs):
+            lg = self.applied_log[i, a]
+            if not np.isfinite(lg):
+                out.append({"if": i + 1, "freq_hz": freq, "correction": None})
+                continue
+
+            def fac(x):
+                return math.exp(x) if np.isfinite(x) else None
+
+            out.append({
+                "if": i + 1,
+                "freq_hz": freq,
+                "correction": math.exp(lg),
+                "sigma": float(self.applied_sigma[i, a]),
+                "p_correction": float(self.p_correction[i, a]),
+                "log10_bayes_factor": float(self.log10_bf[i, a]),
+                "naive_gscale": fac(self.naive[i, a]),
+                "loo_estimate": fac(self.mean[i, a]),
+                "loo_shift": fac(self.loo[bi, i, a] - self.logg[bi, 0, i, a]),
+            })
+        return out
+
+    def station_table(self) -> list[dict]:
+        """One row per station. `per_if` holds, for every IF, the
+        correction applied, its uncertainty, the probability that it is
+        needed (and the log10 Bayes factor), the plain gscale value, the
+        leave-one-out estimate and the factor by which leaving the
+        station out moved it. With ``per_if=False`` the IFs share one
+        correction; otherwise the station-level `correction`, `sigma`
+        and `p_correction` are only medians over IFs, for sorting - the
+        per-IF values are the ones applied."""
+        rows = []
         for a, name in enumerate(self.antennas):
-            def med(x):
-                v = x[:, a]
-                v = v[np.isfinite(v)]
-                return float(np.median(v)) if v.size else float("nan")
-            shift = self.loo[bi, :, a] - self.logg[bi, 0, :, a]
-            shift = shift[np.isfinite(shift)]
+            per_if = self._per_if(a)
+            ok = [d for d in per_if if d["correction"] is not None]
+
+            def med(key, log=False):
+                v = [d[key] for d in ok if d.get(key) is not None]
+                if not v:
+                    return float("nan")
+                v = np.log(v) if log else np.asarray(v)
+                m = float(np.median(v))
+                return math.exp(m) if log else m
+
             rows.append({
                 "station": name,
-                "has_data": bool(np.isfinite(self.applied_log[:, a]).any()),
-                "correction": math.exp(np.nan_to_num(med(self.applied_log))),
-                "sigma": med(self.applied_sigma),
-                "p_correction": med(self.p_correction),
-                "log10_bayes_factor": med(self.log10_bf),
-                "naive_gscale": math.exp(med(self.naive)),
-                "loo_estimate": math.exp(med(self.mean)),
-                "loo_shift": float(np.median(shift)) if shift.size else float("nan"),
+                "has_data": bool(ok),
+                "correction": med("correction", log=True),
+                "sigma": med("sigma"),
+                "p_correction": med("p_correction"),
+                "naive_gscale": med("naive_gscale", log=True),
+                "loo_estimate": med("loo_estimate", log=True),
+                "loo_shift": med("loo_shift", log=True),
                 "rchisq_before": float(self.antenna_rchisq["before"][a]),
                 "rchisq_after": float(self.antenna_rchisq["after"][a]),
-                "per_if": [float(math.exp(v)) if np.isfinite(v) else None
-                           for v in self.applied_log[:, a]],
+                "per_if": per_if,
             })
         return rows
+
+    @staticmethod
+    def _mark(p):
+        """* for a correction needed (P >= 0.95), ? for probably needed
+        (P >= 0.75)."""
+        return "*" if p >= 0.95 else "?" if p >= 0.75 else " "
 
     def findings(self) -> list[str]:
         """The notable conclusions, in words."""
@@ -342,26 +385,39 @@ class BayesGainResult:
             f"Best source model: {self.models[bi]} "
             f"(posterior probability {self.model_prob[bi]:.3f})"
         )
+        shared = not self.settings.get("per_if", True) or len(self.if_freqs) == 1
         for row in self.station_table():
-            p, c = row["p_correction"], row["correction"]
-            if not np.isfinite(p):
+            if not row["has_data"]:
                 continue
-            if p >= 0.75:
-                how = "is needed" if p >= 0.95 else "is probably needed"
+            name = row["station"]
+            ok = [d for d in row["per_if"] if d["correction"] is not None]
+            for level, how in ((0.95, "needed"), (0.75, "probably needed")):
+                hi = math.inf if level == 0.95 else 0.95
+                sel = [d for d in ok if level <= d["p_correction"] < hi]
+                if not sel:
+                    continue
+                if shared:
+                    d = sel[0]
+                    out.append(
+                        f"{name}: a correction is {how} (P = "
+                        f"{d['p_correction']:.3f}); applied x"
+                        f"{d['correction']:.3f} +- {100 * d['sigma']:.1f}% "
+                        "in every IF")
+                else:
+                    ifs = ", ".join(
+                        f"{self._if_label(d['if'] - 1)} x{d['correction']:.3f}"
+                        f" +- {100 * d['sigma']:.1f}% (P = "
+                        f"{d['p_correction']:.3f})" for d in sel)
+                    out.append(f"{name}: a correction is {how} in {ifs}")
+            shift, sig = row["loo_shift"], row["sigma"]
+            if np.isfinite(shift) and abs(math.log(shift)) > max(3 * sig, 0.02):
                 out.append(
-                    f"{row['station']}: a correction {how} "
-                    f"(P = {p:.3f}); applied x{c:.3f} "
-                    f"+- {100 * row['sigma']:.1f}%"
-                )
-            if np.isfinite(row["loo_shift"]) and abs(row["loo_shift"]) > max(
-                    3 * row["sigma"], 0.02):
-                out.append(
-                    f"{row['station']}: leaving it out of the model moves "
-                    f"its gain by {100 * (math.exp(row['loo_shift']) - 1):+.1f}%"
-                    " - either the full-array model had absorbed part of "
-                    "its error, or its baselines reach spatial frequencies "
-                    "the other stations do not constrain; the shift is "
-                    "counted in its uncertainty"
+                    f"{name}: leaving it out of the model moves its gain by "
+                    f"{100 * (shift - 1):+.1f}% (median over IFs) - either "
+                    "the full-array model had absorbed part of its error, "
+                    "or its baselines reach spatial frequencies the other "
+                    "stations do not constrain; the shift is counted in its "
+                    "uncertainty"
                 )
         worst = int(np.nanargmax(np.nan_to_num(
             self.antenna_rchisq["after"], nan=-np.inf)))
@@ -371,8 +427,12 @@ class BayesGainResult:
             f"{self.antenna_rchisq['after'][worst]:.3g} vs a median of "
             f"{np.nanmedian(self.antenna_rchisq['after']):.3g})"
         )
-        net = float(np.nanmean(self.applied_log))
-        out.append(f"Net flux-scale change: {100 * (math.exp(net) - 1):+.2f}%")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            net = np.nanmean(self.applied_log, axis=1)
+        out.append("Net flux-scale change: " + ", ".join(
+            f"{self._if_label(i)} {100 * (math.exp(v) - 1):+.2f}%"
+            for i, v in enumerate(net) if np.isfinite(v)))
         nfail = sum(not r["ok"] for r in self.runs)
         if nfail:
             out.append(f"{nfail} of {len(self.runs)} runs failed and were "
@@ -380,7 +440,8 @@ class BayesGainResult:
         return out
 
     def summary(self) -> str:
-        """A plain-text report of the findings."""
+        """A plain-text report of the findings: the model comparison,
+        each station's correction in every IF, and the findings."""
         lines = [
             f"bayes_gscale: {self.source}, {len(self.antennas)} stations, "
             f"{len(self.if_freqs)} IFs; {len(self.runs)} runs in "
@@ -398,28 +459,66 @@ class BayesGainResult:
                 f"{self.model_dbic[i]:>12.4g}{self.model_rchisq[i]:>10.4g}"
                 f"{r.get('nparam', 0):>8}"
             )
+        shared = not self.settings.get("per_if", True) or len(self.if_freqs) == 1
+        cols = ([("all IFs", None)] if shared else
+                [(f"{self._if_label(i)} {f / 1e9:.3f}G", i)
+                 for i, f in enumerate(self.if_freqs)])
+        width = 17
+        table = self.station_table()
         lines += [
             "",
-            f"Stations (prior sigma {100 * self.settings['prior_sigma']:.0f}%;"
-            " factors multiply the data):",
-            f"  {'station':<9}{'applied':>9}{'+-':>7}{'P(need)':>9}"
-            f"{'naive':>8}{'LOO':>8}{'rchi2 before':>14}{'after':>8}",
+            "Station corrections (factors multiply the data; +- 1 sigma; "
+            "* needed, P >= 0.95; ? probably, P >= 0.75;",
+            f"prior sigma {100 * self.settings['prior_sigma']:.0f}%):",
+            f"  {'station':<9}" + "".join(f"{c:>{width}}" for c, _ in cols)
+            + f"{'rchi2 before':>14}{'after':>8}",
         ]
-        for row in self.station_table():
+        for row in table:
             if not row["has_data"]:
-                lines.append(f"  {row['station']:<9}{'-':>9}   (no usable "
+                lines.append(f"  {row['station']:<9}{'-':>{width}}  (no usable "
                              "data; left at 1)")
                 continue
+            cells = []
+            for _, i in cols:
+                d = row["per_if"][0 if i is None else i]
+                if d["correction"] is None:
+                    cells.append(f"{'-':>{width}}")
+                else:
+                    cell = (f"{d['correction']:.3f}+-{100 * d['sigma']:.1f}%"
+                            f"{self._mark(d['p_correction'])}")
+                    cells.append(f"{cell:>{width}}")
             lines.append(
-                f"  {row['station']:<9}{row['correction']:>9.4f}"
-                f"{100 * row['sigma']:>6.1f}%{row['p_correction']:>9.3f}"
-                f"{row['naive_gscale']:>8.3f}{row['loo_estimate']:>8.3f}"
-                f"{row['rchisq_before']:>14.4g}{row['rchisq_after']:>8.4g}"
-            )
+                f"  {row['station']:<9}" + "".join(cells)
+                + f"{row['rchisq_before']:>14.4g}{row['rchisq_after']:>8.4g}")
+        # How the estimates behind the corrections compare.
+        lines += [
+            "",
+            "Estimates behind them (plain gscale / leave-one-out, before "
+            "the prior):",
+            f"  {'station':<9}" + "".join(f"{c:>{width}}" for c, _ in cols),
+        ]
+        for row in table:
+            if not row["has_data"]:
+                continue
+            cells = []
+            for _, i in cols:
+                # One shared correction: the IF-combined estimates.
+                d = row if i is None else row["per_if"][i]
+                naive, loo = d.get("naive_gscale"), d.get("loo_estimate")
+                if d.get("correction") is None or not naive or \
+                        not np.isfinite(naive):
+                    cells.append(f"{'-':>{width}}")
+                else:
+                    cell = (f"{naive:.3f} / "
+                            + (f"{loo:.3f}" if loo and np.isfinite(loo)
+                               else "-"))
+                    cells.append(f"{cell:>{width}}")
+            lines.append(f"  {row['station']:<9}" + "".join(cells))
         lines += ["", "Findings:"] + [f"  - {f}" for f in self.findings()]
         if self.applied:
             lines.append("")
-            lines.append("The corrections have been applied to the data.")
+            lines.append("The corrections have been applied to the data"
+                         + (", per IF." if not shared else "."))
         return "\n".join(lines)
 
     def __str__(self):
@@ -570,8 +669,11 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, jackknife=True,
         estimate comes from the full-array model and its uncertainty
         from the spread between models only.
     per_if : bool
-        Solve each IF separately (as `gscale` does), or one correction
-        per station for all IFs.
+        True (the default): every IF gets its own correction, as
+        `gscale` solves them, with its own uncertainty and P(needed) -
+        the summary, the figure and the tables show and apply one per
+        station and IF. False: the IFs' estimates are combined into one
+        correction per station, applied to every IF.
     float_scale : bool
         Passed to `gscale`: False keeps the data's flux scale.
     nloop : int

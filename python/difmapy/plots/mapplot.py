@@ -18,6 +18,8 @@ Interaction:
   UV data (modelfit)
 * ``C``: clear the model
 * ``l``: switch the colours between a linear and a logarithmic scale
+* the "Weighting" box at the top: difmap's own ``uvweight`` scheme or
+  Briggs robust -2 (uniform) ... +2 (natural); picking one re-inverts
 * ``h``: the key legend; ``x``: close, reporting the image properties
 * ``q``: close
 
@@ -122,6 +124,7 @@ class MapPlot(PlotWindow):
         lay = QtWidgets.QVBoxLayout(central)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
+        lay.addWidget(self._make_controls(), 0)
         self.glw = pg.GraphicsLayoutWidget()
         lay.addWidget(self.glw, 1)
         # The footnote: the main shortcuts, always visible, so that the
@@ -187,6 +190,83 @@ class MapPlot(PlotWindow):
             obs._ensure_mapsize()
         if uvweight is not None:
             obs.uvweight(robust=float(uvweight))
+
+    #: The robustness values offered in the weighting box.
+    ROBUST_CHOICES = (-2.0, -1.0, 0.0, 1.0, 2.0)
+    _ROBUST_LABELS = {-2.0: "robust -2 (uniform)", 2.0: "robust +2 (natural)"}
+
+    @staticmethod
+    def _robust_name(r):
+        return f"robust {r:+g}" if r else "robust 0"
+
+    def _make_controls(self):
+        """The row above the image: the weighting scheme."""
+        bar = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(bar)
+        row.setContentsMargins(6, 3, 6, 3)
+        row.addWidget(QtWidgets.QLabel("Weighting:"))
+        self.weighting = QtWidgets.QComboBox()
+        # Mouse only: with keyboard focus the box would swallow the
+        # single-key shortcuts (and change the weighting on "c", "i"...).
+        self.weighting.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self._difmap_weighting = (self.obs._binwid, self.obs._errpow,
+                                  self.obs._dorad)
+        self.weighting.addItem("difmap uvweight", None)
+        for r in self.ROBUST_CHOICES:
+            self.weighting.addItem(
+                self._ROBUST_LABELS.get(r, self._robust_name(r)), r)
+        self._sync_weighting()
+        self.weighting.currentIndexChanged.connect(self._weighting_chosen)
+        row.addWidget(self.weighting)
+        row.addStretch(1)
+        return bar
+
+    def _sync_weighting(self):
+        """Show the weighting the observation is using, including one
+        set at the prompt (a robustness not on the list is added)."""
+        box = self.weighting
+        r = self.obs.robust
+        if r is None:
+            self._difmap_weighting = (self.obs._binwid, self.obs._errpow,
+                                      self.obs._dorad)
+            b, e, _ = self._difmap_weighting
+            text = f"difmap uvweight {b:g}, {e:g}"
+        idx = box.findData(r) if r is not None else 0
+        if idx < 0:
+            box.blockSignals(True)
+            box.addItem(self._robust_name(r), r)
+            box.blockSignals(False)
+            idx = box.count() - 1
+        box.blockSignals(True)
+        if r is None:
+            box.setItemText(0, text)
+        box.setCurrentIndex(idx)
+        box.blockSignals(False)
+
+    def set_weighting(self, robust):
+        """Re-image with Briggs `robust` (-2 ... 2), or with difmap's own
+        uvweight scheme for None (the binwid/errpow in use before a
+        robustness was picked here). Returns the estimated beam."""
+        obs = self.obs
+        if robust is None:
+            b, e, rad = self._difmap_weighting
+            obs.uvweight(b, e, radial=rad)
+        else:
+            obs.uvweight(obs._binwid, obs._errpow, radial=obs._dorad,
+                         robust=float(robust))
+        obs.invert()
+        self.refresh()
+        bmaj, bmin, bpa = obs.estimated_beam
+        name = ("difmap uvweight" if robust is None
+                else self._robust_name(float(robust)))
+        self._message(f"{name}: beam {bmaj:.4g} x {bmin:.4g} mas at "
+                      f"{bpa:.4g} deg")
+        if not self.quiet:
+            self.report_beam()
+        return (bmaj, bmin, bpa)
+
+    def _weighting_chosen(self, index):
+        self.set_weighting(self.weighting.itemData(index))
 
     def report_beam(self):
         """Print the beam of the current image, as difmap does."""
@@ -278,6 +358,7 @@ class MapPlot(PlotWindow):
         return f"{title} \u2014 peak {peak:.4g} Jy/beam"
 
     def refresh(self):
+        self._sync_weighting()
         data = np.asarray(self._image_data())
         self.plot.setTitle(self._title(data), size="11pt", color="#222")
         ex = abs(self.obs.extent[0])
