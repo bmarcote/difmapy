@@ -2,6 +2,11 @@
 
 ## Build & test
 
+- If pytest dies at start-up with ``numpy.dtypes has no attribute
+  'StringDType'``, it is `zarr`'s auto-loaded pytest plugin against an
+  older numpy, nothing to do with difmapy: run with
+  ``PYTEST_DISABLE_PLUGIN_AUTOLOAD=1``.
+
 - Python venv: `/home/marcote/.venv313` on Linux, `/Users/hawky/.venv`
   on the macOS box (both uv-managed, no pip module — use
   `uv pip install --python <venv>/bin/python3 ...`)
@@ -19,6 +24,36 @@
   editing the repo changes nothing at the prompt. Check
   `python -c "import difmapy; print(difmapy.__file__)"` before
   believing a bug report about the Python layer.
+
+## Documentation site
+
+`docs/` + `zensical.toml`, built with Zensical (`pip install -r
+docs/requirements.txt`, then `zensical build --clean` -> `site/`, which
+is gitignored) and published to GitHub Pages by
+`.github/workflows/docs.yml`.
+
+- The reference pages (`docs/reference/*.md`) are `:::` directives:
+  mkdocstrings reads the **sources** with griffe, statically. Nothing is
+  imported, so the build needs no Rust toolchain - and a docstring that
+  is assembled at import time (a decorator filling in a placeholder)
+  shows up unassembled. Keep docstrings literal.
+- griffe parses numpy-style sections: prose placed after a `Parameters`
+  block is read as more parameters ("Parameter 'Returns' does not appear
+  in the function signature"). Put it under `Returns`/`Notes` headings.
+  A clean build prints only "No issues found".
+- Zensical does not check image paths. Pages in `docs/guide/` reach the
+  figures as `../images/...`.
+- No MathJax is configured; write formulas as code.
+- The figures in `docs/images/` are rendered from the 3C345 test data
+  (`savefig` on the plot windows, `BayesGainResult.plot`). Regenerate
+  them when a plot's look changes.
+- To look at the built site without a browser: serve `site/` and grab
+  pages with PySide6's `QWebEngineView` under
+  `QT_QPA_PLATFORM=offscreen` and
+  `QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu --disable-gpu-compositing"`
+  (without those flags the capture is blank).
+- A user-facing change needs its guide page updated as well as the
+  README.
 
 ## Test data
 
@@ -130,12 +165,41 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
   `PlotWindow.__init_subclass__`), which is how a notebook avoids
   showing an unchanged plot twice.
 - `vplot` takes difmap's argument order: `vplot(nplot, reftel, ...)`.
+- mapplot **updates its CLEAN-window ROIs in place** on refresh
+  (`_sync_rois_from_obs`) and detaches an ROI's handles before removing
+  it (`_retire_roi`). Rebuilding them on every refresh left cyclic
+  garbage that owns child items; when Python's collector ran while
+  pyqtgraph was constructing the next ROI, Qt segfaulted
+  ("Garbage-collecting" in the faulthandler trace). Whether it fired
+  depended on allocation counts, so it appeared out of nowhere when the
+  venv's numpy changed. Do not go back to remove-all/add-all for any
+  item with children or signal connections.
+- mapplot shows maps as difmap does: its `rainbow` table (stops
+  copied from color.c, clipped to 0..1) or its grey scale, toggled with
+  `g` (difmap's `c`/`g`; `c` is CLEAN here), and levels from the
+  **minimum to the maximum of the valid area** (difmap's setcmpar). The
+  earlier 2-99.9 percentile cut put the top of the scale inside the
+  noise on a big field with a compact source - the display then showed
+  noise and hid the source. Do not go back to percentiles.
+- The restored map is contoured from 3 sigma (residual `noise_stats`)
+  in factors of sqrt(2), negatives dashed, toggled with `k`.
+  `plots/contours.py` has its own marching squares because pyqtgraph's
+  `isocurve` costs ~0.35 s per level on a 2048-pixel map whatever the
+  level; ours works only on crossed cells (16 levels in 0.2 s) and
+  matches it point for point, apart from pyqtgraph's built-in half
+  pixel. Contours are penned light or dark for contrast against the
+  colour scale at their level - a contour in the scale's own colour is
+  invisible - and re-penned when the colour-bar levels change.
+- Stacked panels get one fixed left-axis width (`LEFT_AXIS_WIDTH`) and
+  no right axis, so amplitude and phase plot areas coincide exactly; a
+  right axis on one panel only narrows it.
 - mapplot's "Weighting" box (difmap uvweight / robust -2..2) has
   `NoFocus`: with keyboard focus a combo box eats the single-key
   shortcuts and changes the weighting on "c", "i", ... It re-syncs on
   every `refresh()`, so a `uvweight()` typed at the prompt shows up.
-- The loaders document their parameters from one block,
-  `_LOAD_PARAMETERS`, substituted by `_load_doc`; a test checks that
+- The loaders write the same parameter text out in each docstring
+  (literally, so the static API reference can read it); tests check the
+  copies are identical and that
   every parameter of every loader appears in its docstring, so a new
   one must be added there.
 - `ignore(station)` is a flag edit with a memory: it snapshots the FLAG
@@ -274,9 +338,59 @@ loaded file's native format. Established against AIPS 31DEC24 itself:
   through signal 11 after `kleenex` - judge success from the log.
 
 Calibration provenance lives in `core._cal_origin` (format, path, spw
-ids, field, AIPS antenna numbers). Unlike `_ms_origin`, which maps rows
-and so is dropped by averaging, it survives `uvaver`/`chanaver`/`copy`,
-which is why averaged data can still export tables.
+ids, field, AIPS antenna numbers, and for an MS the DATA_DESC, ANTENNA
+and ARRAY ids). Unlike `_ms_origin`, which maps rows and so is dropped
+by averaging, it survives `uvaver`/`chanaver`/`copy`, which is why
+averaged data can still export tables.
+
+## Averaged data and Measurement Sets
+
+- `save()` on averaged MS data writes a *new* MS (`save_averaged_ms`):
+  the main-table structure is copied with `norows=True` - which empties
+  the subtables too, so each is then copied over in full - and the rows
+  are rebuilt from the observation. Scan/observation/state/feed ids come
+  from the source row nearest in time. Write each column in one
+  `putcol` when all IFs have the same channel count: going through
+  per-window `query` views took 24 s instead of 1 s on em163 (the
+  `by_window` path remains for unequal channel counts, and a test
+  checks both give the same MS).
+- `DATA` gets the averaged data without the session's calibration (a
+  copy with `uncalib` + `clroff`), `CORRECTED_DATA` the calibrated.
+  Rows with no data in any IF are not written, so the reloaded MS can
+  have fewer rows than the session.
+- `uvaver`/`chanaver` leave `_avg_row_map`/`_avg_chan_map` on the new
+  core and `Observation._trace_averaging` composes them into
+  `_ms_avg_origin`. `save_flags` uses it to OR a flagged averaged
+  sample onto every MS sample behind it. It never unflags: an average
+  cannot say which inputs were good.
+- `save()` also writes the caltable (native format, once any gain is
+  `used`), the flag table (once flags were added) and the restored
+  image (once there is a model); each of `ms`/`caltable`/`flags`/`image`
+  is None (when applicable) / False / True.
+
+## Flag tables (`wflags`)
+
+`io/flags.py::flag_entries` turns the flags *added since load*
+(`Observation._flags_at_load` is the reference; it is shared, not
+copied, by `copy()`) into selections, written as an AIPS FG table
+(`io/aips.py::save_fgtable`, same TASAV frame as the SN table) or a
+CASA flag-command list. Both are verified in the packages themselves.
+
+- Samples already flagged in the file, or with no data, are "don't
+  care". Without that, each baseline's time run breaks wherever the
+  file's own flags do and nothing merges.
+- Stations are detected first, per integration and IF ("everything of
+  this station that could be flagged, is"), counting against *all* new
+  flags - not what earlier stations left - or a baseline between two
+  flagged stations stops the second from being recognised.
+- Time ranges of averaged data are the whole bin (`_aver_time`), not
+  timestamp +- integration/2: the averaged time is a weighted mean and
+  the summed integration time need not reach the bin's edge samples.
+  Channels map back through `_chan_origin`.
+- FG columns/values are those AIPS's own UVFLG writes (SOURCE 0,
+  FREQ ID -1, ANTS sorted with 0 = any, CHANS (1,0) = all, TIME RANGE
+  float32 days - rounded outwards with nextafter).
+- `ignore()`d stations are not exported; un-flagging cannot be.
 
 ## Bayesian gain calibration
 

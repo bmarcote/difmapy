@@ -24,7 +24,7 @@ import sys
 COMMANDS = (
     # selection and data
     "select", "header", "flag", "unflag", "ignore", "unignore",
-    "save_flags", "uvaver", "chanaver",
+    "save_flags", "wflags", "uvaver", "chanaver",
     "savecaltable", "gain_snapshot",
     # imaging setup
     "mapsize", "auto_mapsize", "estimated_resolution",

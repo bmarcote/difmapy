@@ -1,0 +1,134 @@
+[project]
+site_name = "difmapy"
+site_description = "Interactive VLBI imaging and self-calibration: a modern reimplementation of Difmap with a Rust engine and a Python API"
+site_author = "Benito Marcote"
+site_url = "https://bmarcote.github.io/difmapy/"
+repo_url = "https://github.com/bmarcote/difmapy"
+repo_name = "bmarcote/difmapy"
+edit_uri = "edit/main/docs/"
+copyright = "Copyright &copy; 2026 Benito Marcote"
+
+nav = [
+  { "Home" = "index.md" },
+  { "Installation" = "install.md" },
+  { "Getting started" = "getting-started.md" },
+  { "User guide" = [
+    { "Loading data" = "guide/loading.md" },
+    { "Imaging" = "guide/imaging.md" },
+    { "The map display" = "guide/mapplot.md" },
+    { "Self-calibration" = "guide/selfcal.md" },
+    { "Bayesian amplitude calibration" = "guide/bayes-gscale.md" },
+    { "Model fitting" = "guide/modelfit.md" },
+    { "Flagging" = "guide/flagging.md" },
+    { "Plots" = "guide/plots.md" },
+    { "Calibration tables for CASA and AIPS" = "guide/caltables.md" },
+    { "Saving a session" = "guide/saving.md" },
+  ] },
+  { "Reference" = [
+    { "Command line" = "reference/cli.md" },
+    { "Loading and averaging" = "reference/loading.md" },
+    { "Observation" = "reference/observation.md" },
+    { "Bayesian calibration" = "reference/bayescal.md" },
+    { "File formats (difmapy.io)" = "reference/io.md" },
+  ] },
+  { "About" = [
+    { "difmapy and Difmap" = "about/difmap.md" },
+    { "Validation and performance" = "about/validation.md" },
+  ] },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "content.action.edit",
+  "content.code.annotate",
+  "content.code.copy",
+  "content.footnote.tooltips",
+  "content.tabs.link",
+  "content.tooltips",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+]
+
+[project.theme.icon]
+logo = "lucide/telescope"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/bmarcote/difmapy"
+
+# The API reference is generated from the docstrings by reading the
+# sources (python/), so building the site needs neither the Rust
+# toolchain nor an installed difmapy.
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["python"]
+inventories = [
+  "https://docs.python.org/3/objects.inv",
+  "https://numpy.org/doc/stable/objects.inv",
+]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "numpy"
+show_source = false
+show_root_heading = true
+show_root_full_path = false
+show_signature_annotations = false
+separate_signature = true
+members_order = "source"
+heading_level = 2
+filters = ["!^_"]
+merge_init_into_class = true
+show_symbol_type_heading = true
+show_symbol_type_toc = true
+
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.betterem = {}
+pymdownx.details = {}
+pymdownx.emoji.emoji_generator = "zensical.extensions.emoji.to_svg"
+pymdownx.emoji.emoji_index = "zensical.extensions.emoji.twemoji"
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.keys = {}
+pymdownx.magiclink = {}
+pymdownx.mark = {}
+pymdownx.smartsymbols = {}
+pymdownx.superfences = {}
+pymdownx.tabbed.alternate_style = true
+pymdownx.tabbed.combine_header_slug = true
+pymdownx.tilde = {}

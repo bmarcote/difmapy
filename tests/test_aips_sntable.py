@@ -259,3 +259,62 @@ def test_aips_applies_the_table_like_difmapy(tmp_path):
         dev = np.abs(vis_a[:, :, ia][good] - ref)
         # float32 round-off; the calibration itself moves |V| by ~30%.
         assert dev.max() < 1e-5 * np.median(np.abs(ref))
+
+
+@pytest.mark.skipif(not os.path.isfile(AIPS_LOGIN), reason="AIPS not installed")
+@pytest.mark.skipif(not os.path.isfile(UVF), reason="real 3C345 data not present")
+def test_aips_applies_the_flag_table_like_difmapy(tmp_path):
+    """The FG table from `wflags`: copied onto the data in AIPS and
+    applied by SPLIT, it must flag exactly the samples difmapy has."""
+    shutil.copy(UVF, tmp_path / "IN.UVFITS")
+    o = difmapy.load(str(tmp_path / "IN.UVFITS"), stokes=None)
+    o.select("I")
+    t = np.asarray(o._core.times())
+    o.flag(station="EF", tmin=t[40], tmax=t[90])
+    o.flag(baseline=("JB", "WB"), tmin=t[200], tmax=t[260], if_index=2)
+    o.flag(station="T6", if_index=0)
+    info = o.wflags(str(tmp_path / "FLG.FG.TASAV.FITS"), quiet=True)
+    assert info["nrows"] == 3   # one entry per flag command above
+
+    log = _run_aips(tmp_path, ZAP_ALL + [
+        "default fitld",
+        "datain 'DFMPY:IN.UVFITS'",
+        "outname 'DFMPY'; outclass 'UVDATA'; outdisk 1; outseq 1",
+        "douvcomp -1",
+        "go fitld; wait fitld",
+        "datain 'DFMPY:FLG.FG.TASAV.FITS'",
+        "outclass 'TASAV'",
+        "go fitld; wait fitld",
+        "default tacop",
+        "indisk 1; getn 2; inext 'FG'; inver 1",
+        "outname 'DFMPY'; outclass 'UVDATA'; outseq 1; outdisk 1",
+        "go tacop; wait tacop",
+        "default split",
+        "indisk 1; getn 1; docal -1; flagver 1; stokes 'FULL'",
+        "outclass 'SPLIT'; outdisk 1; douvcomp -1",
+        "go split; wait split",
+        "default fittp",
+        "indisk 1; getn 3; dataout 'DFMPY:OUT.FITS'",
+        "go fittp; wait fittp",
+    ] + ZAP_ALL)
+    assert "Using flag table version   1" in log, log[-3000:]
+    out = tmp_path / "OUT.FITS"
+    assert out.exists(), log[-3000:]
+
+    from difmapy.io.uvfits import load_uvfits
+
+    aips = load_uvfits(str(out))
+    tt, a1, a2, *_ = o._core.rows()
+    index = {(int(round(x * 10)), int(p), int(q)): i
+             for i, (x, p, q) in enumerate(zip(tt, a1, a2))}
+    ta, b1, b2, *_ = aips.rows()
+    ta = np.asarray(ta) + (aips.ref_mjd - o._core.ref_mjd) * 86400.0
+    rows = np.array([index[(int(round(x * 10)), int(p), int(q))]
+                     for x, p, q in zip(ta, b1, b2)])
+    mine = np.asarray(o.flags)
+    perm = [list(aips.pols).index(c) for c in o._core.pols]
+    np.testing.assert_array_equal(np.asarray(aips.flags())[:, :, perm],
+                                  mine[rows])
+    # Rows AIPS dropped altogether are the ones flagged throughout.
+    gone = np.setdiff1d(np.arange(mine.shape[0]), rows)
+    assert mine[gone].all()

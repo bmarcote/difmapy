@@ -143,3 +143,28 @@ def test_ms_only_options_are_refused_for_uvfits(uvfits_file):
     ref = difmapy.load(uvfits_file, stokes=None)
     np.testing.assert_allclose(np.asarray(o._core.calibrated_cube()[1]),
                                2 * np.asarray(ref._core.calibrated_cube()[1]))
+
+
+def test_loaders_document_their_shared_parameters_identically():
+    """The parameter text is written out in each loader's docstring (so
+    that tools reading the source, like the API reference, see it); the
+    copies must not drift apart."""
+    import inspect
+
+    def entries(fn):
+        doc = inspect.cleandoc(fn.__doc__)
+        body = doc[doc.index("Parameters"):doc.index("Returns")]
+        out, name = {}, None
+        for line in body.splitlines()[2:]:
+            if line and not line.startswith(" "):
+                name = line.split(" :")[0]
+                out[name] = [line]
+            elif name:
+                out[name].append(line)
+        return {k: "\n".join(v).rstrip() for k, v in out.items()}
+
+    ref = entries(difmapy.load)
+    for fn in (difmapy.Observation.from_ms, difmapy.Observation.from_uvfits):
+        for name, text in entries(fn).items():
+            if name != "path":
+                assert text == ref[name], f"{fn.__qualname__}: {name}"

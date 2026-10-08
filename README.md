@@ -5,6 +5,9 @@ A modern reimplementation of [Difmap](ftp://ftp.astro.caltech.edu/pub/difmap/dif
 a **Rust** compute engine with a **Python** API and **pyqtgraph**
 interactive plots.
 
+**Documentation: <https://bmarcote.github.io/difmapy/>** - a user guide
+and the full command reference (sources in `docs/`).
+
 Where the original paged one IF at a time through scratch files
 (`uvdata.scr`, `ifdata.scr`, `modvis.scr`), difmapy keeps **everything
 in RAM**. Visibilities and weights are never modified: flags live in a
@@ -53,9 +56,12 @@ not.
 
 ```sh
 pip install maturin
-maturin develop --release          # builds the Rust core into your env
-pip install .              # pyqtgraph + PySide6 for plots
+maturin develop --release --extras plot,ms   # Rust core + plots + MS support
 ```
+
+(Do not follow it with a plain `pip install .`: that replaces the
+editable install with a copy, and later edits to the checkout would no
+longer take effect.)
 
 See `INSTALL.md` for building redistributable wheels and for publishing
 to PyPI - and read `NOTICE.md` first: difmapy is a close port of Difmap,
@@ -140,7 +146,8 @@ obs.corplot()                          # self-cal gains: amp+phase per antenna
 info = obs.mapinfo()                   # beam, peak, model, residual noise
 m = obs.restore()                      # restored map (numpy array)
 obs.wmap("clean.fits")                 # FITS output with WCS + beam
-obs.save("mysession")                  # .uvf + .mod + .win + parameters
+obs.save("mysession")                  # .uvf .mod .win .par.json, plus the
+                                       # .ms, caltable and image (see below)
                                        # (+ mysession.ms if loaded from an MS)
 # later: obs = difmapy.Observation.get("mysession")
 
@@ -210,6 +217,53 @@ print(obs.flagged_fraction)
 
 obs.save_flags()        # write FLAG (+FLAG_ROW) back into the source MS
 ```
+
+`save_flags()` also works on data that were averaged in time or
+frequency (on load or with `uvaver`/`chanaver`): a flagged averaged
+sample flags every sample of the MS that went into it. Since an average
+cannot tell which of its inputs were good, unflagged ones are left as
+the file has them - from averaged data, flags are only ever added.
+
+### Flag tables for AIPS and CASA
+
+`obs.wflags(path, outformat=...)` writes the flags *added in the
+session* as a list of selections - station or baseline, IFs, channels,
+time range - so they can be applied to the original data or to other
+data of the same observation:
+
+* **AIPS** (the default for UVFITS data): an FG table in a TASAV FITS
+  file. `FITLD` it, `TACOP` with `INEXT 'FG'` onto the UV data, and it
+  applies wherever `FLAGVER` selects it.
+* **CASA** (the default for a Measurement Set): a flag-command list,
+  applied with `flagdata(vis=..., mode='list', inpfile=path)`.
+
+The list is kept short: consecutive integrations become one time range,
+consecutive IFs one entry, and a station flagged on all its baselines
+one station entry (data the file already has flagged never break a
+run). After averaging on load, a time range is the whole averaging bin
+and channels are the original ones. Flags already in the file are not
+repeated, and samples you *un*flagged cannot be expressed in such a list
+- `save_flags()` writes the exact state into a Measurement Set for that.
+Both formats are checked against the packages themselves: AIPS (`SPLIT`
+with the table) and CASA (`flagdata`) end up flagging exactly the
+samples difmapy has.
+
+### What `save()` writes
+
+`obs.save("prefix")` keeps the whole session, and returns (and prints)
+the list of files:
+
+| file | when | what |
+|---|---|---|
+| `prefix.uvf`, `.mod`, `.win`, `.par.json` | always | calibrated UV data, model, CLEAN windows, imaging parameters - what `get()` restores |
+| `prefix.ms` | data from a Measurement Set | unaveraged: a copy of the original with `CORRECTED_DATA` and `FLAG` filled in. Averaged: a new MS built on the original's structure and subtables, with the averaged rows (`DATA` as loaded and averaged, `CORRECTED_DATA` calibrated), flags, weights and, after channel averaging, rewritten spectral windows |
+| `prefix.G` or `prefix.TASAV.FITS` | once self-calibration has been applied | the calibration table, in the data's own format (CASA / AIPS) |
+| `prefix.flagcmd` or `prefix.FG.TASAV.FITS` | once flags have been added | the session's flags, in the data's own format (see below) |
+| `prefix.fits` | once there is a model | the restored CLEAN map |
+
+`ms=`, `caltable=`, `flags=` and `image=` take `False` to skip that file
+or `True` to make its absence an error. The averaged MS drops rows that hold no
+data at all and does not carry autocorrelations or `MODEL_DATA`.
 
 Interactive flagging (`radplot`, `uvplot`, `vplot`): **Shift+drag**
 sweeps a box to flag, **Ctrl+drag** unflags, `f`/`F` act on the nearest
@@ -589,6 +643,22 @@ switches between difmap's `uvweight` scheme and Briggs robust -2 ... +2
 and re-images straight away (the choice stays set, as `uvweight()`
 would leave it).
 
+The image is shown as difmap shows it: in its pseudo-colour table
+(`rainbow`: dark blue through cyan, green and yellow to red) or, with
+`g`, its grey scale, with the colours spanning the displayed map from
+its minimum to its peak - so the noise stays dark and the source stands
+out. `mapplot(cmap="grey")` starts in black and white, and
+`cmap="viridis"` gives the previous colours. `l` redistributes the same
+colours logarithmically for faint structure, and the colour-bar handles
+set any other range.
+
+The restored map (`3`) is drawn with contours: solid from 3 times the
+noise of the residual map upwards in factors of sqrt(2), dashed for the
+negative levels from -3 sigma down. Each is drawn light or dark,
+whichever stands out against the colour scale at its level (a contour in
+the scale's own colour would be invisible on the image), and follows
+the colour bar when its range changes.
+
 | key | action |
 | --- | --- |
 | double-click | add a CLEAN window (drag to move/resize) |
@@ -600,6 +670,8 @@ would leave it).
 | `f` | fit the placed components to the UV data (modelfit) |
 | `C` | clear every model component |
 | `l` | logarithmic or linear colour scale |
+| `g` | difmap's pseudo-colour table or its grey scale (black and white) |
+| `k` | contours on the restored map on / off |
 | `z` / `u` | restore the y / x axis range |
 | `r` | reload the plot from the data |
 | `x` | close and report the image properties |
@@ -611,9 +683,9 @@ dirty beam, restored map or model) with its peak.
 
 A component placed with `m` is only *drawn*: the flux it starts from is
 a guess read off the map, so it is held out of the image until `f` fits
-it (or `k` establishes it as it stands). Placing one therefore never
-changes the map underneath it, and `f` never invents a component of its
-own - place one first.
+it; closing the window adds any still unfitted. Placing one therefore
+never changes the map underneath it, and `f` never invents a component
+of its own - place one first.
 
 ### Amplitude and phase against frequency
 
@@ -702,6 +774,21 @@ channels x 2 pols, 1024² maps), best of three runs on one desktop:
 
 Bulk operations are slower but one-shot: loading the data and
 `uvaver` are dominated by moving the full cube (~0.9 s each here).
+
+## Documentation
+
+The site is built with [Zensical](https://zensical.org) from `docs/` and
+`zensical.toml`; the API reference is generated from the docstrings.
+
+```sh
+pip install -r docs/requirements.txt
+zensical serve                 # live preview at http://localhost:8000
+zensical build --clean         # writes site/
+```
+
+Pushing to `main` publishes it to GitHub Pages through
+`.github/workflows/docs.yml` (set Pages' source to "GitHub Actions" in
+the repository settings).
 
 ## Testing
 

@@ -266,6 +266,13 @@ def load_ms(path, field=None, data_column="DATA", wtscale=1.0):
         "field_id": int(field_id),
         "spw_ids": list(core._ms_origin["spw_ids"]),
         "ant_numbers": [a + 1 for a in core._ms_origin["ant_ids"]],
+        # What `save_averaged_ms` needs to lay out new main-table rows:
+        # the DATA_DESC_ID of each IF, the ANTENNA row of each antenna
+        # entry and the ARRAY_ID of each subarray.
+        "dd_ids": [int(d) for d in used_dd],
+        "ant_ids": list(core._ms_origin["ant_ids"]),
+        "array_ids": [int(a) for a in arrays],
+        "data_column": data_column,
     }
     return core
 
@@ -294,6 +301,9 @@ def save_flags(core, path=None, flag_row=True):
         raise ImportError("writing MS flags requires casatools") from exc
 
     origin = getattr(core, "_ms_origin", None)
+    averaged = origin is None
+    if averaged:
+        origin = getattr(core, "_ms_avg_origin", None)
     if origin is None:
         raise ValueError(
             "this observation was not loaded from a Measurement Set; "
@@ -305,6 +315,8 @@ def save_flags(core, path=None, flag_row=True):
             f"({origin['path']}); got {path}"
         )
     target = origin["path"]
+    if averaged:
+        return _save_flags_averaged(core, origin, flag_row)
 
     flags = np.asarray(core.flags())  # [nrow, nctotal, npol]
     ms_row = origin["ms_row"]  # [nrow, nif]
@@ -321,6 +333,319 @@ def save_flags(core, path=None, flag_row=True):
     finally:
         tb.close()
     return nwritten
+
+
+def _save_flags_averaged(core, origin, flag_row):
+    """`save_flags` for time- and/or channel-averaged data.
+
+    An averaged sample stands for several samples of the MS, so its flag
+    cannot simply be copied back. What can be said is: a flagged
+    averaged sample means none of the samples behind it should be used,
+    so they are all flagged; an unflagged one says nothing about each of
+    them (some may have been flagged in the file, and were left out of
+    the average), so they are left as they are. Flags are therefore only
+    ever *added* to the MS from averaged data.
+    """
+    import casatools
+
+    flags = np.asarray(core.flags())           # [nrow_avg, nc_avg, npol]
+    ms_row = origin["ms_row"]                  # [nrow_orig, nif]
+    row_map = np.asarray(origin["row_map"])    # orig row -> averaged row
+    chan_map = np.asarray(origin["chan_map"])  # orig channel -> averaged
+    tb = casatools.table()
+    tb.open(origin["path"], nomodify=False)
+    nwritten = 0
+    try:
+        coff = 0
+        for i, nch in enumerate(origin["if_nchan"]):
+            cmap = chan_map[coff : coff + nch]
+            coff += nch
+            rows = ms_row[:, i]
+            valid = np.nonzero(rows >= 0)[0]
+            used = cmap >= 0
+            if valid.size == 0 or not used.any():
+                continue
+            order = np.argsort(rows[valid])
+            src = valid[order]                 # difmapy rows, in MS order
+            r = rows[src]
+            # The averaged flags as seen from the original samples:
+            # [n, nch, npol], False for channels left out of the average.
+            add = np.zeros((len(src), nch, flags.shape[2]), dtype=bool)
+            add[:, used, :] = flags[row_map[src]][:, cmap[used], :]
+            breaks = np.nonzero(np.diff(r) != 1)[0] + 1
+            for cr, ca in zip(np.split(r, breaks), np.split(add, breaks)):
+                if not ca.any():
+                    continue
+                start, n = int(cr[0]), len(cr)
+                old = np.asarray(tb.getcol("FLAG", startrow=start, nrow=n),
+                                 dtype=bool)     # [npol, nch, n]
+                new = old | np.transpose(ca, (2, 1, 0))
+                if np.array_equal(new, old):
+                    continue
+                tb.putcol("FLAG", new, startrow=start, nrow=n)
+                if flag_row:
+                    tb.putcol("FLAG_ROW", new.all(axis=(0, 1)),
+                              startrow=start, nrow=n)
+                # Count the rows that gained a flag, not the block.
+                nwritten += int((new != old).any(axis=(0, 1)).sum())
+        tb.flush()
+    finally:
+        tb.close()
+    return nwritten
+
+
+def _raw_cube(core):
+    """The observation's visibilities with none of its calibration
+    applied (gains, gain flags and baseline corrections removed on a
+    copy)."""
+    raw = core.copy()
+    raw.uncalib(True, True, True)
+    raw.clroff()
+    return np.asarray(raw.calibrated_cube()[0])
+
+
+def _nearest_metadata(tb, src, field_id, times_mjds, columns):
+    """The value of per-row bookkeeping columns (SCAN_NUMBER, ...) of the
+    source MS at the row nearest in time to each of `times_mjds`."""
+    tb.open(src)
+    try:
+        sel = tb.query(f"FIELD_ID=={int(field_id)}")
+        try:
+            t = np.asarray(sel.getcol("TIME"), dtype=np.float64)
+            cols = {c: np.asarray(sel.getcol(c))
+                    for c in columns if c in sel.colnames()}
+        finally:
+            sel.close()
+    finally:
+        tb.close()
+    t_u, first = np.unique(t, return_index=True)
+    idx = np.clip(np.searchsorted(t_u, times_mjds), 0, len(t_u) - 1)
+    left = np.clip(idx - 1, 0, len(t_u) - 1)
+    idx = np.where(np.abs(t_u[left] - times_mjds)
+                   <= np.abs(t_u[idx] - times_mjds), left, idx)
+    return {c: v[first][idx] for c, v in cols.items()}
+
+
+def save_averaged_ms(core, path, overwrite=False, flag_row=True,
+                     by_window=None):
+    """Write time- and/or channel-averaged data as a new Measurement Set.
+
+    Averaged rows no longer correspond to rows of the MS they came from,
+    so the copy-and-fill of `save_ms` cannot be used. Instead the new MS
+    takes its *structure* and every subtable (ANTENNA, FIELD,
+    SPECTRAL_WINDOW, SOURCE, ...) from the originating MS, and its main
+    table is built from the observation: one row per integration,
+    baseline and spectral window that has data, carrying
+
+    * ``DATA`` - the averaged visibilities as loaded (no difmapy
+      calibration), ``CORRECTED_DATA`` - the same with the session's
+      gains and baseline corrections applied;
+    * ``FLAG``/``FLAG_ROW``, ``WEIGHT`` (the mean channel weight, which
+      is what the loader spreads over the channels again), ``SIGMA``,
+      and ``WEIGHT_SPECTRUM`` when the original had one;
+    * ``TIME``/``TIME_CENTROID``, ``INTERVAL``/``EXPOSURE`` (the summed
+      integration time), ``UVW`` in metres, the antenna, array, field
+      and data-description ids, and the scan number, observation, state,
+      processor and feed ids of the original row nearest in time.
+
+    If channels were averaged, the SPECTRAL_WINDOW rows are rewritten
+    with the new channel frequencies and widths. Autocorrelations are
+    not carried over (difmapy never loads them), and neither is a
+    MODEL_DATA column, which would be stale.
+
+    `by_window` forces the cubes to be written one spectral window at a
+    time (True) rather than each column in one piece; that is only
+    needed, and chosen by default, when the windows have different
+    numbers of channels.
+
+    Returns the path written.
+    """
+    import shutil
+
+    try:
+        import casatools
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("writing a Measurement Set requires casatools") from exc
+
+    origin = getattr(core, "_cal_origin", None) or {}
+    if origin.get("format") != "ms" or "dd_ids" not in origin:
+        raise ValueError(
+            "this observation did not come from a Measurement Set, and "
+            "difmapy writes one from the structure of the MS it came "
+            "from; use wobs() to write UVFITS instead"
+        )
+    src = origin["path"]
+    if not os.path.isdir(src):
+        raise ValueError(
+            f"the Measurement Set the data came from ({src}) is not there "
+            "any more; its structure and subtables are needed to write a "
+            "new one"
+        )
+    if os.path.abspath(path) == os.path.abspath(src):
+        raise ValueError(f"refusing to overwrite the originating MS {src}")
+    if os.path.exists(path):
+        if not overwrite:
+            raise FileExistsError(f"{path} exists; pass overwrite=True")
+        shutil.rmtree(path)
+
+    ifs = core.ifs
+    nif, npol = len(ifs), core.npol
+    cal, wt = (np.asarray(x) for x in core.calibrated_cube())
+    raw = _raw_cube(core)
+    flags = np.asarray(core.flags())
+    time, a1, a2, us, vs, ws = (np.asarray(x) for x in core.rows())
+    inttime = np.asarray(core.inttimes(), dtype=np.float64)
+    coffs = np.concatenate([[0], np.cumsum([n for (_, _, n) in ifs])])
+
+    # One MS row per (difmapy row, IF) that holds any data.
+    present = np.stack(
+        [(wt[:, coffs[i] : coffs[i + 1], :] != 0).any(axis=(1, 2))
+         for i in range(nif)], axis=1)
+    rows, cifs = np.nonzero(present)   # row-major: time order is kept
+    n = len(rows)
+    if n == 0:
+        raise ValueError("there is no data to write")
+
+    t_mjds = core.ref_mjd * 86400.0 + time[rows]
+    tb = casatools.table()
+    meta = _nearest_metadata(
+        tb, src, origin.get("field_id", 0), t_mjds,
+        ("SCAN_NUMBER", "OBSERVATION_ID", "STATE_ID", "PROCESSOR_ID",
+         "FEED1", "FEED2"))
+
+    # The structure, without rows - which also empties the subtables, so
+    # those are then copied over in full.
+    tb.open(src)
+    try:
+        subtables = [k for k, v in tb.getkeywords().items()
+                     if isinstance(v, str) and v.startswith("Table:")]
+        had_wtsp = "WEIGHT_SPECTRUM" in tb.colnames()
+        out = tb.copy(path, deep=True, valuecopy=True, norows=True,
+                      returnobject=True)
+        out.close()
+    finally:
+        tb.close()
+    for sub in subtables:
+        if not os.path.isdir(os.path.join(src, sub)):
+            continue
+        dest = os.path.join(path, sub)
+        shutil.rmtree(dest, ignore_errors=True)
+        tb.open(os.path.join(src, sub))
+        try:
+            copy = tb.copy(dest, deep=True, valuecopy=True, returnobject=True)
+            copy.close()
+        finally:
+            tb.close()
+
+    ant_ids = np.asarray(origin["ant_ids"], dtype=np.int32)
+    sub_of = np.asarray(core.antenna_subarrays, dtype=int)
+    array_ids = np.asarray(origin["array_ids"], dtype=np.int32)
+    dd_ids = np.asarray(origin["dd_ids"], dtype=np.int32)
+
+    tb.open(path, nomodify=False)
+    try:
+        stale = [c for c in ("MODEL_DATA", "SIGMA_SPECTRUM")
+                 if c in tb.colnames()]
+        if stale:
+            tb.removecols(stale)
+        if "CORRECTED_DATA" not in tb.colnames():
+            _add_data_column(tb, "CORRECTED_DATA")
+        tb.addrows(n)
+        tb.putcol("TIME", t_mjds)
+        tb.putcol("TIME_CENTROID", t_mjds)
+        tb.putcol("INTERVAL", inttime[rows])
+        tb.putcol("EXPOSURE", inttime[rows])
+        tb.putcol("UVW", np.ascontiguousarray(
+            np.stack([us[rows], vs[rows], ws[rows]]) * C))
+        tb.putcol("ANTENNA1", ant_ids[a1[rows]])
+        tb.putcol("ANTENNA2", ant_ids[a2[rows]])
+        tb.putcol("ARRAY_ID", array_ids[sub_of[a1[rows]]])
+        tb.putcol("DATA_DESC_ID", dd_ids[cifs])
+        tb.putcol("FIELD_ID",
+                  np.full(n, int(origin.get("field_id", 0)), dtype=np.int32))
+        for col, values in meta.items():
+            tb.putcol(col, np.ascontiguousarray(values))
+
+        # The cubes: [n, nchan, npol] -> the MS's [npol, nchan, n].
+        def write(target, cells):
+            w = np.abs(cells(wt)).astype(np.float32)
+            f = cells(flags).astype(bool)
+            cnt = np.maximum((w > 0).sum(axis=1), 1)
+            weight = (w.sum(axis=1) / cnt).astype(np.float32)   # [npol, n]
+            with np.errstate(divide="ignore"):
+                sigma = np.where(weight > 0, 1.0 / np.sqrt(weight), 0.0)
+            target.putcol("DATA", cells(raw))
+            target.putcol("CORRECTED_DATA", cells(cal))
+            target.putcol("FLAG", f)
+            target.putcol("FLAG_ROW", f.all(axis=(0, 1)) if flag_row
+                          else np.zeros(f.shape[2], bool))
+            target.putcol("WEIGHT", weight)
+            target.putcol("SIGMA", sigma.astype(np.float32))
+            if had_wtsp:
+                target.putcol("WEIGHT_SPECTRUM", w)
+
+        nchans = {n for (_, _, n) in ifs}
+        if len(nchans) == 1 and not by_window:
+            # Every IF has the same shape: each column in one piece,
+            # which is some twenty times faster than window by window.
+            chan = coffs[cifs][:, None] + np.arange(nchans.pop())[None, :]
+
+            def cells(cube):
+                return np.ascontiguousarray(
+                    np.transpose(cube[rows[:, None], chan, :], (2, 1, 0)))
+
+            write(tb, cells)
+        else:
+            # Channel counts differ, so one spectral window at a time. A
+            # query result is a view of those rows, ascending like `sel`.
+            for i in range(nif):
+                sel = np.nonzero(cifs == i)[0]
+                if sel.size == 0:
+                    continue
+
+                def cells(cube, sel=sel, i=i):
+                    block = cube[rows[sel], coffs[i] : coffs[i + 1], :]
+                    return np.ascontiguousarray(np.transpose(block, (2, 1, 0)))
+
+                view = tb.query(f"DATA_DESC_ID=={int(dd_ids[i])}")
+                try:
+                    write(view, cells)
+                finally:
+                    view.close()
+        tb.flush()
+    finally:
+        tb.close()
+
+    _update_spectral_windows(tb, path, origin["spw_ids"], ifs)
+    return path
+
+
+def _update_spectral_windows(tb, path, spw_ids, ifs):
+    """Make the SPECTRAL_WINDOW rows describe the (possibly averaged)
+    channels of each IF; rows that already do are left untouched."""
+    tb.open(os.path.join(path, "SPECTRAL_WINDOW"), nomodify=False)
+    try:
+        names = tb.colnames()
+        for spw, (f0, df, nch) in zip(spw_ids, ifs):
+            spw = int(spw)
+            freqs = f0 + df * np.arange(nch)
+            old = np.atleast_1d(tb.getcell("CHAN_FREQ", spw))
+            if len(old) == nch and np.allclose(old, freqs, rtol=0, atol=1e-3):
+                continue
+            # The sign convention of CHAN_WIDTH is the file's own.
+            old_w = np.atleast_1d(tb.getcell("CHAN_WIDTH", spw))
+            width = np.full(nch, abs(df) if old_w[0] >= 0 else -abs(df))
+            tb.putcell("NUM_CHAN", spw, int(nch))
+            tb.putcell("CHAN_FREQ", spw, freqs)
+            tb.putcell("CHAN_WIDTH", spw, width)
+            for col in ("EFFECTIVE_BW", "RESOLUTION"):
+                if col in names:
+                    tb.putcell(col, spw, np.full(nch, abs(df)))
+            if "TOTAL_BANDWIDTH" in names:
+                tb.putcell("TOTAL_BANDWIDTH", spw, float(nch * abs(df)))
+        tb.flush()
+    finally:
+        tb.close()
 
 
 def _put_cube(tb, column, cube, ms_row, if_nchan, extra=None):
@@ -402,7 +727,10 @@ def save_ms(core, path, data_column="CORRECTED_DATA", overwrite=False,
     flag_row : bool
         Also maintain FLAG_ROW, as `save_flags` does.
 
-    Returns the path written.
+    Returns
+    -------
+    str
+        The path written.
     """
     import shutil
 

@@ -129,6 +129,12 @@ def uvaver(core: CoreObservation, aver_time: float, doscatter: bool = False):
     # Sort the output rows by time (the core requires time-sorted rows).
     rorder = np.lexsort((out_a2, out_a1, out_time))
     ifs = core.ifs
+    # Which output row each input row went into, for tracing an averaged
+    # sample back to the rows it was made of (`save_flags`).
+    new_of_group = np.empty(ngroup, dtype=np.int64)
+    new_of_group[rorder] = np.arange(ngroup)
+    row_map = np.empty(len(order), dtype=np.int64)
+    row_map[order] = new_of_group[gidx]
     new = CoreObservation(
         core.source_name,
         core.ra,
@@ -151,6 +157,7 @@ def uvaver(core: CoreObservation, aver_time: float, doscatter: bool = False):
         core.ref_mjd,
         flag=np.ascontiguousarray(out_flag[rorder]),
     )
+    new._avg_row_map = row_map
     return new
 
 
@@ -197,6 +204,10 @@ def chanaver(core: CoreObservation, nchan=None, chlist=None):
 
     out_vis, out_wt, out_flag = [], [], []
     freqs, widths, counts = [], [], []
+    # Which output channel each input channel went into (-1: left out),
+    # for tracing an averaged sample back to its channels.
+    chan_map = np.full(nctotal, -1, dtype=np.int64)
+    out_coff = 0
     coff = 0
     for cif, (f0, df, nch) in enumerate(core.ifs):
         if nchan in (None, 0) or str(nchan).lower() == "all":
@@ -233,13 +244,15 @@ def chanaver(core: CoreObservation, nchan=None, chlist=None):
         freqs.append(float(f0 + 0.5 * (n - 1) * df))
         widths.append(float(df * n))
         counts.append(nout)
+        chan_map[sl] = np.where(use[sl], out_coff + np.arange(nch) // n, -1)
+        out_coff += nout
         coff += nch
 
     out_vis = np.concatenate(out_vis, axis=1)
     out_wt = np.concatenate(out_wt, axis=1)
     out_flag = np.concatenate(out_flag, axis=1) | (out_wt <= 0)
     time, a1, a2, us, vs, ws = core.rows()
-    return CoreObservation(
+    new = CoreObservation(
         core.source_name,
         core.ra,
         core.dec,
@@ -261,3 +274,5 @@ def chanaver(core: CoreObservation, nchan=None, chlist=None):
         core.ref_mjd,
         flag=np.ascontiguousarray(out_flag),
     )
+    new._avg_chan_map = chan_map
+    return new

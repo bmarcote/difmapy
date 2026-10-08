@@ -18,6 +18,11 @@ Interaction:
   UV data (modelfit)
 * ``C``: clear the model
 * ``l``: switch the colours between a linear and a logarithmic scale
+* ``g``: switch between difmap's pseudo-colour table and its grey scale
+  (black and white)
+* ``k``: show or hide the contours of the restored map. They start at
+  three times the residual noise and go up by factors of sqrt(2);
+  negative ones, from -3 sigma down, are dashed
 * the "Weighting" box at the top: difmap's own ``uvweight`` scheme or
   Briggs robust -2 (uniform) ... +2 (natural); picking one re-inverts
 * ``h``: the key legend; ``x``: close, reporting the image properties
@@ -44,6 +49,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from difmapy.plots.base import MODEL_COLOR, PlotWindow, run_if_needed
+from difmapy.plots.contours import contour_levels, contour_segments
 
 __all__ = ["mapplot", "maplot", "MapPlot"]
 
@@ -67,11 +73,53 @@ SHORTCUTS = (
     "double-click: window \u2022 d: delete window \u2022 m: add component \u2022 "
     "f: modelfit \u2022 c: clean \u2022 i: invert \u2022 "
     "C: clear model \u2022 1/2/3/4: residual/beam/restored/model \u2022 "
-    "l: log/linear colours \u2022 h: help \u2022 x: close + report \u2022 q: close"
+    "l: log/linear \u2022 g: colour/grey \u2022 k: contours \u2022 h: help \u2022 x: close + report \u2022 q: close"
 )
 
 #: Strength of the logarithmic colour stretch (as in DS9's log scale).
 LOG_STRETCH = 1000.0
+
+
+def _difmap_rainbow():
+    """Difmap's pseudo-colour table (``rainbow`` in its color.c, the
+    one its mapplot installs for "color"): near-black blue for the
+    faintest level, through blue, cyan, green, yellow and orange to red
+    at the brightest. The stops are difmap's own; its table also runs
+    past both ends (to black below, white above) for use with a changed
+    contrast, which a display from minimum to maximum never reaches."""
+    pos = [0.0, 0.17, 0.33, 0.50, 0.67, 0.83, 1.0]
+    rgb = [(0.0, 0.0, 0.3), (0.0, 0.0, 0.8), (0.0, 1.0, 1.0),
+           (0.6, 1.0, 0.3), (1.0, 1.0, 0.0), (1.0, 0.6, 0.0),
+           (1.0, 0.0, 0.0)]
+    return pg.ColorMap(pos, [tuple(int(round(255 * c)) for c in k) + (255,)
+                             for k in rgb])
+
+
+def _difmap_grey():
+    """Difmap's grey scale: black at the faintest level, white at the
+    brightest."""
+    return pg.ColorMap([0.0, 1.0], [(0, 0, 0, 255), (255, 255, 255, 255)])
+
+
+#: The colour maps `mapplot(cmap=...)` knows by name. "color" and "grey"
+#: are difmap's two (its ``c`` and ``g`` keys); "viridis" is the map
+#: this display used before.
+COLOR_MAPS = {
+    "color": _difmap_rainbow,
+    "grey": _difmap_grey,
+    "viridis": lambda: pg.colormap.get("viridis"),
+}
+_CMAP_ALIASES = {"colour": "color", "rainbow": "color", "gray": "grey",
+                 "bw": "grey", "b&w": "grey"}
+
+
+def _cmap_name(name):
+    key = str(name).strip().lower()
+    key = _CMAP_ALIASES.get(key, key)
+    if key not in COLOR_MAPS:
+        raise ValueError(
+            f"unknown colour map {name!r}; use one of {sorted(COLOR_MAPS)}")
+    return key
 
 
 def log_stretch(cmap, a=LOG_STRETCH):
@@ -100,10 +148,12 @@ class MapPlot(PlotWindow):
     DEFAULT_SIZE = (1250, 820)
 
     def __init__(self, obs, what="map", mapsize=None, cellsize=None,
-                 uvweight=None, clean_args=None, quiet=False, scale="linear"):
+                 uvweight=None, clean_args=None, quiet=False, scale="linear",
+                 cmap="color"):
         super().__init__("difmapy mapplot")
         self.obs = obs
         self.what = what
+        self.cmap = _cmap_name(cmap)
         self.scale = "log" if str(scale).lower().startswith("log") else "linear"
         self.clean_args = clean_args or {}
         self.quiet = quiet
@@ -113,6 +163,12 @@ class MapPlot(PlotWindow):
         self._gauss_stage = None
         self._gauss = {}
         self._model_items = []
+        #: (path item, level) of every contour on the restored map.
+        self._contour_items = []
+        #: whether the restored map is drawn with contours ("k").
+        self.contours = True
+        #: the levels drawn, for inspection: (positive, negative, rms).
+        self.contour_levels = (np.array([]), np.array([]), float("nan"))
         #: components placed here and not yet fitted (dicts as
         #: `obs.model` gives them): drawn, but not in the model until
         #: "f" fits them or the window closes, since their flux is only
@@ -145,13 +201,14 @@ class MapPlot(PlotWindow):
         self.plot.vb.invertX(True)  # RA increases leftward
         self.img = pg.ImageItem(axisOrder="row-major")
         self.plot.addItem(self.img)
-        self._base_cmap = pg.colormap.get("viridis")
+        self._base_cmap = COLOR_MAPS[self.cmap]()
         cmap = (log_stretch(self._base_cmap) if self.scale == "log"
                 else self._base_cmap)
         self._cbar = pg.ColorBarItem(colorMap=cmap)
         self._cbar.setImageItem(self.img)
         self.glw.addItem(self._cbar, row=0, col=1)
         self._cbar.sigLevelsChanged.connect(lambda *_: self._update_histogram())
+        self._cbar.sigLevelsChanged.connect(lambda *_: self._style_contours())
         # The handles work in steps of `rounding`, which has to follow
         # the data; see `_tune_rounding`. A drag ends by snapping the
         # handles back, which is the moment to re-scale the step to
@@ -339,6 +396,18 @@ class MapPlot(PlotWindow):
         self.refresh()
         return scale
 
+    def set_cmap(self, name):
+        """Show the image in the colour map `name`: "color" (difmap's
+        pseudo-colour table), "grey" (black and white) or "viridis".
+        The linear/log choice and the displayed range are kept."""
+        self.cmap = _cmap_name(name)
+        self._base_cmap = COLOR_MAPS[self.cmap]()
+        self._cbar.setColorMap(log_stretch(self._base_cmap)
+                               if self.scale == "log" else self._base_cmap)
+        self._style_contours()
+        self._update_histogram()
+        return self.cmap
+
     def _title(self, data):
         """The heading over the image: which image this is, and the one
         number that characterises it."""
@@ -366,14 +435,22 @@ class MapPlot(PlotWindow):
         self.img.setImage(data, autoLevels=False)
         # Map pixel coordinates to mas (x = east offset).
         self.img.setRect(QtCore.QRectF(-ex, -ey, 2 * ex, 2 * ey))
-        finite = data[np.isfinite(data)]
+        # The colours span the displayed map from its minimum to its
+        # peak, as in difmap (setcmpar: the range of the inner, valid
+        # area). The noise then sits at the dark end and the source
+        # stands out; a percentile cut, on a large field around a
+        # compact source, lands inside the noise and spends the whole
+        # colour range on it.
+        valid = np.asarray(self.obs.valid(data))
+        finite = valid[np.isfinite(valid)]
         if finite.size:
-            lo, hi = np.percentile(finite, [2.0, 99.9])
+            lo, hi = float(finite.min()), float(finite.max())
             if hi <= lo:
                 hi = lo + 1e-12
-            self._cbar.setLevels((float(lo), float(hi)))
+            self._cbar.setLevels((lo, hi))
         self._tune_rounding()
         self._sync_rois_from_obs()
+        self._draw_contours(data)
         self._draw_model()
         self._update_histogram()
         self._update_status()
@@ -446,11 +523,44 @@ class MapPlot(PlotWindow):
     # ------------------------------------------------------------------
 
     def _sync_rois_from_obs(self):
-        for roi in self._rois:
-            self.plot.vb.removeItem(roi)
-        self._rois = []
-        for (x0, x1, y0, y1) in self.obs.windows:
+        """Make the ROIs on screen match `obs.windows`.
+
+        Existing ROIs are moved and resized rather than replaced: this
+        runs on every refresh, and a discarded ROI is cyclic garbage
+        that owns child items (its handles). If Python's collector
+        happens to run while pyqtgraph is building the replacement, it
+        destroys those in an order Qt does not survive - a segmentation
+        fault that comes and goes with the interpreter's allocation
+        counts. So nothing is discarded unless a window really went.
+        """
+        wins = list(self.obs.windows)
+        for roi, (x0, x1, y0, y1) in zip(self._rois, wins):
+            pos = [min(x0, x1), min(y0, y1)]
+            size = [abs(x1 - x0), abs(y1 - y0)]
+            if tuple(roi.pos()) != tuple(pos) or tuple(roi.size()) != tuple(size):
+                # finish=False: this is the observation moving the ROI,
+                # not the user, so nothing is written back.
+                roi.setPos(pos, update=False, finish=False)
+                roi.setSize(size, finish=False)
+        for roi in self._rois[len(wins):]:
+            self._retire_roi(roi)
+        del self._rois[len(wins):]
+        for (x0, x1, y0, y1) in wins[len(self._rois):]:
             self._add_roi(x0, x1, y0, y1)
+
+    def _retire_roi(self, roi):
+        """Take an ROI off the display for good, in an order that is safe
+        whenever its wrapper is eventually collected: its handles are
+        detached first (so that no child is destroyed along with it
+        behind Python's back), then the signal that ties it to this
+        window, then the item itself."""
+        try:
+            roi.sigRegionChangeFinished.disconnect(self._rois_to_obs)
+        except (TypeError, RuntimeError):  # pragma: no cover
+            pass
+        for handle in list(roi.getHandles()):
+            roi.removeHandle(handle)
+        self.plot.vb.removeItem(roi)
 
     def _add_roi(self, x0, x1, y0, y1):
         roi = pg.RectROI(
@@ -477,6 +587,84 @@ class MapPlot(PlotWindow):
     # ------------------------------------------------------------------
     # model components
     # ------------------------------------------------------------------
+
+    # ---- contours ----------------------------------------------------
+
+    #: Contours start at this many times the residual noise...
+    CONTOUR_NSIGMA = 3.0
+    #: ...and each level is this factor above the one before.
+    CONTOUR_FACTOR = float(np.sqrt(2.0))
+
+    def _draw_contours(self, data):
+        """Contour the restored map: solid from +3 sigma up in factors
+        of sqrt(2), dashed from -3 sigma down, sigma being the noise of
+        the residual map. Only the valid inner quarter is traced, like
+        everything else measured on a map."""
+        for item, _ in self._contour_items:
+            self.plot.vb.removeItem(item)
+        self._contour_items = []
+        self.contour_levels = (np.array([]), np.array([]), float("nan"))
+        if self.what != "clean" or not self.contours:
+            return
+        obs = self.obs
+        sy, sx = obs.valid_slice
+        sub = np.asarray(data)[sy, sx]
+        finite = sub[np.isfinite(sub)]
+        rms = float(obs.noise_stats()["rms"])
+        if finite.size == 0:
+            return
+        pos, neg = contour_levels(rms, float(finite.max()), float(finite.min()),
+                                  nsigma=self.CONTOUR_NSIGMA,
+                                  factor=self.CONTOUR_FACTOR)
+        self.contour_levels = (pos, neg, rms)
+        # Pixel index -> mas, as the image is placed: pixel i spans
+        # [i, i + 1] cells from the edge, so its centre is at i + 0.5.
+        ex, ey = abs(obs.extent[0]), abs(obs.extent[3])
+        dx, dy = 2 * ex / obs._nx, 2 * ey / obs._ny
+        for level in list(pos) + list(neg):
+            xs, ys = contour_segments(sub, level)
+            if xs.size == 0:
+                continue
+            path = pg.arrayToQPath(-ex + (xs + sx.start + 0.5) * dx,
+                                   -ey + (ys + sy.start + 0.5) * dy,
+                                   connect="pairs")
+            item = QtWidgets.QGraphicsPathItem(path)
+            item.setZValue(5)          # over the image, under the windows
+            self.plot.vb.addItem(item, ignoreBounds=True)
+            self._contour_items.append((item, float(level)))
+        self._style_contours()
+
+    def _style_contours(self):
+        """Pen every contour for contrast against the colour scale.
+
+        A contour in the colour of its own level would vanish: the
+        pixels it runs through have exactly that colour. So each takes
+        whichever of light and dark stands out from the colour the scale
+        gives its level - which follows the colour bar when its handles
+        are dragged or the scale switches to log. Negative levels are
+        dashed.
+        """
+        if not self._contour_items:
+            return
+        lo, hi = (float(v) for v in self._cbar.levels())
+        span = hi - lo if hi > lo else 1.0
+        cmap = self._cbar.colorMap()
+        for item, level in self._contour_items:
+            frac = float(np.clip((level - lo) / span, 0.0, 1.0))
+            r, g, b = (float(v) for v in cmap.map(frac, mode="float")[:3])
+            bright = 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5
+            pen = pg.mkPen((30, 30, 30) if bright else (245, 245, 245),
+                           width=1,
+                           style=(QtCore.Qt.PenStyle.DashLine if level < 0
+                                  else QtCore.Qt.PenStyle.SolidLine))
+            pen.setCosmetic(True)
+            item.setPen(pen)
+
+    def set_contours(self, on=True):
+        """Show or hide the contours of the restored map."""
+        self.contours = bool(on)
+        self.refresh()
+        return self.contours
 
     def _draw_model(self):
         """Outline every extended component and mark the delta ones."""
@@ -690,6 +878,9 @@ class MapPlot(PlotWindow):
             ("f", "fit the placed components to the UV data (modelfit)"),
             ("C", "clear every model component"),
             ("l", "logarithmic or linear colour scale"),
+            ("g", "difmap pseudo-colour or grey scale (black and white)"),
+            ("k", "contours on the restored map: 3 sigma, x sqrt(2); "
+                  "negative dashed"),
             ("drag the bar handles", "set the displayed range"),
             ("z / u", "restore the y / x axis range"),
             ("x", "close and report the image properties"),
@@ -723,6 +914,19 @@ class MapPlot(PlotWindow):
         elif low == "i":
             self.obs.invert()
             self.refresh()
+        elif low == "k":
+            on = self.set_contours(not self.contours)
+            pos, neg, rms = self.contour_levels
+            self._message(
+                "contours off" if not on else
+                f"contours from +-{self.CONTOUR_NSIGMA:g} x {rms:.3g} Jy/beam "
+                f"in steps of sqrt(2): {len(pos)} positive, {len(neg)} "
+                "negative (dashed)" if self.what == "clean" else
+                "contours on (shown on the restored map, key 3)")
+        elif low == "g":
+            name = self.set_cmap("color" if self.cmap == "grey" else "grey")
+            self._message("grey scale (black and white)" if name == "grey"
+                          else "difmap pseudo-colour")
         elif low == "l":
             self._message(
                 f"{self.set_scale('linear' if self.scale == 'log' else 'log')}"
@@ -744,7 +948,7 @@ class MapPlot(PlotWindow):
             rx, ry = roi.pos()
             w, h = roi.size()
             if rx <= x <= rx + w and ry <= y <= ry + h:
-                self.plot.vb.removeItem(roi)
+                self._retire_roi(roi)
                 self._rois.remove(roi)
                 self._rois_to_obs()
                 self._update_status()
@@ -830,10 +1034,11 @@ def _ellipse(x, y, major, ratio, phi_deg, n=64):
 
 
 def mapplot(obs, what="map", mapsize=None, cellsize=None, uvweight=None,
-            block=None, quiet=False, scale="linear", **clean_args):
+            block=None, quiet=False, scale="linear", cmap="color",
+            **clean_args):
     p = MapPlot(obs, what=what, mapsize=mapsize, cellsize=cellsize,
                 uvweight=uvweight, clean_args=clean_args, quiet=quiet,
-                scale=scale)
+                scale=scale, cmap=cmap)
     run_if_needed(p, block)
     return p
 

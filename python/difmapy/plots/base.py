@@ -1008,6 +1008,9 @@ class FlagPlotBase(PlotWindow):
         self._panels.append(panel)
         return panel
 
+    #: Width in pixels of the left axis of every stacked panel.
+    LEFT_AXIS_WIDTH = 68
+
     def _share_x_axis(self):
         """Stack the panels on one common x axis.
 
@@ -1026,6 +1029,12 @@ class FlagPlotBase(PlotWindow):
             panel.plot.setLabel("bottom", "")
         for panel in self._panels[1:]:
             panel.plot.setXLink(self._panels[0].plot)
+        # One width for every left axis: left to itself each axis is as
+        # wide as its own tick labels ("-150" against "4"), and the plot
+        # areas of an amplitude and a phase panel then start at
+        # different x.
+        for panel in self._panels:
+            panel.plot.getAxis("left").setWidth(self.LEFT_AXIS_WIDTH)
 
     def _build_panels(self):  # pragma: no cover - abstract
         raise NotImplementedError

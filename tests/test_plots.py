@@ -383,6 +383,133 @@ def test_mapplot_weighting_box(obs):
     p.close()
 
 
+def test_contour_levels_and_tracing():
+    from difmapy.plots.contours import contour_levels, contour_segments
+
+    pos, neg = contour_levels(0.01, 1.0, -0.05)
+    assert pos[0] == pytest.approx(0.03) and neg[0] == pytest.approx(-0.03)
+    np.testing.assert_allclose(pos[1:] / pos[:-1], np.sqrt(2.0))
+    np.testing.assert_allclose(neg[1:] / neg[:-1], np.sqrt(2.0))
+    assert pos[-1] <= 1.0 < pos[-1] * np.sqrt(2.0)
+    assert neg[-1] >= -0.05 > neg[-1] * np.sqrt(2.0)
+    # Nothing above 3 sigma, or no usable noise: no levels.
+    assert contour_levels(0.01, 0.02, -0.02)[0].size == 0
+    assert contour_levels(0.0, 1.0)[0].size == 0
+
+    # A circle of radius 40 pixels about an off-grid centre.
+    yy, xx = np.mgrid[:200, :200]
+    r = np.hypot(xx - 100.3, yy - 99.6)
+    xs, ys = contour_segments(-r, -40.0)
+    assert xs.size and xs.size % 2 == 0
+    np.testing.assert_allclose(np.hypot(xs - 100.3, ys - 99.6), 40.0, atol=0.01)
+    length = np.hypot(np.diff(xs)[::2], np.diff(ys)[::2]).sum()
+    assert length == pytest.approx(2 * np.pi * 40.0, rel=1e-3)
+    # A saddle: two crossing-free segments, not a cross.
+    xs, ys = contour_segments(np.array([[1.0, 0.0], [0.0, 1.0]]), 0.5)
+    assert xs.size == 4
+    assert contour_segments(np.zeros((8, 8)), 1.0)[0].size == 0
+
+
+def test_mapplot_contours_on_the_clean_map(obs):
+    from pyqtgraph.Qt import QtGui
+
+    obs.clean(200, 0.1, quiet=True)
+    p = MapPlot(obs, what="clean", quiet=True)
+    pos, neg, rms = p.contour_levels
+    assert rms == pytest.approx(obs.noise_stats()["rms"])
+    assert pos[0] == pytest.approx(3.0 * rms) and len(pos) > 3
+    np.testing.assert_allclose(pos[1:] / pos[:-1], np.sqrt(2.0))
+    drawn = [lv for _, lv in p._contour_items]
+    assert drawn and set(drawn) <= set(pos) | set(neg)
+
+    # A map with a deep negative: its contours are dashed, the positive
+    # ones solid, and each is light or dark against the colour scale.
+    data = np.array(obs.restored_map, copy=True)
+    data[obs._ny // 2 + 20, obs._nx // 2 + 20] = -40.0 * rms
+    p._draw_contours(data)
+    styles = {lv < 0: item.pen().style() for item, lv in p._contour_items}
+    assert styles[True] == QtCore.Qt.PenStyle.DashLine
+    assert styles[False] == QtCore.Qt.PenStyle.SolidLine
+    lo, hi = p._cbar.levels()
+    colours = {item.pen().color().lightness() > 128
+               for item, lv in p._contour_items}
+    assert colours == {True, False}
+
+    # Only the restored map is contoured, and "k" switches them off.
+    for what in ("map", "beam", "model"):
+        p.what = what
+        p.refresh()
+        assert not p._contour_items
+    p.what = "clean"
+    p.refresh()
+    assert p._contour_items
+    p.keyPressEvent(QtGui.QKeyEvent(
+        QtCore.QEvent.Type.KeyPress, 0,
+        QtCore.Qt.KeyboardModifier.NoModifier, "k"))
+    assert not p.contours and not p._contour_items
+    p.close()
+
+
+def test_vplot_panels_have_identical_axes(obs):
+    """Amplitude and phase panels: the same axes, no extra one on the
+    right, and plot areas that start and end at the same x."""
+    v = VPlot(obs, nplot=2)
+    v.resize(900, 700)
+    v.render(900, 700)
+    assert {p.key for p in v._panels} == {"amp", "phase"}
+    for panel in v._panels:
+        assert not panel.plot.getAxis("right").isVisible()
+        assert not panel.plot.getAxis("top").isVisible()
+    left = {round(p.plot.vb.sceneBoundingRect().left(), 1) for p in v._panels}
+    right = {round(p.plot.vb.sceneBoundingRect().right(), 1) for p in v._panels}
+    assert len(left) == 1 and len(right) == 1
+    v.close()
+
+
+def test_mapplot_difmap_colour_maps(obs):
+    """Difmap's pseudo-colour table by default, its grey scale on "g",
+    and - as in difmap - colours spanning the map from minimum to peak."""
+    from pyqtgraph.Qt import QtGui
+
+    from difmapy.plots.mapplot import COLOR_MAPS
+
+    obs.clean(100, 0.1, quiet=True)
+    p = MapPlot(obs, what="clean", quiet=True)
+    assert p.cmap == "color"
+    valid = obs.valid(np.asarray(obs.restored_map))
+    lo, hi = p._cbar.levels()
+    assert lo == pytest.approx(float(valid.min()))
+    assert hi == pytest.approx(float(valid.max()))
+    # difmap's rainbow: dark blue at the bottom, red at the top, cyan
+    # and yellow on the way.
+    lut = COLOR_MAPS["color"]().map([0.0, 0.33, 0.67, 1.0], mode="byte")
+    np.testing.assert_array_equal(
+        lut[:, :3], [[0, 0, 76], [0, 255, 255], [255, 255, 0], [255, 0, 0]])
+
+    def key(k):
+        p.keyPressEvent(QtGui.QKeyEvent(
+            QtCore.QEvent.Type.KeyPress, 0,
+            QtCore.Qt.KeyboardModifier.NoModifier, k))
+
+    key("g")
+    assert p.cmap == "grey"
+    grey = p._cbar.colorMap().map([0.0, 1.0], mode="byte")[:, :3]
+    np.testing.assert_array_equal(grey, [[0, 0, 0], [255, 255, 255]])
+    assert p._cbar.levels() == (lo, hi), "the range is kept"
+    key("g")
+    assert p.cmap == "color"
+    # The log scale stretches whichever map is showing.
+    p.set_scale("log")
+    key("g")
+    assert p.cmap == "grey" and p.scale == "log"
+    p.close()
+    q = MapPlot(obs, quiet=True, cmap="B&W")
+    assert q.cmap == "grey"
+    q.close()
+    with pytest.raises(ValueError, match="colour map"):
+        MapPlot(obs, quiet=True, cmap="jet")
+
+
 def test_mapplot_number_keys_select_the_display(obs):
     from pyqtgraph.Qt import QtCore, QtGui
 

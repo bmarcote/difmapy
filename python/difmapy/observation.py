@@ -110,76 +110,6 @@ def _comp_dict(comp, freepar=0) -> dict:
 
 __all__ = ["Observation", "load", "observe", "uvaver", "chanaver"]
 
-# The parameters every loader takes, documented once: `_load_doc`
-# substitutes them into load(), observe() and the from_* constructors,
-# so that help() on any of them lists everything that can be passed.
-_LOAD_PARAMETERS = """\
-stokes : str | None, default "I"
-    Polarization to select once loaded: "I", "Q", "U", "V", or a
-    recorded one ("RR", "LL", "RL", "LR", "XX", ...). "I" uses difmap's
-    permissive combination (a visibility survives when only one
-    parallel hand is usable); Q/U/V are strict. ``None`` (or "none")
-    loads without a selection, as difmap's `observe` does; `select()`
-    changes it at any time.
-channels : list of (int, int) | None, default None
-    Inclusive, 0-based channel ranges over the global channel axis (all
-    IFs concatenated), e.g. ``[(0, 31), (64, 95)]``, as `select` takes
-    them. With `freqavg`, only these channels go into the averages - the
-    way band edges are dropped - and the selection then covers every
-    averaged channel. ``None``: all channels.
-timeavg : float | str | None, default None
-    Time-average straight after loading (difmap `uvaver`): seconds as a
-    number, or a string with its unit ("10s", "2min"). ``None``: keep
-    the original integrations.
-freqavg : int | "all" | bool | None, default None
-    Average this many adjacent channels into one (`chanaver`); it must
-    divide every IF's number of channels. ``"all"`` or ``True`` averages
-    each IF down to a single channel. ``None``/``False``: no averaging.
-scatter : bool, default False
-    With `timeavg`: derive the output weights from the scatter of the
-    averaged samples instead of summing the input weights.
-wtscale : float, default 1.0
-    Factor applied to the data weights as they are read.
-field : str | int | None, default None
-    Measurement Sets only: the field (name or FIELD_ID) to load. Needed
-    when the MS has several fields; difmapy, like difmap, is
-    single-source.
-data_column : str, default "DATA"
-    Measurement Sets only: the visibility column to read, "DATA" or
-    "CORRECTED_DATA".
-average : float | str | None, default None
-    The older name of `timeavg`, still accepted."""
-
-_LOAD_NOTES = """\
-The work is done in the cheapest order: channels are averaged first,
-then the Stokes selection is made, then the time averaging. Averaged
-data can no longer be written back into the Measurement Set (see
-`save`), but calibration tables for it still can (`savecaltable`)."""
-
-
-def _load_doc(fn):
-    """Put the shared loader parameters (and notes) into `fn`'s
-    docstring, at the ``{LOAD_PARAMETERS}``/``{LOAD_NOTES}`` lines and
-    at their indentation."""
-    import textwrap
-
-    # UVFITS has no fields or data columns: its block leaves them out.
-    ms_only = _LOAD_PARAMETERS[_LOAD_PARAMETERS.index("field :"):
-                               _LOAD_PARAMETERS.index("average :")]
-    doc = fn.__doc__
-    for key, text in (("{LOAD_PARAMETERS}", _LOAD_PARAMETERS),
-                      ("{LOAD_PARAMETERS_UVFITS}",
-                       _LOAD_PARAMETERS.replace(ms_only, "")),
-                      ("{LOAD_NOTES}", _LOAD_NOTES)):
-        for line in doc.splitlines():
-            if line.strip() == key:
-                indent = line[: len(line) - len(line.lstrip())]
-                doc = doc.replace(line, textwrap.indent(text, indent))
-                break
-    fn.__doc__ = doc
-    return fn
-
-
 class Observation:
     """An in-memory interferometric observation (difmap-style)."""
 
@@ -205,13 +135,21 @@ class Observation:
         self._restore_beam = None
         #: station name -> (rows, pre-ignore FLAG snapshot of those rows)
         self._ignored: dict[str, tuple] = {}
+        #: The FLAG column as the data came in (after any averaging), so
+        #: that the flags added since can be told apart (`wflags`).
+        self._flags_at_load = None
+        #: Width in seconds of the time-averaging bins, if averaged.
+        self._aver_time = None
+        #: After channel averaging: the first and last *original* global
+        #: channel behind each channel, and the original channel counts.
+        self._chan_origin = None
+        self._orig_if_nchan = None
 
     # ------------------------------------------------------------------
     # constructors
     # ------------------------------------------------------------------
 
     @classmethod
-    @_load_doc
     def from_uvfits(cls, path, wtscale=1.0, stokes="I", channels=None,
                     timeavg=None, freqavg=None, scatter=False,
                     average=None) -> "Observation":
@@ -221,7 +159,34 @@ class Observation:
         ----------
         path : str
             The UVFITS file.
-        {LOAD_PARAMETERS_UVFITS}
+        stokes : str | None, default "I"
+            Polarization to select once loaded: "I", "Q", "U", "V", or a
+            recorded one ("RR", "LL", "RL", "LR", "XX", ...). "I" uses difmap's
+            permissive combination (a visibility survives when only one
+            parallel hand is usable); Q/U/V are strict. ``None`` (or "none")
+            loads without a selection, as difmap's `observe` does; `select()`
+            changes it at any time.
+        channels : list of (int, int) | None, default None
+            Inclusive, 0-based channel ranges over the global channel axis (all
+            IFs concatenated), e.g. ``[(0, 31), (64, 95)]``, as `select` takes
+            them. With `freqavg`, only these channels go into the averages - the
+            way band edges are dropped - and the selection then covers every
+            averaged channel. ``None``: all channels.
+        timeavg : float | str | None, default None
+            Time-average straight after loading (difmap `uvaver`): seconds as a
+            number, or a string with its unit ("10s", "2min"). ``None``: keep
+            the original integrations.
+        freqavg : int | "all" | bool | None, default None
+            Average this many adjacent channels into one (`chanaver`); it must
+            divide every IF's number of channels. ``"all"`` or ``True`` averages
+            each IF down to a single channel. ``None``/``False``: no averaging.
+        scatter : bool, default False
+            With `timeavg`: derive the output weights from the scatter of the
+            averaged samples instead of summing the input weights.
+        wtscale : float, default 1.0
+            Factor applied to the data weights as they are read.
+        average : float | str | None, default None
+            The older name of `timeavg`, still accepted.
 
         Returns
         -------
@@ -229,7 +194,11 @@ class Observation:
 
         Notes
         -----
-        {LOAD_NOTES}
+        The work is done in the cheapest order: channels are averaged first,
+        then the Stokes selection is made, then the time averaging. Averaged
+        data from a Measurement Set still go back to one: `save` writes a new
+        MS with the averaged rows, `save_flags` flags every original sample
+        behind a flagged averaged one, and `savecaltable` works as usual.
         """
         from difmapy.io.uvfits import load_uvfits
 
@@ -237,7 +206,6 @@ class Observation:
             stokes, channels, timeavg, freqavg, scatter, average)
 
     @classmethod
-    @_load_doc
     def from_ms(cls, path, stokes="I", channels=None, timeavg=None,
                 freqavg=None, scatter=False, average=None, wtscale=1.0,
                 field=None, data_column="DATA") -> "Observation":
@@ -247,7 +215,41 @@ class Observation:
         ----------
         path : str
             The Measurement Set directory.
-        {LOAD_PARAMETERS}
+        stokes : str | None, default "I"
+            Polarization to select once loaded: "I", "Q", "U", "V", or a
+            recorded one ("RR", "LL", "RL", "LR", "XX", ...). "I" uses difmap's
+            permissive combination (a visibility survives when only one
+            parallel hand is usable); Q/U/V are strict. ``None`` (or "none")
+            loads without a selection, as difmap's `observe` does; `select()`
+            changes it at any time.
+        channels : list of (int, int) | None, default None
+            Inclusive, 0-based channel ranges over the global channel axis (all
+            IFs concatenated), e.g. ``[(0, 31), (64, 95)]``, as `select` takes
+            them. With `freqavg`, only these channels go into the averages - the
+            way band edges are dropped - and the selection then covers every
+            averaged channel. ``None``: all channels.
+        timeavg : float | str | None, default None
+            Time-average straight after loading (difmap `uvaver`): seconds as a
+            number, or a string with its unit ("10s", "2min"). ``None``: keep
+            the original integrations.
+        freqavg : int | "all" | bool | None, default None
+            Average this many adjacent channels into one (`chanaver`); it must
+            divide every IF's number of channels. ``"all"`` or ``True`` averages
+            each IF down to a single channel. ``None``/``False``: no averaging.
+        scatter : bool, default False
+            With `timeavg`: derive the output weights from the scatter of the
+            averaged samples instead of summing the input weights.
+        wtscale : float, default 1.0
+            Factor applied to the data weights as they are read.
+        field : str | int | None, default None
+            Measurement Sets only: the field (name or FIELD_ID) to load. Needed
+            when the MS has several fields; difmapy, like difmap, is
+            single-source.
+        data_column : str, default "DATA"
+            Measurement Sets only: the visibility column to read, "DATA" or
+            "CORRECTED_DATA".
+        average : float | str | None, default None
+            The older name of `timeavg`, still accepted.
 
         Returns
         -------
@@ -255,7 +257,11 @@ class Observation:
 
         Notes
         -----
-        {LOAD_NOTES}
+        The work is done in the cheapest order: channels are averaged first,
+        then the Stokes selection is made, then the time averaging. Averaged
+        data from a Measurement Set still go back to one: `save` writes a new
+        MS with the averaged rows, `save_flags` flags every original sample
+        behind a flagged averaged one, and `savecaltable` works as usual.
         Autocorrelations are dropped, as difmap uses cross-correlations
         only.
         """
@@ -282,7 +288,9 @@ class Observation:
                                channels=channels)
             channels = None
         obs._initial_select(stokes, channels)
-        return obs._averaged(timeavg, scatter)
+        obs = obs._averaged(timeavg, scatter)
+        obs._flags_at_load = np.array(obs.flags, copy=True)
+        return obs
 
     def _averaged(self, average, scatter=False):
         """This observation time-averaged by `uvaver`, or itself when
@@ -1476,15 +1484,23 @@ class Observation:
             Derive the output weights from the scatter of the averaged
             samples instead of summing the input weights.
 
+        Returns
+        -------
+        Observation
+            A new observation; this one is left as it is.
+
+        Notes
+        -----
         The gains, baseline corrections and any shift are applied before
         averaging, and the new observation starts uncalibrated, with this
         one's selection, imaging setup and windows.
         """
         from difmapy.average import uvaver
 
-        return self._derived(
-            uvaver(self._core, parse_time(aver_time, "s"), bool(doscatter))
-        )
+        secs = parse_time(aver_time, "s")
+        new = self._derived(uvaver(self._core, secs, bool(doscatter)))
+        new._aver_time = float(secs)
+        return new
 
     def chanaver(self, nchan=None, channels=None):
         """Return a new observation with every `nchan` adjacent channels
@@ -1500,6 +1516,13 @@ class Observation:
             Inclusive global channel ranges, as for `select`, to average
             only those - the way band edges are left out. ``None``: all.
 
+        Returns
+        -------
+        Observation
+            A new observation; this one is left as it is.
+
+        Notes
+        -----
         As with `uvaver`, the calibrated data are averaged and the new
         observation starts uncalibrated; the channel selection is reset
         to all (averaged) channels, keeping the Stokes selection.
@@ -1516,11 +1539,13 @@ class Observation:
         and provenance.
 
         The rows (time averaging) or channels (frequency averaging) no
-        longer map onto the source file's, so the data cannot be written
-        back to a Measurement Set; `_from_ms` remembers where it came
-        from to say so. The calibration provenance (`_cal_origin`) still
-        holds, since calibration tables refer to antennas, IFs and times
-        rather than rows.
+        longer map one-to-one onto the source file's, so `_ms_origin` is
+        not carried over. What is: the calibration provenance
+        (`_cal_origin`: antennas, IFs, field - enough for calibration
+        tables and for `save` to build a new MS), and the trace of which
+        MS rows and channels each averaged sample came from
+        (`_ms_avg_origin`, see `_trace_averaging`), which `save_flags`
+        uses.
         """
         new = Observation(core)
         origin = getattr(self._core, "_ms_origin", None)
@@ -1528,6 +1553,29 @@ class Observation:
         cal_origin = getattr(self._core, "_cal_origin", None)
         if cal_origin is not None:
             core._cal_origin = cal_origin
+        # What flag export needs to refer back to the data as loaded:
+        # the time bins and the original channels behind each channel.
+        new._aver_time = self._aver_time
+        new._chan_origin = self._chan_origin
+        new._orig_if_nchan = self._orig_if_nchan
+        step = getattr(core, "_avg_chan_map", None)
+        if step is not None:
+            step = np.asarray(step)
+            prev = self._chan_origin
+            if prev is None:
+                idx = np.arange(self._core.nctotal)
+                prev = np.column_stack([idx, idx])
+                new._orig_if_nchan = list(self.nchan)
+            origin = np.zeros((core.nctotal, 2), dtype=np.int64)
+            for k in range(core.nctotal):
+                src = np.nonzero(step == k)[0]
+                if src.size:
+                    origin[k] = (prev[src[0], 0], prev[src[-1], 1])
+            new._chan_origin = origin
+        self._trace_averaging(core)
+        # Flags set before this averaging are folded into the averaged
+        # data; from here on, "new" flags are counted from this state.
+        new._flags_at_load = np.array(core.flags(), copy=True)
         # Carry over the imaging setup and selection.
         new._nx, new._ny = self._nx, self._ny
         new._xinc, new._yinc = self._xinc, self._yinc
@@ -1546,6 +1594,39 @@ class Observation:
             pass
         return new
 
+    def _trace_averaging(self, core):
+        """Record, on an averaged `core`, which rows and channels of the
+        Measurement Set each of its samples was made from.
+
+        `uvaver`/`chanaver` leave the map of their own step on the new
+        core; this composes it with the map so far (the identity for
+        data straight from the MS), so that any chain of averagings can
+        be traced back - which is what lets `save_flags` put a flag set
+        on an averaged sample onto every original sample behind it.
+        """
+        row_step = core.__dict__.pop("_avg_row_map", None)
+        chan_step = core.__dict__.pop("_avg_chan_map", None)
+        prev = getattr(self._core, "_ms_avg_origin", None)
+        if prev is None:
+            origin = getattr(self._core, "_ms_origin", None)
+            if origin is None:
+                return
+            prev = {
+                "path": origin["path"],
+                "ms_row": origin["ms_row"],
+                "if_nchan": list(origin["if_nchan"]),
+                "row_map": np.arange(self._core.nrow, dtype=np.int64),
+                "chan_map": np.arange(self._core.nctotal, dtype=np.int64),
+            }
+        new = dict(prev)
+        if row_step is not None:
+            new["row_map"] = np.asarray(row_step)[prev["row_map"]]
+        if chan_step is not None:
+            cm = prev["chan_map"]
+            new["chan_map"] = np.where(
+                cm >= 0, np.asarray(chan_step)[np.maximum(cm, 0)], -1)
+        core._ms_avg_origin = new
+
     def copy(self) -> "Observation":
         """An independent copy of this observation: data, flags, gains,
         model, selection, map and every imaging setting. Changing one
@@ -1554,8 +1635,12 @@ class Observation:
         import copy as _copy
 
         new = Observation.__new__(Observation)
-        state = {k: v for k, v in self.__dict__.items() if k != "_core"}
+        # The load-time flags are never modified, so they are shared
+        # rather than copied (they are as big as the FLAG column).
+        shared = ("_core", "_flags_at_load")
+        state = {k: v for k, v in self.__dict__.items() if k not in shared}
         new.__dict__.update(_copy.deepcopy(state))
+        new._flags_at_load = self._flags_at_load
         new._core = self._core.copy()
         # Provenance attached from Python (_ms_origin, _cal_origin); it
         # describes the source file and is never modified, so it can be
@@ -1866,12 +1951,86 @@ class Observation:
         out["path"] = [info["path"] for info in infos.values()]
         return out
 
-    def save_flags(self, path=None, flag_row=True):
-        """Write the FLAG column back to the source Measurement Set.
+    def flag_commands(self) -> dict:
+        """The flags added in this session as a compact list of
+        selections (station or baseline, IFs, channels, time range,
+        polarizations); see `difmapy.io.flags.flag_entries`."""
+        from difmapy.io.flags import flag_entries
 
-        This is the standard MS way of persisting flags: only FLAG (and
-        FLAG_ROW) are modified, leaving data and weights untouched.
-        Requires that the observation was loaded from an MS.
+        return flag_entries(self)
+
+    def wflags(self, path, outformat=None, uvfits=None, quiet=False):
+        """Write the flags added in this session as a flag table that
+        AIPS or CASA can apply - to the data that were loaded or to
+        other data of the same observation.
+
+        `outformat` is ``"AIPS"`` - an FG table in a TASAV FITS file
+        (FITLD it, TACOP ``INEXT 'FG'`` onto the UV data) - or
+        ``"CASA"`` - a flag-command list for
+        ``flagdata(vis, mode='list', inpfile=path)`` - or ``"both"``;
+        by default the one native to the data, as for `savecaltable`.
+        With both, `path` is the CASA list and the FG file is
+        ``<path>.FG.TASAV.FITS`` (or the other way round for a `path`
+        ending in ``.fits``). `uvfits` is the UV file an FG table is
+        numbered for (default: the one loaded).
+
+        Only flags set since loading are written (those already in the
+        file are not repeated), as selections of a station or baseline,
+        IFs, channels and a time range. After averaging on load a time
+        range is the whole averaging bin and the channels are the
+        original ones, so every sample behind a flagged average is
+        covered. Samples *un*flagged in the session cannot be expressed
+        in such a list; `save_flags` writes the exact flag state into a
+        Measurement Set instead.
+
+        Returns the writer's summary (`path`, `nrows`, `nsamples`,
+        `format`), one per format under ``"casa"``/``"aips"`` if both.
+        """
+        from difmapy.io.aips import save_fgtable
+        from difmapy.io.flags import flag_entries, save_flagcmds
+
+        formats = self.caltable_formats(outformat, uvfits=uvfits)
+        path = os.fspath(path)
+        if len(formats) == 1:
+            paths = {formats[0]: path}
+        elif path.lower().endswith(".fits"):
+            base = path[:-5]
+            for tail in (".tasav", ".fg"):
+                if base.lower().endswith(tail):
+                    base = base[: -len(tail)]
+            paths = {"casa": base, "aips": path}
+        else:
+            paths = {"casa": path, "aips": f"{path}.FG.TASAV.FITS"}
+        entries = flag_entries(self)
+        infos = {}
+        for fmt in formats:
+            if fmt == "casa":
+                info = save_flagcmds(self, paths[fmt], entries)
+            else:
+                info = save_fgtable(self, paths[fmt], entries, uvfits=uvfits)
+            info.update(format=fmt, nsamples=entries["nsamples"])
+            infos[fmt] = info
+            if not quiet:
+                kind = ("CASA flag commands" if fmt == "casa"
+                        else "AIPS FG table (TASAV)")
+                print(f"Wrote {kind} {info['path']}: {info['nrows']} "
+                      f"entries for {entries['nsamples']} flagged samples")
+        return next(iter(infos.values())) if len(infos) == 1 else infos
+
+    def save_flags(self, path=None, flag_row=True):
+        """Write the flags back into the Measurement Set the data came
+        from - the standard MS way of persisting them: only FLAG (and
+        FLAG_ROW) are modified, data and weights are untouched.
+
+        For data as loaded, the FLAG column becomes exactly the current
+        flags. For data averaged in time or frequency (on load or
+        later), a flagged averaged sample flags every sample of the MS
+        that went into it, and unflagged ones are left as the file has
+        them - an average cannot say which of its inputs were good - so
+        flags are only added.
+
+        `path`, if given, must be that same Measurement Set. Returns the
+        number of MS rows written.
         """
         from difmapy.io.ms import save_flags
 
@@ -1927,7 +2086,7 @@ class Observation:
                      block=block)
 
     def mapplot(self, what="map", mapsize=None, cellsize=None, uvweight=None,
-                block=None, scale="linear", **clean_args):
+                block=None, scale="linear", cmap="color", **clean_args):
         """Interactive map display with CLEAN windows, model editing and
         model fitting.
 
@@ -1937,7 +2096,10 @@ class Observation:
         never called, `auto_mapsize()` picks a sensible default.
 
         `scale` is "linear" or "log" for the colour scale, which the
-        "l" key also toggles.
+        "l" key also toggles. `cmap` is "color" (difmap's pseudo-colour
+        table, the default), "grey" (black and white; the "g" key
+        switches between the two) or "viridis". As in difmap, the
+        colours span the displayed map from its minimum to its peak.
 
         The "Weighting" box at the top of the window switches between
         difmap's own `uvweight` scheme and robust -2, -1, 0, +1, +2, and
@@ -1948,7 +2110,7 @@ class Observation:
 
         return mapplot(self, what=what, mapsize=mapsize, cellsize=cellsize,
                        uvweight=uvweight, block=block, scale=scale,
-                       **clean_args)
+                       cmap=cmap, **clean_args)
 
     #: `mapplot` under difmap's shorter spelling.
     maplot = mapplot
@@ -2167,25 +2329,30 @@ class Observation:
         a Measurement Set.
 
         `ms` is None to write one when it is possible and say nothing
-        when it is not, False to skip it, True to require it.
+        when it is not, False to skip it, True to require it. Data still
+        row-for-row with the originating MS are written into a copy of
+        it (`save_ms`); averaged data get a new MS built on its
+        structure (`save_averaged_ms`).
         """
         if ms is False:
             return None
-        from difmapy.io.ms import save_ms
+        from difmapy.io.ms import save_averaged_ms, save_ms
 
-        if getattr(self._core, "_ms_origin", None) is None:
+        core = self._core
+        cal = getattr(core, "_cal_origin", None) or {}
+        if getattr(core, "_ms_origin", None) is not None:
+            writer = save_ms
+        elif cal.get("format") == "ms":
+            writer = save_averaged_ms
+        else:
             if ms:
                 raise ValueError(
                     "ms=True, but this observation was not loaded from a "
                     "Measurement Set; only <prefix>.uvf can be written"
                 )
-            if getattr(self, "_from_ms", None):
-                print(f"warning: {prefix}.ms not written: the data were "
-                      f"time-averaged after loading {self._from_ms}, so its "
-                      "rows no longer match")
             return None
         try:
-            return save_ms(self._core, f"{prefix}.ms", overwrite=True)
+            return writer(core, f"{prefix}.ms", overwrite=True)
         except Exception as exc:
             if ms:
                 raise
@@ -2194,27 +2361,128 @@ class Observation:
             print(f"warning: could not write {prefix}.ms: {exc}")
             return None
 
-    def save(self, prefix, ms=None):
-        """Save UV data, model, windows and imaging parameters with a
-        common prefix (difmap save).
+    def _save_caltable(self, prefix, caltable):
+        """The calibration-table part of `save`: the accumulated gains,
+        in the format native to the data (`<prefix>.G` for a Measurement
+        Set, `<prefix>.TASAV.FITS` for UVFITS), when there are any."""
+        if caltable is False:
+            return None
+        if not np.asarray(self._core.gains_used()).any():
+            if caltable:
+                raise ValueError("caltable=True, but no calibration has "
+                                 "been applied in this session")
+            return None
+        fmt = self.caltable_formats()[0]
+        path = f"{prefix}.G" if fmt == "casa" else f"{prefix}.TASAV.FITS"
+        try:
+            return self.savecaltable(path, outformat=fmt, quiet=True)["path"]
+        except Exception as exc:
+            if caltable:
+                raise
+            print(f"warning: could not write {path}: {exc}")
+            return None
 
-        Writes ``<prefix>.uvf`` (UV data), ``.mod`` (model), ``.win``
-        (CLEAN windows) and ``.par.json`` (the imaging parameters), all
-        of which `get()` reads back.
+    def _save_flagtable(self, prefix, flags):
+        """The flag part of `save`: the flags added in the session, in
+        the format native to the data (`<prefix>.flagcmd` for a
+        Measurement Set, `<prefix>.FG.TASAV.FITS` for UVFITS), when
+        there are any."""
+        if flags is False:
+            return None
+        from difmapy.io.flags import flag_entries
 
-        An observation loaded from a Measurement Set also gets a
-        ``<prefix>.ms``, so a session that started from CASA can go back
-        to it: the originating MS is copied and the calibrated
-        visibilities and current flags written into the copy (see
-        `difmapy.io.ms.save_ms`). Pass ``ms=False`` to skip it, or
-        ``ms=True`` to make its absence an error rather than a warning.
+        fmt = self.caltable_formats()[0]
+        path = (f"{prefix}.flagcmd" if fmt == "casa"
+                else f"{prefix}.FG.TASAV.FITS")
+        try:
+            if not flag_entries(self)["rows"]:
+                if flags:
+                    raise ValueError("flags=True, but no flags have been "
+                                     "added in this session")
+                return None
+            return self.wflags(path, outformat=fmt, quiet=True)["path"]
+        except Exception as exc:
+            if flags:
+                raise
+            print(f"warning: could not write {path}: {exc}")
+            return None
+
+    def _save_image(self, prefix, image):
+        """The image part of `save`: the restored (CLEAN) map as
+        ``<prefix>.fits``, when there is a model to restore."""
+        if image is False:
+            return None
+        if not self.model:
+            if image:
+                raise ValueError("image=True, but there is no model to "
+                                 "restore an image from")
+            return None
+        try:
+            self.wmap(f"{prefix}.fits")
+            return f"{prefix}.fits"
+        except Exception as exc:
+            if image:
+                raise
+            print(f"warning: could not write {prefix}.fits: {exc}")
+            return None
+
+    def save(self, prefix, ms=None, caltable=None, image=None, flags=None,
+             quiet=False):
+        """Save the whole session with a common prefix (difmap save).
+
+        Always written, and read back by `get()`: ``<prefix>.uvf`` (the
+        calibrated UV data), ``.mod`` (model), ``.win`` (CLEAN windows)
+        and ``.par.json`` (the imaging parameters).
+
+        Written when there is something to write:
+
+        * ``<prefix>.ms`` - for an observation that came from a
+          Measurement Set, so a session that started from CASA can go
+          back to it. Unaveraged data go into a copy of the originating
+          MS (calibrated visibilities in CORRECTED_DATA, current flags
+          in FLAG). Data averaged in time or frequency, on load or
+          later, get a new MS with the averaged rows and, if channels
+          were averaged, updated spectral windows (see
+          `difmapy.io.ms.save_averaged_ms`).
+        * ``<prefix>.G`` or ``<prefix>.TASAV.FITS`` - the calibration
+          table of the gains accumulated in the session, as
+          `savecaltable` writes it for the data's own format (CASA for a
+          Measurement Set, AIPS for UVFITS), once any self-calibration
+          has been applied.
+        * ``<prefix>.flagcmd`` or ``<prefix>.FG.TASAV.FITS`` - the
+          flags added in the session, as `wflags` writes them for the
+          data's own format (a CASA flag-command list for a Measurement
+          Set, an AIPS FG table for UVFITS), once any have been.
+        * ``<prefix>.fits`` - the restored CLEAN map (`wmap`), once
+          there is a model; it is restored with the current beam if it
+          has not been yet.
+
+        Parameters
+        ----------
+        prefix : str
+            Common path prefix of every file.
+        ms, caltable, image, flags : bool | None, default None
+            ``None`` writes that file when it applies, and only warns if
+            it then cannot be written; ``False`` skips it; ``True``
+            makes its absence an error.
+        quiet : bool, default False
+            Do not print the list of files written.
+
+        Returns
+        -------
+        dict
+            The files written, by kind (``"uvf"``, ``"ms"``, ``"mod"``,
+            ``"win"``, ``"par"``, ``"caltable"``, ``"flags"``,
+            ``"image"``).
         """
         import json
 
-        self.wobs(f"{prefix}.uvf")
-        self._save_ms(prefix, ms)
+        files = {"uvf": f"{prefix}.uvf"}
+        self.wobs(files["uvf"])
+        files["ms"] = self._save_ms(prefix, ms)
         self.wmodel(f"{prefix}.mod")
         self.wwins(f"{prefix}.win")
+        files.update(mod=f"{prefix}.mod", win=f"{prefix}.win")
         sel = None
         try:
             s = self._core.selection()
@@ -2234,6 +2502,14 @@ class Observation:
         }
         with open(f"{prefix}.par.json", "w") as f:
             json.dump(pars, f, indent=1)
+        files["par"] = f"{prefix}.par.json"
+        files["caltable"] = self._save_caltable(prefix, caltable)
+        files["flags"] = self._save_flagtable(prefix, flags)
+        files["image"] = self._save_image(prefix, image)
+        files = {k: v for k, v in files.items() if v}
+        if not quiet:
+            print("Saved " + ", ".join(files.values()))
+        return files
 
     @classmethod
     def get(cls, prefix) -> "Observation":
@@ -2284,7 +2560,6 @@ class Observation:
         return self
 
 
-@_load_doc
 def load(path, stokes="I", channels=None, timeavg=None, freqavg=None,
          scatter=False, wtscale=1.0, field=None, data_column="DATA",
          average=None) -> Observation:
@@ -2299,7 +2574,41 @@ def load(path, stokes="I", channels=None, timeavg=None, freqavg=None,
         A random-groups UVFITS file, or a Measurement Set directory
         (read with casatools); a directory is taken to be an MS. Both
         must hold a single source.
-    {LOAD_PARAMETERS}
+    stokes : str | None, default "I"
+        Polarization to select once loaded: "I", "Q", "U", "V", or a
+        recorded one ("RR", "LL", "RL", "LR", "XX", ...). "I" uses difmap's
+        permissive combination (a visibility survives when only one
+        parallel hand is usable); Q/U/V are strict. ``None`` (or "none")
+        loads without a selection, as difmap's `observe` does; `select()`
+        changes it at any time.
+    channels : list of (int, int) | None, default None
+        Inclusive, 0-based channel ranges over the global channel axis (all
+        IFs concatenated), e.g. ``[(0, 31), (64, 95)]``, as `select` takes
+        them. With `freqavg`, only these channels go into the averages - the
+        way band edges are dropped - and the selection then covers every
+        averaged channel. ``None``: all channels.
+    timeavg : float | str | None, default None
+        Time-average straight after loading (difmap `uvaver`): seconds as a
+        number, or a string with its unit ("10s", "2min"). ``None``: keep
+        the original integrations.
+    freqavg : int | "all" | bool | None, default None
+        Average this many adjacent channels into one (`chanaver`); it must
+        divide every IF's number of channels. ``"all"`` or ``True`` averages
+        each IF down to a single channel. ``None``/``False``: no averaging.
+    scatter : bool, default False
+        With `timeavg`: derive the output weights from the scatter of the
+        averaged samples instead of summing the input weights.
+    wtscale : float, default 1.0
+        Factor applied to the data weights as they are read.
+    field : str | int | None, default None
+        Measurement Sets only: the field (name or FIELD_ID) to load. Needed
+        when the MS has several fields; difmapy, like difmap, is
+        single-source.
+    data_column : str, default "DATA"
+        Measurement Sets only: the visibility column to read, "DATA" or
+        "CORRECTED_DATA".
+    average : float | str | None, default None
+        The older name of `timeavg`, still accepted.
 
     Returns
     -------
@@ -2307,7 +2616,11 @@ def load(path, stokes="I", channels=None, timeavg=None, freqavg=None,
 
     Notes
     -----
-    {LOAD_NOTES}
+    The work is done in the cheapest order: channels are averaged first,
+    then the Stokes selection is made, then the time averaging. Averaged
+    data from a Measurement Set still go back to one: `save` writes a new
+    MS with the averaged rows, `save_flags` flags every original sample
+    behind a flagged averaged one, and `savecaltable` works as usual.
 
     Examples
     --------

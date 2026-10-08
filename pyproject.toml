@@ -49,6 +49,7 @@ dev = ["pytest>=7", "maturin>=1.7"]
 
 [project.urls]
 Homepage = "https://github.com/bmarcote/difmapy"
+Documentation = "https://bmarcote.github.io/difmapy/"
 Repository = "https://github.com/bmarcote/difmapy"
 Issues = "https://github.com/bmarcote/difmapy/issues"
 

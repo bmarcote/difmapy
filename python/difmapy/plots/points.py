@@ -341,8 +341,6 @@ class VPlot(_VisPlot):
                     row, key, group=i, label=label,
                     ylabel=f"{label}<br>{self.QUANTITIES[key]}",
                 )
-                if key == "amp":
-                    panel.plot.setLabel("right", "")
                 install_time_axis(panel.plot, self.gaps)
         self._share_x_axis()
         if self._panels:

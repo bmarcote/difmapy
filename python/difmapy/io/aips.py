@@ -44,7 +44,7 @@ import numpy as np
 from astropy.io import fits
 from astropy.time import Time
 
-__all__ = ["save_sntable"]
+__all__ = ["save_sntable", "save_fgtable"]
 
 #: SN table revision written by AIPS 31DEC24 (with the dispersive-delay
 #: columns DISP/DDISP).
@@ -313,6 +313,129 @@ def _sn_table(sol, ant_ref, nif, npol_sn, ref_jd, flag_uncalibrated,
     return sn
 
 
+def _tasav_frame(core, uvfits, nif, what):
+    """The part of a TASAV file every table shares: the dummy
+    visibility and the FQ and AN tables of the UV data it is for (the
+    file the observation was loaded from, `uvfits`, or - for data with
+    no UVFITS file behind them - tables synthesised from the
+    observation).
+
+    Returns ``(hdus, ant_ref, ref_jd, target)``: the HDUs so far, the
+    (subarray, AIPS station number) of each difmapy antenna entry, the
+    JD that AIPS times are counted from, and the target file used.
+    """
+    origin = getattr(core, "_cal_origin", None) or {}
+    nant = len(core.antenna_names)
+    target = uvfits
+    if target is None and origin.get("format") == "uvfits" and \
+            os.path.isfile(origin.get("path", "")):
+        target = origin["path"]
+
+    if target is not None:
+        an_tables, fq, ref_jd, axes, keep = _target_tables(target)
+        ant_ref = _match_antennas(core, an_tables)
+        no_if = fq.header.get("NO_IF") if fq is not None else None
+        if no_if is None and fq is not None:
+            no_if = np.atleast_1d(fq.data["IF FREQ"][0]).size
+        if no_if is not None and int(no_if) != nif:
+            raise ValueError(
+                f"{target} has {no_if} IFs but the observation has {nif}; "
+                f"{what} must refer to the IFs of the data it is applied to"
+            )
+    else:
+        numbers = origin.get("ant_numbers")
+        if not numbers or len(numbers) != nant:
+            # Number each subarray's antennas from 1, as wobs() does.
+            numbers, seen = [], {}
+            for s in core.antenna_subarrays:
+                seen[s] = seen.get(s, 0) + 1
+                numbers.append(seen[s])
+        an_tables, fq, ref_jd = _synthesised_tables(core, numbers)
+        ant_ref = [(int(s) + 1, int(n))
+                   for s, n in zip(core.antenna_subarrays, numbers)]
+        axes = _synthesised_axes(core)
+        keep = {"OBJECT": core.source_name, "EQUINOX": 2000.0}
+
+    date_obs = Time(ref_jd, format="jd", scale="utc").strftime("%Y-%m-%d")
+    hdus = [_dummy_groups(axes, ref_jd, keep, date_obs)]
+    if fq is not None:
+        hdus.append(fq)
+    hdus.extend(an_tables)
+    return hdus, ant_ref, ref_jd, target
+
+
+def save_fgtable(obs, path, entries, uvfits=None, overwrite=True,
+                 reason="difmapy", fgver=1):
+    """Write flags as an AIPS FG table in a TASAV FITS file.
+
+    `entries` are the flag entries of `difmapy.io.flags.flag_entries`.
+    The file is laid out like the SN one (`save_sntable`), and used the
+    same way: FITLD it, TACOP ``INEXT 'FG'`` onto the UV data, and the
+    flags apply wherever ``FLAGVER`` selects that table. The FG columns
+    are those AIPS 31DEC24's UVFLG writes; antennas are AIPS station
+    numbers and times days from the reference date of the target UV
+    file, exactly as for the SN table.
+
+    Returns a summary dict (`path`, `nrows`, `target`).
+    """
+    core = obs._core
+    hdus, ant_ref, ref_jd, target = _tasav_frame(
+        core, uvfits, entries["nif"], "an FG table")
+    rows = entries["rows"]
+    n = len(rows)
+    day0 = core.ref_mjd + 2400000.5 - ref_jd
+    # Which PFLAGS bit each recorded polarization is: the position on
+    # the FITS STOKES axis (RR, LL, RL, LR or XX, YY, XY, YX).
+    bit = {c: (abs(c) - 1) % 4 for c in core.pols if c < 0}
+    ants = np.zeros((n, 2), np.int32)
+    sub = np.zeros(n, np.int32)
+    trange = np.zeros((n, 2), np.float32)
+    ifs = np.zeros((n, 2), np.int32)
+    chans = np.zeros((n, 2), np.int32)
+    pflags = np.zeros((n, 4), bool)
+    for k, e in enumerate(rows):
+        s1, n1 = ant_ref[e["ant1"]]
+        n2 = 0 if e["ant2"] is None else ant_ref[e["ant2"]][1]
+        ants[k] = (n1, 0) if n2 == 0 else sorted((n1, n2))
+        sub[k] = s1
+        # float32 days resolve ~0.01 s; round outwards so that an edge
+        # never excludes the sample it was drawn around.
+        t0 = np.float32(day0 + e["t0"] / 86400.0)
+        t1 = np.float32(day0 + e["t1"] / 86400.0)
+        trange[k] = (np.nextafter(t0, np.float32(-np.inf)),
+                     np.nextafter(t1, np.float32(np.inf)))
+        ifs[k] = (e["if0"] + 1, e["if1"] + 1)
+        chans[k] = (1, 0) if e["chans"] is None else (
+            e["chans"][0] + 1, e["chans"][1] + 1)
+        if e["pols"] is None or not bit:
+            pflags[k] = True
+        else:
+            for code, on in zip(core.pols, e["pols"]):
+                if on and code in bit:
+                    pflags[k, bit[code]] = True
+    fg = fits.BinTableHDU.from_columns([
+        fits.Column(name="SOURCE", format="1J", array=np.zeros(n, np.int32)),
+        fits.Column(name="SUBARRAY", format="1J", array=sub),
+        fits.Column(name="FREQ ID", format="1J",
+                    array=np.full(n, -1, np.int32)),
+        fits.Column(name="ANTS", format="2J", array=ants),
+        fits.Column(name="TIME RANGE", format="2E", unit="DAYS",
+                    array=trange),
+        fits.Column(name="IFS", format="2J", array=ifs),
+        fits.Column(name="CHANS", format="2J", array=chans),
+        fits.Column(name="PFLAGS", format="4X", array=pflags),
+        fits.Column(name="REASON", format="24A",
+                    array=np.array([str(reason)[:24]] * n)),
+    ])
+    fg.name = "AIPS FG"
+    fg.header["EXTVER"] = int(fgver)
+    hdus.append(fg)
+    if os.path.exists(path) and not overwrite:
+        raise ValueError(f"{path} exists")
+    fits.HDUList(hdus).writeto(path, overwrite=True)
+    return {"path": path, "nrows": n, "target": target}
+
+
 def save_sntable(obs, path, uvfits=None, flag_uncalibrated=False,
                  overwrite=True, since=None, solutions=None, source_id=0,
                  snver=1):
@@ -353,48 +476,14 @@ def save_sntable(obs, path, uvfits=None, flag_uncalibrated=False,
     core = obs._core
     sol = solutions if solutions is not None else from_gain_table(obs, since)
     ntime, nif, nant = sol.shape
-    origin = getattr(core, "_cal_origin", None) or {}
-    target = uvfits
-    if target is None and origin.get("format") == "uvfits" and \
-            os.path.isfile(origin.get("path", "")):
-        target = origin["path"]
-
-    if target is not None:
-        an_tables, fq, ref_jd, axes, keep = _target_tables(target)
-        ant_ref = _match_antennas(core, an_tables)
-        no_if = fq.header.get("NO_IF") if fq is not None else None
-        if no_if is None and fq is not None:
-            no_if = np.atleast_1d(fq.data["IF FREQ"][0]).size
-        if no_if is not None and int(no_if) != nif:
-            raise ValueError(
-                f"{target} has {no_if} IFs but the observation has {nif}; "
-                "an SN table must have one entry per IF of the data it is "
-                "applied to"
-            )
-    else:
-        numbers = origin.get("ant_numbers")
-        if not numbers or len(numbers) != nant:
-            # Number each subarray's antennas from 1, as wobs() does.
-            numbers, seen = [], {}
-            for s in core.antenna_subarrays:
-                seen[s] = seen.get(s, 0) + 1
-                numbers.append(seen[s])
-        an_tables, fq, ref_jd = _synthesised_tables(core, numbers)
-        ant_ref = [(int(s) + 1, int(n))
-                   for s, n in zip(core.antenna_subarrays, numbers)]
-        axes = _synthesised_axes(core)
-        keep = {"OBJECT": core.source_name, "EQUINOX": 2000.0}
+    hdus, ant_ref, ref_jd, target = _tasav_frame(core, uvfits, nif,
+                                                 "an SN table")
 
     # Both parallel hands get the same gain, as in the CASA table; a
     # single-polarization dataset gets a single-polarization table.
     parallel = [p for p in core.pols if p in (-1, -2, -5, -6)]
     npol_sn = 2 if len(parallel) >= 2 else 1
 
-    date_obs = Time(ref_jd, format="jd", scale="utc").strftime("%Y-%m-%d")
-    hdus = [_dummy_groups(axes, ref_jd, keep, date_obs)]
-    if fq is not None:
-        hdus.append(fq)
-    hdus.extend(an_tables)
     sn = _sn_table(sol, ant_ref, nif, npol_sn, ref_jd, flag_uncalibrated,
                    int(source_id), snver)
     hdus.append(sn)
