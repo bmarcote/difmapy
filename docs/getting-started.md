@@ -9,6 +9,15 @@ the same from the `difmapy` prompt and from a Python script.
 difmapy mysource.uvfits            # or a Measurement Set directory
 ```
 
+or loading the file already within the `difmapy` environment:
+
+```python
+difmapy
+load("mysource.uvfits", timeavg='10s', freqavg='8', select="I")
+# observe() is also and option and will do the same as load()
+```
+
+
 This opens an IPython prompt with the observation loaded as `obs` and
 Difmap-style commands available as bare functions, so `clean(200, 0.03)`
 and `obs.clean(200, 0.03)` are the same thing. Plot windows stay live
@@ -23,8 +32,8 @@ obs = difmapy.load("mysource.uvfits")
 print(obs.header())
 ```
 
-Loading selects total intensity straight away. To choose something
-else, or particular channels:
+Loading selects total intensity straight away, which is the equivalent to "PI" in Difmap.
+To choose something else, or particular channels:
 
 ```python
 obs.select("RR")
