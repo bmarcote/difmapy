@@ -3,11 +3,10 @@
 difmapy is a Python package around a compiled Rust core. Building it
 needs a Rust toolchain; *using* a built wheel does not.
 
-!!! warning "Licence"
+!!! note "Licence"
 
-    difmapy is a close port of Difmap, whose terms must be settled
-    before any public release. Read `NOTICE.md` in the repository before
-    redistributing it.
+    difmapy is licensed under AGPL-3.0-only. Read `LICENSE` before redistributing it; the upstream Difmap sources
+    retain their own terms.
 
 ## From a checkout
 

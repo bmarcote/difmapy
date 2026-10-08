@@ -6,12 +6,11 @@ difmapy is a reimplementation of
 changes is how the data are held, and a number of deliberate choices
 listed here.
 
-!!! warning "Licence"
+!!! note "Licence"
 
-    Difmap's terms forbid redistribution in modified form without its
-    author's permission. difmapy is a close port, so those terms have to
-    be settled before any public release - see `NOTICE.md` in the
-    repository.
+    difmapy is licensed under AGPL-3.0-only. See `NOTICE.md` in the
+    repository for provenance and upstream licensing details. The
+    upstream Difmap source code retains its own terms.
 
 ## What is ported
 

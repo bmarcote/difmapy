@@ -71,11 +71,9 @@ Ubuntu 16.04+ - worth having, since many observatory clusters are old.
 
 ## 3. Publishing to PyPI
 
-> **Settle the licensing question first - see `NOTICE.md`.** difmapy is a
-> close port of Difmap, whose terms forbid redistribution in modified
-> form without the author's permission. Get that permission (and agree
-> attribution) before making a public release, then declare a licence in
-> `pyproject.toml`.
+> difmapy is licensed under AGPL-3.0-only. Review `LICENSE` and
+> `NOTICE.md` before redistributing it; the separately held upstream
+> Difmap source in `difmap-master/` is not relicensed by this project.
 
 The packaging itself is ready: `pyproject.toml` carries the metadata,
 the sdist builds from scratch in ~25 s, and the wheel contains only the
@@ -117,8 +115,8 @@ a wheel, and publishes on a `v*` tag using PyPI **trusted publishing**
 
 ### Before the first release
 
-- [ ] Resolve licensing with the Difmap author/Caltech (`NOTICE.md`),
-      then set `license` and `license-files` in `pyproject.toml`.
+- [x] Set project licensing to AGPL-3.0-only (`LICENSE`, `NOTICE.md`,
+      and `pyproject.toml`).
 - [ ] Set the real repository URL in `pyproject.toml` and `Cargo.toml`
       (they currently point at `github.com/bmarcote/difmapy`).
 - [ ] Keep the version in `pyproject.toml` and `Cargo.toml` in step -

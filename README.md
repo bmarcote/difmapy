@@ -63,9 +63,11 @@ maturin develop --release --extras plot,ms   # Rust core + plots + MS support
 editable install with a copy, and later edits to the checkout would no
 longer take effect.)
 
-See `INSTALL.md` for building redistributable wheels and for publishing
-to PyPI - and read `NOTICE.md` first: difmapy is a close port of Difmap,
-whose licence terms must be settled before any public release.
+difmapy is licensed under the GNU Affero General Public License v3.0
+(AGPL-3.0-only); see `LICENSE`. The AGPL permits commercial use and
+requires source availability under the same license for distributed
+modified versions and qualifying network services. See `INSTALL.md`
+for building redistributable wheels and publishing to PyPI.
 
 ## Usage
 

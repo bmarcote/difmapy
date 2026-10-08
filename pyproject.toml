@@ -12,12 +12,8 @@ authors = [
     { name = "Benito Marcote", email = "marcote@jive.eu" },
 ]
 keywords = ["VLBI", "radio astronomy", "interferometry", "imaging", "difmap"]
-# NOTE: the licence is deliberately not declared yet - difmapy is a close
-# port of Difmap (Caltech), whose terms forbid redistribution in modified
-# form without the author's permission. See NOTICE.md and settle this
-# before any public release, then add e.g.
-#   license = "MIT"
-#   license-files = ["LICENSE", "NOTICE.md"]
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "NOTICE.md"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
