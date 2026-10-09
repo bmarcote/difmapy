@@ -272,6 +272,13 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
   colour scale is a re-positioning of the colour map's stops
   (`log_stretch`), never a transform of the pixel values: the levels and
   the bar axis must stay in Jy/beam, and residual maps have negatives.
+- The printed modelfit report goes through `units.format_value` (error
+  to two significant figures, value to the same decimal place) and
+  `format_flux` (Jy, mJy or µJy, whichever puts the number in 0.1-100).
+  Component headings are bold only on a terminal or in a Jupyter cell
+  (`observation._bold`), so captured or redirected output has no escape
+  codes. "(fixed)" comes from the component's `freepar` bits, not from
+  a NaN error - a fitted parameter can have a NaN error too.
 - `selfcal` reports difmap's `moddif` fit before and after the solution,
   and the residual-map statistics too when a map already exists. The
   extra invert that costs is the one the next `clean` would have done,

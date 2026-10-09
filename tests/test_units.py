@@ -9,7 +9,8 @@ import numpy as np
 import pytest
 
 import difmapy
-from difmapy.units import format_interval, parse_interval, parse_time
+from difmapy.units import (flux_unit, format_flux, format_interval,
+                           format_value, parse_interval, parse_time)
 
 
 @pytest.mark.parametrize(
@@ -64,6 +65,44 @@ def test_format_interval():
     assert format_interval(7200.0, 0) == "every 2 h"
     assert format_interval(0.0, 1) == "per scan"
     assert format_interval(0.0, 3) == "every 3 scans"
+
+
+def test_format_value_rounds_to_the_error():
+    # Two significant figures of the error, the value to match.
+    assert format_value(12.3456, 0.0421, "mas") == "12.346 ± 0.042 mas"
+    assert format_value(-41.27, 3.6, "deg") == "-41.3 ± 3.6 deg"
+    assert format_value(12345.6, 230) == "12346 ± 230"
+    assert format_value(0.7, 0.0996) == "0.700 ± 0.100"
+    assert format_value(-1e-5, 0.02, "mas") == "0.000 ± 0.020 mas"   # no -0.000
+    # No uncertainty: None, or the NaN of a parameter that was not fitted.
+    assert format_value(12.3456, unit="mas") == "12.35 mas"
+    assert format_value(2.0, float("nan"), "mas") == "2 mas"
+    # An error far below the value (noiseless data) or none at all.
+    assert format_value(1.5, 3e-9, "Jy") == "1.5 ± 3e-09 Jy"
+    assert format_value(1.5, 0.0, "Jy") == "1.5 ± 0 Jy"
+
+
+@pytest.mark.parametrize("jy, unit", [
+    (250.0, "Jy"), (99.0, "Jy"), (1.5, "Jy"), (0.1, "Jy"),
+    (0.09, "mJy"), (0.0123, "mJy"), (1.5e-4, "mJy"),
+    (9e-5, "µJy"), (3.2e-5, "µJy"), (3e-9, "µJy"),
+    (-0.004, "mJy"), (0.0, "Jy"), (float("nan"), "Jy"),
+])
+def test_flux_unit_keeps_the_number_between_a_tenth_and_a_hundred(jy, unit):
+    name, size = flux_unit(jy)
+    assert name == unit
+    if 1e-7 <= abs(jy) < 100:
+        assert 0.1 <= abs(jy) / size < 100
+
+
+def test_format_flux():
+    assert format_flux(1.5021, 0.0034) == "1.5021 ± 0.0034 Jy"
+    assert format_flux(0.0123, 0.0004) == "12.30 ± 0.40 mJy"
+    assert format_flux(3.2e-5, 2.1e-6) == "32.0 ± 2.1 µJy"
+    assert format_flux(3.2e-5) == "32 µJy"
+    assert format_flux(-0.004, 0.001) == "-4.0 ± 1.0 mJy"
+    # Consistent with zero: read on the scale of the error.
+    assert format_flux(2e-6, 3e-3) == "0.0 ± 3.0 mJy"
 
 
 # ----------------------------------------------------------------------

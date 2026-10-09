@@ -20,12 +20,14 @@ radians internally.
 from __future__ import annotations
 
 import os
+import sys
 
 import numpy as np
 
 from difmapy._core import CoreObservation
 from difmapy.report import write_json
-from difmapy.units import format_interval, parse_interval, parse_time
+from difmapy.units import (format_flux, format_interval, format_value,
+                           parse_interval, parse_time)
 
 MAS = np.pi / (180.0 * 3600.0 * 1000.0)  # mas -> radians
 DEG = np.pi / 180.0
@@ -89,6 +91,17 @@ def _free_mask(free) -> int:
     if mask & (FREE_BITS["ratio"] | FREE_BITS["phi"]):
         mask |= SHAPE_BITS
     return mask
+
+
+def _bold(text) -> str:
+    """`text` in bold where the output can show it: a terminal or a
+    Jupyter cell, but not a file or a pipe, where the escape codes
+    would be so much noise."""
+    out = sys.stdout
+    tty = out.isatty() and os.environ.get("TERM") != "dumb"
+    if tty or type(out).__module__.startswith("ipykernel"):
+        return f"\033[1m{text}\033[0m"
+    return text
 
 
 def _comp_dict(comp, freepar=0) -> dict:
@@ -1034,18 +1047,42 @@ class Observation:
             f"({res['nvis']} visibilities, {res['nfree']} free parameters)"
         )
         print(f"  fitted {res['ncomp']} of {res['total_ncomp']} components; "
-              f"{res['total_flux']:.5g} Jy in the model")
+              f"{format_flux(res['total_flux'])} in the model")
         for i, (c, e) in enumerate(zip(res["components"], res["errors"])):
-            size = "" if c["major"] <= 0 else (
-                f"  {c['major']:.4g} mas"
-                + ("" if c["ratio"] >= 1.0 else
-                   f" x {c['major'] * c['ratio']:.4g} mas @ {c['phi']:.4g} deg")
-            )
-            print(
-                f"  [{i}] {c['type']:<6} {c['flux']:9.5g} +- {e['flux']:.2g} Jy  "
-                f"at ({c['x']:.4g} +- {e['x']:.2g}, "
-                f"{c['y']:.4g} +- {e['y']:.2g}) mas{size}"
-            )
+            # A parameter the fit did not vary has no uncertainty, and
+            # says so rather than passing for an exact measurement.
+            def fixed(name):
+                return "" if c["freepar"] & FREE_BITS[name] else " (fixed)"
+
+            if c["type"] == "delta":
+                size = "point source"
+            else:
+                size = format_value(c["major"], e["major"], "mas")
+                if c["type"] == "gauss":
+                    size += " FWHM"
+                if c["ratio"] < 1.0 or c["freepar"] & FREE_BITS["ratio"]:
+                    size += (
+                        f", axial ratio {format_value(c['ratio'], e['ratio'])}"
+                        f", PA {format_value(c['phi'], e['phi'], 'deg')}"
+                    )
+                size += fixed("major")
+            lines = [
+                ("Flux density", format_flux(c["flux"], e["flux"]) + fixed("flux")),
+                ("Centroid position",
+                 f"{format_value(c['x'], e['x'], 'mas')} East, "
+                 f"{format_value(c['y'], e['y'], 'mas')} North" + fixed("pos")),
+                ("Size", size),
+            ]
+            if c["freq0"] or c["freepar"] & FREE_BITS["spcind"]:
+                lines.append((
+                    "Spectral index",
+                    format_value(c["spcind"], e["spcind"])
+                    + f" (at {c['freq0'] / 1e9:.6g} GHz)" + fixed("spcind"),
+                ))
+            # i indexes res["components"] and res["errors"].
+            print("\n" + _bold(f"Component {i} ({c['type']}):"))
+            for name, text in lines:
+                print(f"  {name + ':':<18} {text}")
 
     # ------------------------------------------------------------------
     # calibration

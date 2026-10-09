@@ -368,6 +368,52 @@ def test_outfile_creates_missing_directories(obs, tmp_path):
     assert path.exists()
 
 
+def test_modelfit_prints_each_component(obs, capsys):
+    """The report names each fitted component and gives its flux
+    density, position and size on lines of their own, with errors."""
+    obs.addcmp(FLUX, X0_MAS + 0.1, Y0_MAS, type="gauss", major=1.0,
+               free=["flux", "pos"])
+    res = obs.modelfit(niter=5)
+    out = capsys.readouterr().out
+    assert "reduced chi-squared" in out
+    assert "\033" not in out            # captured output is not a terminal
+
+    lines = out.splitlines()
+    at = lines.index("Component 0 (gauss):")
+    assert lines[at - 1] == ""
+    flux, pos, size = lines[at + 1:at + 4]
+    assert flux.startswith("  Flux density:") and pos.startswith("  Centroid position:")
+    assert size.startswith("  Size:")
+    # The values sit in one column.
+    assert len({ln.index(ln.split(":", 1)[1].lstrip()) for ln in (flux, pos, size)}) == 1
+    assert " ± " in flux and flux.endswith(" Jy")
+    assert pos.count(" ± ") == 2 and "mas East, " in pos and pos.endswith("mas North")
+    # The width was not fitted, so it has no error and says why.
+    assert size.endswith("1 mas FWHM (fixed)")
+    assert res["components"][0]["major"] == pytest.approx(1.0)
+
+    assert obs.modelfit(niter=1, quiet=True) and capsys.readouterr().out == ""
+
+
+def test_modelfit_report_is_bold_only_where_it_shows(monkeypatch):
+    import io
+    import sys
+
+    from difmapy.observation import _bold
+
+    class Terminal(io.StringIO):
+        def isatty(self):
+            return True
+
+    monkeypatch.setenv("TERM", "xterm")
+    monkeypatch.setattr(sys, "stdout", io.StringIO())   # a file or a pipe
+    assert _bold("Component 0:") == "Component 0:"
+    monkeypatch.setattr(sys, "stdout", Terminal())
+    assert _bold("Component 0:") == "\033[1mComponent 0:\033[0m"
+    monkeypatch.setenv("TERM", "dumb")
+    assert _bold("Component 0:") == "Component 0:"
+
+
 def test_load_can_average_in_time(uvfits_file):
     """load(average=...) is uvaver straight after loading, and uvaver is
     a function of its own too."""

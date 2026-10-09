@@ -47,6 +47,35 @@ fixed number of steps. The result reports `niter` and `converged`.
     something like the map peak. The reported `errors` are first-order
     estimates from the inverse Hessian and ignore parameter covariances.
 
+## The report
+
+`modelfit` prints the fit statistics and then each fitted component,
+with its 1-sigma errors:
+
+```text
+modelfit: converged after 14 iterations; reduced chi-squared 1.0235 (25918 visibilities, 7 free parameters)
+  fitted 2 of 2 components; 1.514 Jy in the model
+
+Component 0 (gauss):
+  Flux density:      1.5021 ± 0.0034 Jy
+  Centroid position: 2.0031 ± 0.0042 mas East, -1.0012 ± 0.0051 mas North
+  Size:              3.012 ± 0.021 mas FWHM, axial ratio 0.702 ± 0.008, PA 30.14 ± 0.83 deg
+
+Component 1 (delta):
+  Flux density:      12.30 ± 0.40 mJy
+  Centroid position: -8 mas East, 3 mas North (fixed)
+  Size:              point source
+```
+
+The component number is its index in `res["components"]` and
+`res["errors"]`. A flux density is given in whichever of Jy, mJy and µJy
+puts the number between 0.1 and 100; an error is given to two
+significant figures and its value to the same decimal place; and a
+parameter that was not fitted has no error and is marked `(fixed)`. The
+heading is in bold in a terminal or a notebook. `quiet=True` prints
+nothing, and `outfile=` writes the dict `modelfit` returns to a JSON
+file, [as for every command](imaging.md#the-numbers-each-command-returns).
+
 ## The model
 
 What `addcmp`, `clean`, `rmodel` and `modelfit` produce is part of the

@@ -611,6 +611,20 @@ res = obs.modelfit()            # niter=-1: run until it converges
 print(res["rchisq"], res["converged"], obs.model, res["errors"])
 ```
 
+The fit prints its statistics and then each fitted component, numbered
+as in `res["components"]`:
+
+```text
+Component 0 (gauss):
+  Flux density:      1.5021 ± 0.0034 Jy
+  Centroid position: 2.0031 ± 0.0042 mas East, -1.0012 ± 0.0051 mas North
+  Size:              3.012 ± 0.021 mas FWHM, axial ratio 0.702 ± 0.008, PA 30.14 ± 0.83 deg
+```
+
+A flux density is given in whichever of Jy, mJy and µJy puts the number
+between 0.1 and 100, and a parameter that was not fitted is marked
+`(fixed)`.
+
 `niter=-1` (the default) iterates until successive Levenberg-Marquardt
 steps stop improving the reduced chi-squared; pass a positive `niter`
 for a fixed number of steps. With no model at all, `seed_model()` is
