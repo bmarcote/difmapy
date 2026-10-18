@@ -39,6 +39,9 @@ DEG = np.pi / 180.0
 # powers of two are still the fastest to transform.
 DEFAULT_NPIX = 4096
 DEFAULT_OVERSAMPLE = 10
+#: The Briggs robustness values mapplot offers, and for which `save`
+#: writes a restored map each.
+ROBUST_CHOICES = (-2.0, -1.0, 0.0, 1.0, 2.0)
 
 # AIPS/FITS polarization codes, for data whose loader predates
 # CoreObservation.pol_names.
@@ -2446,22 +2449,51 @@ class Observation:
 
     def _save_image(self, prefix, image):
         """The image part of `save`: the restored (CLEAN) map as
-        ``<prefix>.fits``, when there is a model to restore."""
+        ``<prefix>.fits`` with the weighting in use, and one
+        ``<prefix>.robust<R>.fits`` for each robustness in
+        `ROBUST_CHOICES`, when there is a model to restore.
+
+        Returns ``(main path, [per-weighting paths])``.
+        """
         if image is False:
-            return None
+            return None, []
         if not self.model:
             if image:
                 raise ValueError("image=True, but there is no model to "
                                  "restore an image from")
-            return None
+            return None, []
         try:
             self.wmap(f"{prefix}.fits")
-            return f"{prefix}.fits"
+            main = f"{prefix}.fits"
         except Exception as exc:
             if image:
                 raise
             print(f"warning: could not write {prefix}.fits: {exc}")
-            return None
+            return None, []
+        return main, self._save_weighted_images(prefix, image)
+
+    def _save_weighted_images(self, prefix, image):
+        """Write the restored map once per robustness in
+        `ROBUST_CHOICES`, each with its own estimated beam. The imaging
+        runs on a copy, so the session's weighting, maps and restoring
+        beam are untouched (re-inverting here would replace the residual
+        map CLEAN left with a freshly gridded one)."""
+        work = self.copy()
+        paths = []
+        for r in ROBUST_CHOICES:
+            path = f"{prefix}.robust{r:+g}.fits"
+            try:
+                work.uvweight(self._binwid, self._errpow, radial=self._dorad,
+                              robust=r)
+                work.restore()
+                work._write_fits_image(path, work._restored, "JY/BEAM",
+                                       beam=work._restore_beam)
+                paths.append(path)
+            except Exception as exc:
+                if image:
+                    raise
+                print(f"warning: could not write {path}: {exc}")
+        return paths
 
     def save(self, prefix, ms=None, caltable=None, image=None, flags=None,
              quiet=False):
@@ -2493,6 +2525,11 @@ class Observation:
         * ``<prefix>.fits`` - the restored CLEAN map (`wmap`), once
           there is a model; it is restored with the current beam if it
           has not been yet.
+        * ``<prefix>.robust-2.fits`` ... ``<prefix>.robust+2.fits`` -
+          the restored map once for each robustness mapplot offers
+          (-2, -1, 0, +1, +2), each with that weighting's own estimated
+          beam, written alongside ``<prefix>.fits``. They are imaged on
+          a copy, so the session's weighting and maps are untouched.
 
         Parameters
         ----------
@@ -2510,7 +2547,8 @@ class Observation:
         dict
             The files written, by kind (``"uvf"``, ``"ms"``, ``"mod"``,
             ``"win"``, ``"par"``, ``"caltable"``, ``"flags"``,
-            ``"image"``).
+            ``"image"``, and ``"images"``, the list of per-weighting
+            maps).
         """
         import json
 
@@ -2542,10 +2580,12 @@ class Observation:
         files["par"] = f"{prefix}.par.json"
         files["caltable"] = self._save_caltable(prefix, caltable)
         files["flags"] = self._save_flagtable(prefix, flags)
-        files["image"] = self._save_image(prefix, image)
+        files["image"], files["images"] = self._save_image(prefix, image)
         files = {k: v for k, v in files.items() if v}
         if not quiet:
-            print("Saved " + ", ".join(files.values()))
+            names = [p for v in files.values()
+                     for p in (v if isinstance(v, list) else [v])]
+            print("Saved " + ", ".join(names))
         return files
 
     @classmethod

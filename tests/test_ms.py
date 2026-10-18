@@ -309,9 +309,38 @@ def test_save_writes_caltable_and_image(uvfits_file, tmp_path):
         assert np.nanmax(h[0].data) == pytest.approx(FLUX, rel=0.05)
     files = obs.save(prefix, quiet=True, caltable=False, image=False)
     assert "caltable" not in files and "image" not in files
+    assert "images" not in files
     # get() still restores the session from the same prefix.
     back = difmapy.Observation.get(prefix)
     assert len(back.model) == len(obs.model)
+
+
+def test_save_writes_an_image_per_weighting(uvfits_file, tmp_path):
+    """Besides the map in the weighting in use, `save` writes one per
+    robustness mapplot offers, and leaves the session as it was."""
+    from astropy.io import fits
+
+    from difmapy.observation import ROBUST_CHOICES
+
+    obs = difmapy.load(uvfits_file)
+    obs.mapsize(NX, CELL)
+    obs.uvweight(2, 0, robust=0.5)
+    obs.clean(100, 0.1, quiet=True)
+    restored = obs.restore().copy()
+    dmap = obs.dmap.copy()
+    prefix = str(tmp_path / "w")
+    files = obs.save(prefix, quiet=True)
+    assert files["images"] == [f"{prefix}.robust{r:+g}.fits"
+                               for r in ROBUST_CHOICES]
+    bmaj = []
+    for path in files["images"]:
+        with fits.open(path) as h:
+            bmaj.append(h[0].header["BMAJ"])
+    # Uniform gives the sharpest beam, natural the broadest.
+    assert bmaj[0] < bmaj[-1]
+    assert obs.robust == 0.5
+    np.testing.assert_array_equal(obs.restored_map, restored)
+    np.testing.assert_array_equal(obs.dmap, dmap)
 
 
 def test_casa_applies_the_flag_commands_like_save_flags(ms_path, tmp_path):

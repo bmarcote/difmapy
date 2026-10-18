@@ -17,13 +17,19 @@ prints) the files it wrote.
 | `mysession.ms` | for data from a Measurement Set | see below |
 | `mysession.G` or `.TASAV.FITS` | once self-calibration has been applied | the [calibration table](caltables.md), in the data's own format |
 | `mysession.flagcmd` or `.FG.TASAV.FITS` | once flags have been added | the [flag table](flagging.md#export-them-as-a-flag-table), in the data's own format |
-| `mysession.fits` | once there is a model | the restored CLEAN map |
+| `mysession.fits` | once there is a model | the restored CLEAN map, in the weighting in use |
+| `mysession.robust-2.fits` ... `.robust+2.fits` | once there is a model | the restored map for each robustness mapplot offers (-2, -1, 0, +1, +2) |
 
 "The data's own format" is CASA for a Measurement Set and AIPS for
 UVFITS.
 
 `ms=`, `caltable=`, `flags=` and `image=` each take `False` to skip that
 file, or `True` to make its absence an error instead of leaving it out.
+
+The per-weighting maps are made on a copy of the session, each restored
+with the beam its own weighting gives, so saving does not change the
+weighting or the maps you are working with. `image=False` skips them
+along with `mysession.fits`.
 
 `get()` restores the UV data, selection, imaging setup, model and
 windows from the first four files.

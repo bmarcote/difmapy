@@ -48,6 +48,7 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
+from difmapy.observation import ROBUST_CHOICES
 from difmapy.plots.base import MODEL_COLOR, PlotWindow, run_if_needed
 from difmapy.plots.contours import contour_levels, contour_segments
 
@@ -249,7 +250,7 @@ class MapPlot(PlotWindow):
             obs.uvweight(robust=float(uvweight))
 
     #: The robustness values offered in the weighting box.
-    ROBUST_CHOICES = (-2.0, -1.0, 0.0, 1.0, 2.0)
+    ROBUST_CHOICES = ROBUST_CHOICES
     _ROBUST_LABELS = {-2.0: "robust -2 (uniform)", 2.0: "robust +2 (natural)"}
 
     @staticmethod

@@ -261,7 +261,8 @@ the list of files:
 | `prefix.ms` | data from a Measurement Set | unaveraged: a copy of the original with `CORRECTED_DATA` and `FLAG` filled in. Averaged: a new MS built on the original's structure and subtables, with the averaged rows (`DATA` as loaded and averaged, `CORRECTED_DATA` calibrated), flags, weights and, after channel averaging, rewritten spectral windows |
 | `prefix.G` or `prefix.TASAV.FITS` | once self-calibration has been applied | the calibration table, in the data's own format (CASA / AIPS) |
 | `prefix.flagcmd` or `prefix.FG.TASAV.FITS` | once flags have been added | the session's flags, in the data's own format (see below) |
-| `prefix.fits` | once there is a model | the restored CLEAN map |
+| `prefix.fits` | once there is a model | the restored CLEAN map, in the weighting in use |
+| `prefix.robust-2.fits` ... `prefix.robust+2.fits` | once there is a model | the restored map for each robustness mapplot offers (-2, -1, 0, +1, +2), each with its own beam |
 
 `ms=`, `caltable=`, `flags=` and `image=` take `False` to skip that file
 or `True` to make its absence an error. The averaged MS drops rows that hold no
