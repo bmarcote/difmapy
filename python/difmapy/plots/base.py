@@ -30,6 +30,8 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+from difmapy.units import FLUX_UNITS
+
 IF_COLORS = [
     (31, 119, 180), (255, 127, 14), (44, 160, 44), (148, 103, 189),
     (140, 86, 75), (227, 119, 194), (127, 127, 127), (188, 189, 34),
@@ -287,6 +289,34 @@ class FastScatter(pg.GraphicsObject):
         f[:, 6:10] = (1.0 / dpr, 1.0 / dpr, 0.0, 1.0)     # scale, rotation, opacity
         p.resetTransform()
         p.drawPixmapFragments(*self._frags.drawargs(), pm)
+
+
+class FluxAxis(pg.AxisItem):
+    """An axis in Jy whose ticks read in Jy, mJy or µJy.
+
+    The unit follows the displayed range - the largest |value| shown
+    lands between 1 and 1000 of it - and changes as the panel is zoomed.
+    Only the tick labels and the unit in the label are rescaled; the
+    data and the view coordinates (which flag boxes are drawn in) stay
+    in Jy. Pass the label text without a unit.
+    """
+
+    def __init__(self, orientation="left", **kwargs):
+        super().__init__(orientation, **kwargs)
+        self.setLabel("Amplitude")
+
+    def setLabel(self, text=None, units=None, unitPrefix=None, **kwargs):
+        # PlotItem.setLabel passes units=None, which would drop the unit.
+        super().setLabel(text, units or "Jy", unitPrefix, **kwargs)
+
+    def updateAutoSIPrefix(self):
+        top = max(abs(self.range[0]), abs(self.range[1])) * self.scale
+        size = 1.0
+        if self.labelUnits == "Jy" and top > 0:
+            size = next((s for _, s in FLUX_UNITS if top >= s), FLUX_UNITS[-1][1])
+        self.autoSIPrefixScale = 1.0 / size
+        self.labelUnitPrefix = {1.0: "", 1e-3: "m", 1e-6: "µ"}[size]
+        self._updateLabel()
 
 
 class SelectViewBox(pg.ViewBox):
@@ -925,7 +955,7 @@ class FlagPlotBase(PlotWindow):
 
     #: (data key, axis label) pairs of the quantities this plot can draw
     QUANTITIES = {
-        "amp": "Amplitude (Jy)",
+        "amp": "Amplitude",  # in Jy, through FluxAxis
         "phase": "Phase (deg)",
     }
 
@@ -992,7 +1022,8 @@ class FlagPlotBase(PlotWindow):
 
     def _add_panel(self, row, key, group=None, label=None, ylabel=None):
         vb = SelectViewBox()
-        plot = self.glw.addPlot(row=row, col=0, viewBox=vb)
+        axes = {"left": FluxAxis()} if key == "amp" else None
+        plot = self.glw.addPlot(row=row, col=0, viewBox=vb, axisItems=axes)
         plot.setLabel("left", ylabel or self.QUANTITIES.get(key, key))
         plot.showGrid(x=True, y=True, alpha=0.15)
         if key == "phase":

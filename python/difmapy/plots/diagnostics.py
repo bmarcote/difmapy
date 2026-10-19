@@ -9,6 +9,7 @@ import pyqtgraph as pg
 from difmapy.plots.base import (
     FLAG_COLOR,
     FastScatter,
+    FluxAxis,
     PlotWindow,
     TimeGaps,
     gradient_colors,
@@ -76,9 +77,11 @@ class _MultiPanel(PlotWindow):
         panel.setYRange(lo - pad, hi + pad, padding=0)
         return (lo - pad, hi + pad)
 
-    def _new_plot(self, row, yrange=None):
-        """Add a panel, recording the y range ``z`` should restore."""
-        p = self.glw.addPlot(row=row, col=0)
+    def _new_plot(self, row, yrange=None, flux=False):
+        """Add a panel, recording the y range ``z`` should restore;
+        `flux` gives it a left axis in Jy/mJy/µJy (`FluxAxis`)."""
+        axes = {"left": FluxAxis()} if flux else None
+        p = self.glw.addPlot(row=row, col=0, axisItems=axes)
         self._plots.append((p, yrange))
         return p
 
@@ -420,8 +423,7 @@ class SpecPlot(PlotWindow):
         x = np.asarray(s["freq"]) / 1e9 if xaxis == "freq" else np.asarray(s["chan"])
         amp = np.asarray(s["amp"])
         phase = np.rad2deg(np.arctan2(np.asarray(s["im"]), np.asarray(s["re"])))
-        pa = self.glw.addPlot(row=0, col=0)
-        pa.setLabel("left", "Amplitude (Jy)")
+        pa = self.glw.addPlot(row=0, col=0, axisItems={"left": FluxAxis()})
         pa.addItem(pg.PlotDataItem(x[good], amp[good],
                                    pen=pg.mkPen(31, 119, 180, width=2),
                                    symbol="o", symbolSize=4))
@@ -515,10 +517,11 @@ class FPlot(_MultiPanel):
             amp = np.asarray(s["amp"])
             phase = np.rad2deg(np.arctan2(np.asarray(s["im"]), np.asarray(s["re"])))
             for j, (key, y, ylab) in enumerate(
-                (("amp", amp, "Amplitude (Jy)"), ("phase", phase, "Phase (deg)"))
+                (("amp", amp, "Amplitude"), ("phase", phase, "Phase (deg)"))
             ):
                 p = self._new_plot(2 * i + j,
-                                   (-180, 180) if key == "phase" else None)
+                                   (-180, 180) if key == "phase" else None,
+                                   flux=(key == "amp"))
                 p.setLabel("left", f"{label}<br>{ylab}")
                 # Amplitudes over a narrow range need several digits;
                 # pyqtgraph drops the tick labels rather than widen the

@@ -1154,6 +1154,25 @@ def test_vplot_first_argument_is_baselines_per_page(obs):
     y.close()
 
 
+def test_amplitude_axes_pick_jy_mjy_or_ujy(obs):
+    """Amplitude ticks read in whichever of Jy/mJy/µJy suits the range
+    shown, while the view (and so flag boxes) stays in Jy."""
+    from difmapy.plots.base import FluxAxis
+
+    v = VPlot(obs, 3)
+    panel = next(p for p in v._panels if p.key == "amp")
+    axis = panel.plot.getAxis("left")
+    assert isinstance(axis, FluxAxis)
+    for (lo, hi), unit, scale in (((0, 2.5), "Jy", 1.0),
+                                  ((0, 0.02), "mJy", 1e3),
+                                  ((0, 5e-4), "µJy", 1e6)):
+        panel.vb.setYRange(lo, hi, padding=0)
+        assert f"Amplitude ({unit})" in axis.labelString()
+        assert axis.autoSIPrefixScale == pytest.approx(scale)
+        assert panel.vb.viewRange()[1] == pytest.approx([lo, hi])
+    v.close()
+
+
 def test_fast_markers_bound_and_draw_every_point(obs):
     from difmapy.plots.base import FastScatter
 
