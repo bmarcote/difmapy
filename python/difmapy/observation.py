@@ -1288,16 +1288,20 @@ class Observation:
         return self._report(res, outfile)
 
     def bayes_gscale(self, models=("clean", "gauss1", "gauss2", "gauss3"),
-                     prior_sigma=0.10, jackknife=True, per_if=True,
-                     float_scale=False, nloop=2, solint=0.0, clean_gain=0.05,
-                     sigma_floor=0.01, timeavg=None, workers=None, apply=True,
+                     prior_sigma=0.10, outlier_sigma=1.0, jackknife=True, per_if=True,
+                     float_scale=False, norm="median", nloop=2, solint=0.0, clean_gain=0.05,
+                     sigma_floor=0.01, model_sigma=None, timeavg=None, workers=None, apply=True,
                      prefix=None, outformat=None, ms=None, uvfits=None,
                      plot=None, quiet=False):
         """Bayesian amplitude calibration of every station: `gscale`
         with each station left out of the source model in turn, several
         source models weighed against each other, and the result shrunk
-        towards the a-priori calibration (`prior_sigma`). Corrections
-        the data do not call for are not applied.
+        towards the a-priori calibration: a station within its a-priori
+        accuracy (`prior_sigma`) is left alone, one clearly off it gets
+        its correction almost in full (`outlier_sigma`). The flux scale of each
+        IF is kept by its median station (``norm="median"``), not by the
+        mean gain as `gscale` does, which one station far off its
+        a-priori calibration drags.
 
         See `difmapy.bayescal` for the method and every parameter. The
         runs are independent and go in parallel threads (`workers`).
@@ -1311,9 +1315,9 @@ class Observation:
         from difmapy.bayescal import bayes_gscale
 
         return bayes_gscale(
-            self, models=models, prior_sigma=prior_sigma, jackknife=jackknife,
-            per_if=per_if, float_scale=float_scale, nloop=nloop, solint=solint,
-            clean_gain=clean_gain, sigma_floor=sigma_floor, timeavg=timeavg,
+            self, models=models, prior_sigma=prior_sigma, outlier_sigma=outlier_sigma, jackknife=jackknife,
+            per_if=per_if, float_scale=float_scale, norm=norm, nloop=nloop, solint=solint,
+            clean_gain=clean_gain, sigma_floor=sigma_floor, model_sigma=model_sigma, timeavg=timeavg,
             workers=workers, apply=apply, prefix=prefix, outformat=outformat,
             ms=ms, uvfits=uvfits, plot=plot, quiet=quiet)
 

@@ -127,7 +127,7 @@ def _draw(res, path, show):
     ax.grid(False, axis="x")
     tau = res.settings["prior_sigma"]
     ax.axhspan(math.exp(-tau), math.exp(tau), color=NEUTRAL, zorder=0,
-               label=f"prior +-1 sigma ({100 * tau:.0f}%)")
+               label=f"a-priori accuracy +-{100 * tau:.0f}% (left alone)")
     ax.axhline(1.0, color=AXIS, linewidth=1, zorder=1)
     for k in range(1, len(idx)):
         ax.axvline(k - 0.5, color=GRID, linewidth=0.8, zorder=0)

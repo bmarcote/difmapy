@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 
 import numpy as np
 import pytest
@@ -21,11 +22,11 @@ def _load(path):
 
 
 def _expected(gerr):
-    """The corrections gscale finds for these gain errors: the inverse
-    amplitudes, normalised to an arithmetic mean of one (difmap's
-    norm_cors, with float_scale=False)."""
+    """The corrections bayes_gscale finds for these gain errors: the
+    inverse amplitudes, with the median station's set to one (its
+    default norm="median")."""
     c = 1.0 / np.array([a for a, _ in gerr])
-    return c / c.mean()
+    return c / np.median(c)
 
 
 def test_recovers_injected_station_gains(corrupted_uvfits_file):
@@ -40,15 +41,19 @@ def test_recovers_injected_station_gains(corrupted_uvfits_file):
                                _expected(gerr), rtol=1e-3)
     # ...the leave-one-out estimates agree with it on a point source...
     np.testing.assert_allclose(r.mean, r.naive, atol=2e-3)
-    # ...and the posterior pulls them towards the prior by
-    # tau^2/(tau^2 + sigma^2); what is applied is that times P(needed).
-    tau2 = 0.10 ** 2
+    # ...what is applied is the estimate under "off" (the wide prior,
+    # outlier_sigma = 1, barely shrinks it) times P(off)...
+    tau1 = 1.0 ** 2
     np.testing.assert_allclose(
         r.applied_log,
-        r.p_correction * r.mean * tau2 / (tau2 + r.sigma ** 2), rtol=1e-9)
+        r.p_correction * r.mean * tau1 / (tau1 + r.sigma ** 2), rtol=1e-9)
     assert (r.sigma < 0.02).all()
-    # Every station is 5-30% off with a ~1% uncertainty: all needed.
-    assert (r.p_correction > 0.99).all()
+    # ...and only a station clearly beyond the 10% a-priori accuracy is
+    # off: AN1 (x1.40 against the median AN4) is corrected, AN2 (x0.95)
+    # and AN4 itself are left alone.
+    p = np.median(r.p_correction, axis=0)
+    assert p[1] > 0.95 and p[2] < 0.25 and p[4] < 0.25
+    np.testing.assert_allclose(np.median(r.factors, axis=0)[[1, 2, 4]], [1.40, 1.0, 1.0], atol=0.02)
     assert r.applied
     # ...and the corrections really are in the data now.
     gains = o.station_gains()
@@ -72,16 +77,17 @@ def test_corrections_are_per_if(per_if_errors):
     o, err = per_if_errors
     r = o.bayes_gscale(models=("point1", "gauss1"), quiet=True, plot=False)
     truth = 1.0 / err
-    truth /= truth.mean(axis=1, keepdims=True)   # gscale's norm, per IF
+    truth /= np.median(truth, axis=1, keepdims=True)   # the median station, per IF
     np.testing.assert_allclose(np.exp(r.naive), truth, rtol=2e-3)
+    np.testing.assert_allclose(np.exp(r.mean), truth, rtol=0.01)
     # Each IF gets its own correction, and is applied as such.
     assert r.factors.shape == err.shape
-    np.testing.assert_allclose(r.factors, truth, rtol=0.01)
-    amp, _ = o._gain_amps(fill=np.nan)
-    np.testing.assert_allclose(np.nanmedian(amp, axis=0), r.factors, rtol=1e-5)
-    # The exact IF is left alone; the rest are needed.
+    amp, _ = o._gain_amps(fill=1.0)          # a correction of exactly one leaves no solution
+    np.testing.assert_allclose(np.median(amp, axis=0), r.factors, rtol=1e-5)
+    # AN1 is 40% off in IF1 and only 20% in IF2: off in the one, not
+    # clearly in the other; the median stations (exact) are left alone.
     p = r.p_correction
-    assert p[1, 2] < 0.75 and np.delete(p.ravel(), 7).min() > 0.99
+    assert p[0, 1] > 0.95 and p[1, 1] < 0.6 and p[0, 4] < 0.25 and p[1, 2] < 0.25
 
     rows = {row["station"]: row for row in r.station_table()}
     per_if = rows["AN0"]["per_if"]
@@ -94,7 +100,58 @@ def test_corrections_are_per_if(per_if_errors):
     assert "IF1" in text and "IF2" in text
     line = next(ln for ln in text.splitlines() if ln.strip().startswith("AN0"))
     assert f"{r.factors[0, 0]:.3f}" in line and f"{r.factors[1, 0]:.3f}" in line
-    assert any("AN0: a correction is needed in IF1" in f for f in r.findings())
+    assert any("AN1: a correction is needed in IF1" in f for f in r.findings())
+
+
+@pytest.fixture()
+def one_station_far_off(uvfits_file):
+    """AN0 a factor 4 low in IF1 only; everything else exact."""
+    err = np.ones((NIF, 5), np.float32)
+    err[0, 0] = 0.25
+    o = _load(uvfits_file)
+    o._core.apply_gain_factors(err)
+    return o.uvaver(60)
+
+
+def test_one_station_far_off_does_not_drag_the_others(one_station_far_off):
+    """The median station holds the flux scale: AN0 gets its x4 and the
+    others nothing; difmap's mean renormalisation (norm="mean") would
+    have scaled every other station of IF1 by 1/1.6, and the findings
+    say so."""
+    r = one_station_far_off.bayes_gscale(models=("point1",), quiet=True, plot=False, apply=False)
+    np.testing.assert_allclose(np.exp(r.naive[0]), [4, 1, 1, 1, 1], rtol=0.01)
+    np.testing.assert_allclose(np.exp(r.naive[1:]), 1.0, rtol=0.01)
+    # It is corrected in full, in the IF it is off in only; nothing else moves.
+    np.testing.assert_allclose(r.factors[0, 0], 4.0, rtol=0.02)
+    np.testing.assert_allclose(np.delete(r.factors.ravel(), 0), 1.0, atol=0.01)
+    assert any(re.match(r"AN0: difmap's gscale gives it x(3\.9\d|4\.0\d) in IF1, .* by x0\.6[23] .*"
+                        r"applied to it: x(3\.9\d|4\.0\d) \(P = 1\.00\)$", f) for f in r.findings())
+
+    mean = one_station_far_off.bayes_gscale(models=("point1",), quiet=True, plot=False, apply=False,
+                                            norm="mean")
+    np.testing.assert_allclose(np.exp(mean.naive[0]), np.array([4, 1, 1, 1, 1]) / 1.6, rtol=0.01)
+    assert not any("mean renormalisation" in f for f in mean.findings())
+    with pytest.raises(ValueError):
+        one_station_far_off.bayes_gscale(models=("point1",), quiet=True, plot=False, norm="mode")
+    with pytest.raises(ValueError):
+        one_station_far_off.bayes_gscale(models=("point1",), quiet=True, plot=False, outlier_sigma=0.05)
+
+
+def test_model_sigma_leaves_an_unconstrained_station_alone(one_station_far_off):
+    """A model uncertainty as large as the offset (what the station's own
+    jackknife would say of one nobody else constrains) undoes the
+    confidence of a fixed-model run: AN0's x4 is mostly left alone, the
+    others are untouched, and a per-IF value of the wrong length is an
+    error."""
+    r = one_station_far_off.bayes_gscale(models=("point1",), quiet=True, plot=False, apply=False,
+                                         model_sigma={"AN0": [2.0, None], "AN9": 0.5})
+    assert r.p_correction[0, 0] < 0.6
+    assert r.factors[0, 0] < 1.3
+    np.testing.assert_allclose(np.delete(r.factors.ravel(), 0), 1.0, atol=0.01)
+    assert r.settings["model_sigma"]["AN0"][0] == 2.0
+    with pytest.raises(ValueError):
+        one_station_far_off.bayes_gscale(models=("point1",), quiet=True, plot=False, apply=False,
+                                         model_sigma={"AN0": [2.0, 2.0, 2.0]})
 
 
 def test_one_correction_for_all_ifs_averages_them(per_if_errors):
