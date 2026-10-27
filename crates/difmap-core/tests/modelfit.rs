@@ -296,3 +296,23 @@ fn variable_components_are_taken_back_out_of_the_established_model() {
     assert!(res.rchisq < 1e-6);
     assert!((comps[0].flux - truth.flux).abs() < 1e-3);
 }
+
+#[test]
+fn fit_is_bit_identical_with_one_or_four_threads() {
+    use rayon::ThreadPoolBuilder;
+    let truth = ModComp::delta(1.7, (2.5 * MAS) as f32, (-1.25 * MAS) as f32);
+    let mut ob = obs_from_model(&[truth]);
+    ob.stream = Some(Stream::select(&ob, Stokes::RR, &[]).unwrap());
+    let start = ModComp {
+        freepar: M_FLUX | M_CENT,
+        x: (1.0 * MAS) as f32,
+        ..ModComp::delta(1.0, 0.0, 0.0)
+    };
+    let run = |threads: usize| {
+        let mut comps = vec![start];
+        let res = ThreadPoolBuilder::new().num_threads(threads).build().unwrap()
+            .install(|| fit_uvmodel(&ob, &mut comps, 40, 0.0, 0.0).expect("fit"));
+        (comps[0].flux, comps[0].x, comps[0].y, res.rchisq)
+    };
+    assert_eq!(run(1), run(4));
+}

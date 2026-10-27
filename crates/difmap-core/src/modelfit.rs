@@ -15,6 +15,12 @@
 
 use crate::model::{besj0, besj1, besj2, CmpType, ModComp};
 use crate::obs::Observation;
+use rayon::prelude::*;
+
+/// Visibilities per partial sum in [`accumulate`]. The chunks, not the
+/// threads, fix the order of the floating-point additions, so the fit is
+/// bit-identical whatever the number of threads.
+const ACCUMULATE_CHUNK: usize = 4096;
 
 /// Free-parameter bits (difmap M_FLUX etc.).
 pub const M_FLUX: u32 = 1;
@@ -494,6 +500,24 @@ impl Trial {
     }
 }
 
+/// One chunk's share of [`accumulate`]: lower triangle of the Hessian
+/// (row-major, `nfree` x `nfree`), gradient and chi-squared.
+struct Partial {
+    hessian: Vec<f64>,
+    cgrad: Vec<f64>,
+    chisq: f64,
+}
+
+impl Partial {
+    fn new(nfree: usize) -> Partial {
+        Partial {
+            hessian: vec![0.0; nfree * nfree],
+            cgrad: vec![0.0; nfree],
+            chisq: 0.0,
+        }
+    }
+}
+
 /// Accumulate chi-squared, the Hessian and the gradient for the
 /// current parameters (the body of lm_getfit()).
 fn accumulate(
@@ -504,29 +528,48 @@ fn accumulate(
     out: &mut Trial,
 ) -> Result<(), FitError> {
     let nfree = out.cgrad.len();
+    // Partial sums over fixed-size chunks of the data, in parallel, then
+    // added in chunk order (see ACCUMULATE_CHUNK).
+    let partials = data
+        .par_chunks(ACCUMULATE_CHUNK)
+        .map(|chunk| -> Result<Partial, FitError> {
+            let mut part = Partial::new(nfree);
+            let mut dre = vec![0.0; nfree];
+            let mut dim = vec![0.0; nfree];
+            for v in chunk {
+                let (mre, mim) = model_and_grad(comps, maps, uvrmax, v, &mut dre, &mut dim)?;
+                // Real and imaginary parts are two independent measurements.
+                for (dy, grad) in [(v.re - mre, &dre), (v.im - mim, &dim)] {
+                    for r in 0..nfree {
+                        let tmp = v.wt * grad[r];
+                        let hrow = &mut part.hessian[r * nfree..r * nfree + r + 1];
+                        for (c, h) in hrow.iter_mut().enumerate() {
+                            *h += tmp * grad[c];
+                        }
+                        part.cgrad[r] += dy * tmp;
+                    }
+                    part.chisq += v.wt * dy * dy;
+                }
+            }
+            Ok(part)
+        })
+        .collect::<Result<Vec<Partial>, FitError>>()?;
     for row in out.hessian.iter_mut() {
         row.fill(0.0);
     }
     out.cgrad.fill(0.0);
     out.chisq = 0.0;
-    out.ndfree = -(nfree as i64);
-    let mut dre = vec![0.0; nfree];
-    let mut dim = vec![0.0; nfree];
-    for v in data {
-        let (mre, mim) = model_and_grad(comps, maps, uvrmax, v, &mut dre, &mut dim)?;
-        // Real and imaginary parts are two independent measurements.
-        for (dy, grad) in [(v.re - mre, &dre), (v.im - mim, &dim)] {
-            out.ndfree += 1;
-            for r in 0..nfree {
-                let tmp = v.wt * grad[r];
-                for c in 0..=r {
-                    out.hessian[r][c] += tmp * grad[c];
-                }
-                out.cgrad[r] += dy * tmp;
+    for part in &partials {
+        for r in 0..nfree {
+            for c in 0..=r {
+                out.hessian[r][c] += part.hessian[r * nfree + c];
             }
-            out.chisq += v.wt * dy * dy;
+            out.cgrad[r] += part.cgrad[r];
         }
+        out.chisq += part.chisq;
     }
+    // Real and imaginary parts of every visibility, less the free parameters.
+    out.ndfree = 2 * data.len() as i64 - nfree as i64;
     // Symmetrize.
     for r in 0..nfree {
         for c in (r + 1)..nfree {

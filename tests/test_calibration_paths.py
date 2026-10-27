@@ -156,6 +156,55 @@ def test_selfcal_reports_the_fit_before_and_after(corrupted_uvfits_file, capsys)
     assert "map_after" not in res and "fit_after" in res
 
 
+def test_selfcal_converge_alternates_with_modelfit(corrupted_uvfits_file, capsys):
+    """converge=True loops selfcal/modelfit until the model-data fit
+    changes by less than the threshold from one selfcal to the next."""
+    from conftest import FLUX, X0_MAS, Y0_MAS
+
+    path, _ = corrupted_uvfits_file
+    o = difmapy.load(path)
+    o.select("I")
+    o.addcmp(0.8 * FLUX, X0_MAS + 0.3, Y0_MAS - 0.2, free=["flux", "pos"])
+    res = o.selfcal(amp=True, phase=True, converge=True)
+
+    out = capsys.readouterr().out
+    assert "iteration 2" in out and "converged after" in out
+    assert res["converged"] and res["niter"] >= 2
+    assert res["niter"] == len(res["history"])
+    assert res["fit_change"] < 0.01
+    first, last = res["history"][0], res["history"][-1]
+    assert first["fit_change"] is None and first["rchisq"] is None
+    sig = [h["fit_after"]["sigma"] for h in res["history"][-2:]]
+    assert res["fit_change"] == pytest.approx(abs(sig[1] - sig[0]) / sig[0])
+    assert last["gain_change"] < first["gain_change"]
+    assert res["modelfit"] is not None
+    assert res["fit_after"]["rms"] < 0.01 * res["fit_before"]["rms"]
+
+    # A hard cap stops it, reporting that it did not converge.
+    o2 = difmapy.load(path)
+    o2.select("I")
+    o2.addcmp(0.8 * FLUX, X0_MAS + 0.3, Y0_MAS - 0.2, free=["flux", "pos"])
+    capped = o2.selfcal(amp=True, phase=True, converge=True,
+                        converge_threshold=1e-12, converge_maxiter=2,
+                        quiet=True)
+    assert not capped["converged"] and capped["niter"] == 2
+    assert capsys.readouterr().out == ""
+    with pytest.raises(ValueError, match="converge_maxiter"):
+        o2.selfcal(converge=True, converge_maxiter=1)
+
+
+def test_selfcal_converge_needs_free_parameters(uvfits_file):
+    from conftest import FLUX, X0_MAS, Y0_MAS
+
+    o = difmapy.load(uvfits_file)
+    o.select("I")
+    with pytest.raises(ValueError, match="free parameters"):
+        o.selfcal(converge=True)
+    o.addcmp(FLUX, X0_MAS, Y0_MAS)          # fixed component only
+    with pytest.raises(ValueError, match="free parameters"):
+        o.selfcal(converge=True)
+
+
 def test_wobs_includes_gains(modelled, tmp_path):
     v1, w1 = modelled._core.stream_vis()
     out = str(tmp_path / "g.uvf")

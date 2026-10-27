@@ -638,7 +638,16 @@ class PlotWindow(QtWidgets.QMainWindow):
         return path
 
     def _repr_png_(self):
-        """Jupyter's rich display of the plot."""
+        """Jupyter's rich display of the plot.
+
+        Only in a Jupyter kernel: recent IPython (9.x, IPython.core.kitty)
+        also renders image/png in a terminal that speaks the kitty
+        graphics protocol (iTerm2, kitty, WezTerm...), which put a picture
+        of every plot a command returned under the prompt, beside the
+        window itself.
+        """
+        if not in_jupyter():
+            return None
         shown = (_cell_number(), getattr(self, "_revision", 0))
         if getattr(self, "_shown_png", None) == shown:
             return None  # already in this cell's output, unchanged

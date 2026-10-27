@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "difmapy"
-version = "0.3.0"
+version = "0.4.0"
 description = "Modern in-memory reimplementation of Difmap for VLBI imaging and self-calibration"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -29,6 +29,9 @@ dependencies = [
     # The `difmapy` command is an IPython session, so this is a hard
     # dependency rather than an extra.
     "ipython>=8.0",
+    # Interactive plots (pyqtgraph on PySide6).
+    "pyqtgraph>=0.13",
+    "PySide6",
 ]
 
 [project.scripts]
@@ -38,9 +41,9 @@ difmapy = "difmapy.cli:main"
 # Measurement Set support. casatools ships wheels only for some
 # platforms/Python versions, which is why it is not a hard dependency.
 ms = ["casatools"]
-# Interactive plots (PySide6 is LGPL, hence optional), and matplotlib
-# for the static report figures (bayes_gscale).
-plot = ["pyqtgraph>=0.13", "PySide6", "matplotlib>=3.7"]
+# matplotlib for the static report figures (bayes_gscale). The
+# interactive plots are a hard dependency.
+plot = ["matplotlib>=3.7"]
 dev = ["pytest>=7", "maturin>=1.7"]
 
 [project.urls]

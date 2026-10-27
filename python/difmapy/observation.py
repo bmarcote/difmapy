@@ -1126,7 +1126,8 @@ class Observation:
     def selfcal(self, amp=False, phase=True, float_scale=False, solint=0.0,
                 gauval=0.0, gaurad=0.0, maxamp=0.0, maxphs=0.0,
                 uvmin=0.0, uvmax=0.0, mintel=0, flag=False,
-                quiet=False, mapstats=None, scangap=None, outfile=None):
+                quiet=False, mapstats=None, scangap=None, outfile=None,
+                converge=False, converge_threshold=0.01, converge_maxiter=20):
         """Self-calibrate against the current model (difmap selfcal).
 
         `solint` is the solution interval: a bare number in minutes
@@ -1151,7 +1152,33 @@ class Observation:
         already exists, which costs nothing in an imaging loop because
         self-cal invalidates the map and the next `clean` would have to
         re-invert anyway.
+
+        With `converge`, self-calibration alternates with `modelfit()`
+        (selfcal, modelfit, selfcal, ...; every selfcal with these same
+        parameters) until the model-data fit stops improving: the
+        relative change of the fit's `sigma` (`moddif()`) after one
+        selfcal and after the next is below `converge_threshold` - 0.01
+        is 1%. sigma rather than rms so that data flagged on the way
+        (`flag=True`) does not count as a change; with the same data the
+        two change alike. At least two and at most `converge_maxiter`
+        selfcals are run. The model needs free parameters
+        (`addcmp(free=...)`, or a previous `modelfit`). The result is the
+        last selfcal's, with `fit_before`/`map_before` from before the
+        first one, plus `converged`, `niter`, the final `fit_change`, the
+        last `modelfit` result and a per-iteration `history`, which also
+        records how much each selfcal moved the gains (`gain_change`,
+        the median of ``|g_new / g_old - 1|`` over the solved complex
+        gains, and its maximum).
         """
+        if converge:
+            return self._selfcal_converge(
+                dict(amp=amp, phase=phase, float_scale=float_scale,
+                     solint=solint, gauval=gauval, gaurad=gaurad,
+                     maxamp=maxamp, maxphs=maxphs, uvmin=uvmin, uvmax=uvmax,
+                     mintel=mintel, flag=flag, scangap=scangap),
+                threshold=converge_threshold, maxiter=converge_maxiter,
+                quiet=quiet, mapstats=mapstats, outfile=outfile,
+            )
         secs, nscan = parse_interval(solint, "min")
         gap = 0.0 if scangap is None else parse_time(scangap, "s")
         if mapstats is None:
@@ -1186,6 +1213,86 @@ class Observation:
             self._print_selfcal(res, amp=amp, phase=phase,
                                 every=format_interval(secs, nscan))
         return self._report(res, outfile)
+
+    def _selfcal_converge(self, pars, threshold, maxiter, quiet, mapstats,
+                          outfile):
+        """selfcal(converge=True): alternate selfcal and modelfit until
+        the gains settle."""
+        if not self.nvariable:
+            raise ValueError(
+                "selfcal(converge=True) alternates with modelfit(), so the "
+                "model needs free parameters: addcmp(free=...) or modelfit() "
+                "first"
+            )
+        if not threshold > 0:
+            raise ValueError(f"converge_threshold must be > 0, not {threshold}")
+        if int(maxiter) < 2:
+            raise ValueError(f"converge_maxiter must be >= 2, not {maxiter}")
+        secs, nscan = parse_interval(pars["solint"], "min")
+        if mapstats is None:
+            mapstats = self._invert_result is not None
+        map_before = self.imstat() if mapstats else None
+        if not quiet:
+            print(f"selfcal: alternating with modelfit until the fit changes "
+                  f"by less than {100 * threshold:.3g}%")
+        history, first, fit, prev = [], None, None, None
+        change = float("nan")
+        for it in range(1, int(maxiter) + 1):
+            if it > 1:
+                fit = self.modelfit(quiet=True)
+            g_old, _ = self._gain_complex()
+            res = self.selfcal(**pars, quiet=True, mapstats=False)
+            first = first or res
+            gain, worst = self._gain_change(g_old)
+            sigma = res["fit_after"]["sigma"]
+            if prev is not None:
+                change = abs(sigma - prev) / prev if prev > 0 else 0.0
+            prev = sigma
+            history.append({
+                "iteration": it, "fit_change": None if it == 1 else change,
+                "gain_change": gain, "max_gain_change": worst,
+                "rchisq": None if fit is None else fit["rchisq"],
+                "fit_after": res["fit_after"],
+            })
+            if not quiet:
+                moved = "" if it == 1 else f" ({100 * change:.3g}% change)"
+                print(f"  iteration {it}: fit rms {res['fit_after']['rms']:.5g} "
+                      f"Jy, sigma {sigma:.5g}{moved}; gains moved "
+                      f"{100 * gain:.3g}% (median; max {100 * worst:.3g}%)")
+            if it > 1 and change < threshold:
+                break
+        res["fit_before"] = first["fit_before"]
+        if mapstats:
+            res["map_before"] = map_before
+            res["map_after"] = self.imstat()
+        res.update(converged=bool(change < threshold), niter=it,
+                   fit_change=change, modelfit=fit, history=history)
+        if not quiet:
+            end = "converged" if res["converged"] else "did not converge"
+            print(f"selfcal: {end} after {it} self-calibrations")
+            self._print_selfcal(res, amp=pars["amp"], phase=pars["phase"],
+                                every=format_interval(secs, nscan))
+        return self._report(res, outfile)
+
+    def _gain_complex(self):
+        """The complex gain table [ntimes, nif, nant], 1 where unsolved,
+        and its "solved" mask."""
+        amp, phs, _ = self._core.gains()
+        shape = (self._core.ntimes, self.nif, len(self.antennas))
+        used = np.asarray(self._core.gains_used()).reshape(shape)
+        g = (np.asarray(amp, dtype=np.float64).reshape(shape)
+             * np.exp(1j * np.asarray(phs, dtype=np.float64).reshape(shape)))
+        return np.where(used, g, 1.0), used
+
+    def _gain_change(self, g_old):
+        """Median and maximum of ``|g_new / g_old - 1|`` over the solved
+        gains; NaN if nothing is solved."""
+        g_new, used = self._gain_complex()
+        ok = used & (np.abs(g_old) > 0) & np.isfinite(g_new) & np.isfinite(g_old)
+        if not ok.any():
+            return float("nan"), float("nan")
+        d = np.abs(g_new[ok] / g_old[ok] - 1.0)
+        return float(np.median(d)), float(d.max())
 
     @staticmethod
     def _print_selfcal(res, amp, phase, every):
@@ -2081,7 +2188,7 @@ class Observation:
         return save_flags(self._core, path=path, flag_row=flag_row)
 
     # ------------------------------------------------------------------
-    # interactive plots (pyqtgraph; require the [plot] extra)
+    # interactive plots (pyqtgraph)
     # ------------------------------------------------------------------
 
     def radplot(self, quantity="ap", colorby="spw", block=None):

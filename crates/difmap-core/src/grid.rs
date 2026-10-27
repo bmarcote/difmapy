@@ -18,6 +18,18 @@ use crate::obs::Observation;
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
 use realfft::RealFftPlanner;
+use rayon::prelude::*;
+
+/// Columns gathered per task in the column FFTs of [`uvtrans`]: enough
+/// to amortise the gather/scatter, few enough to spread over the threads.
+const COLUMN_BLOCK: usize = 16;
+
+/// A raw pointer that may cross threads; used only where the tasks write
+/// disjoint elements (the columns of [`uvtrans`]).
+#[derive(Clone, Copy)]
+struct SyncPtr(*mut Complex<f32>);
+unsafe impl Send for SyncPtr {}
+unsafe impl Sync for SyncPtr {}
 
 const NGCF: usize = 301;
 const NMASK: i64 = 2;
@@ -505,9 +517,8 @@ pub fn invert(ob: &Observation, geom: MapGeom, pars: &InvertPars) -> Result<MapB
     let e_bmaj = BEAM_FUDGE / (2.0 * (bm_muu + bm_mvv) - 2.0 * ftmp).sqrt();
     let noise = (bm_nsum / bm_wsum / bm_wsum).sqrt();
 
-    // Transform both grids to the image plane.
-    let map = uvtrans(&mut mgrid, nx, ny, &gcf);
-    let beam = uvtrans(&mut bgrid, nx, ny, &gcf);
+    // Transform both grids to the image plane, at the same time.
+    let (map, beam) = rayon::join(|| uvtrans(&mut mgrid, nx, ny, &gcf), || uvtrans(&mut bgrid, nx, ny, &gcf));
 
     Ok(MapBeam {
         geom,
@@ -529,59 +540,74 @@ pub fn invert(ob: &Observation, geom: MapGeom, pars: &InvertPars) -> Result<MapB
 /// visibility with phase +2*pi*(ux+vy) peaks at (x,y).
 fn uvtrans(grid: &mut [Complex<f32>], nx: usize, ny: usize, gcf: &Gcf) -> Vec<f32> {
     let nugrid = nx / 2 + 1;
-    // Center shift: multiply by (-1)^(iu+iv).
-    for iv in 0..ny {
-        for iu in 0..nugrid {
+    // Center shift, multiplying by (-1)^(iu+iv); and, since our FFT
+    // libraries implement exp(+2i*pi) for the complex inverse and
+    // complex->real directions, a conjugation to obtain the exp(-2i*pi)
+    // transform of a conjugate-symmetric grid.
+    grid.par_chunks_mut(nugrid).enumerate().for_each(|(iv, row)| {
+        for (iu, v) in row.iter_mut().enumerate() {
             if (iu + iv) % 2 == 1 {
-                grid[iv * nugrid + iu] = -grid[iv * nugrid + iu];
+                *v = -*v;
             }
+            v.im = -v.im;
         }
-    }
-    // Our FFT libraries implement exp(+2i*pi) for the complex inverse
-    // and complex->real directions, so conjugate once to obtain the
-    // exp(-2i*pi) transform of a conjugate-symmetric grid.
-    for v in grid.iter_mut() {
-        v.im = -v.im;
-    }
-    // Column FFTs along V (complex, length ny).
+    });
+    // Column FFTs along V (complex, length ny). The columns are strided,
+    // so each task gathers a block of them into a contiguous buffer,
+    // transforms it and writes it back; the blocks are disjoint.
     let mut cplanner = FftPlanner::<f32>::new();
     let colfft = cplanner.plan_fft_inverse(ny);
-    let mut col = vec![Complex::<f32>::new(0.0, 0.0); ny];
-    for iu in 0..nugrid {
-        for iv in 0..ny {
-            col[iv] = grid[iv * nugrid + iu];
+    let base = SyncPtr(grid.as_mut_ptr());
+    let nblock = nugrid.div_ceil(COLUMN_BLOCK);
+    (0..nblock).into_par_iter().for_each(|block| {
+        let base = base;
+        let first = block * COLUMN_BLOCK;
+        let ncol = COLUMN_BLOCK.min(nugrid - first);
+        let mut cols = vec![Complex::<f32>::new(0.0, 0.0); ncol * ny];
+        // SAFETY: this task alone reads and writes columns
+        // first..first+ncol, each element (iv, iu) at iv*nugrid + iu,
+        // all within the grid.
+        unsafe {
+            for k in 0..ncol {
+                for iv in 0..ny {
+                    cols[k * ny + iv] = *base.0.add(iv * nugrid + first + k);
+                }
+            }
         }
-        colfft.process(&mut col);
-        for iv in 0..ny {
-            grid[iv * nugrid + iu] = col[iv];
+        colfft.process(&mut cols);
+        unsafe {
+            for k in 0..ncol {
+                for iv in 0..ny {
+                    *base.0.add(iv * nugrid + first + k) = cols[k * ny + iv];
+                }
+            }
         }
-    }
-    // Row transforms along U (complex -> real, length nx).
+    });
+    // Row transforms along U (complex -> real, length nx), with the
+    // gridding convolution correction (normalized reciprocal cosine
+    // transforms of the kernel along each axis).
     let mut rplanner = RealFftPlanner::<f32>::new();
     let rowfft = rplanner.plan_fft_inverse(nx);
-    let mut image = vec![0.0f32; nx * ny];
-    let mut spec = rowfft.make_input_vec();
-    let mut outrow = rowfft.make_output_vec();
-    for iv in 0..ny {
-        spec.copy_from_slice(&grid[iv * nugrid..(iv + 1) * nugrid]);
-        // Bins 0 and nx/2 must be purely real (they are, up to
-        // rounding, thanks to conjugate-symmetric gridding).
-        spec[0].im = 0.0;
-        spec[nx / 2].im = 0.0;
-        rowfft
-            .process(&mut spec, &mut outrow)
-            .expect("real FFT size mismatch");
-        image[iv * nx..(iv + 1) * nx].copy_from_slice(&outrow);
-    }
-    // Gridding convolution correction (normalized reciprocal cosine
-    // transforms of the kernel along each axis).
     let rxft = gcf.correction(nx);
     let ryft = gcf.correction(ny);
-    for iy in 0..ny {
-        let ry = ryft[iy];
-        for ix in 0..nx {
-            image[iy * nx + ix] *= rxft[ix] * ry;
-        }
-    }
+    let grid = &*grid;
+    let mut image = vec![0.0f32; nx * ny];
+    image.par_chunks_mut(nx).enumerate().for_each_init(
+        || (rowfft.make_input_vec(), rowfft.make_output_vec()),
+        |(spec, outrow), (iv, row)| {
+            spec.copy_from_slice(&grid[iv * nugrid..(iv + 1) * nugrid]);
+            // Bins 0 and nx/2 must be purely real (they are, up to
+            // rounding, thanks to conjugate-symmetric gridding).
+            spec[0].im = 0.0;
+            spec[nx / 2].im = 0.0;
+            rowfft
+                .process(spec, outrow)
+                .expect("real FFT size mismatch");
+            let ry = ryft[iv];
+            for ix in 0..nx {
+                row[ix] = outrow[ix] * (rxft[ix] * ry);
+            }
+        },
+    );
     image
 }

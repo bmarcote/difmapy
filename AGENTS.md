@@ -2,6 +2,9 @@
 
 ## Build & test
 
+- `python build_native.py` builds the release extension for an existing editable checkout and publishes it with an atomic inode replacement, so processes already using the old extension remain safe. On macOS the build supplies Python's dynamic-lookup linker arguments. Restart a process to pick up the new binary.
+- Högbom CLEAN parallelizes row-wise peak searches and beam subtraction with Rayon for areas of at least 65,536 pixels. Iterations and window priority remain serial; peak ties retain first-pixel ordering. `cargo test -p difmap-core --release --test clean_parallel` checks bit-identical results; add `clean_thread_scaling -- --ignored --nocapture` for the 8192-pixel scaling benchmark.
+
 - If pytest dies at start-up with ``numpy.dtypes has no attribute
   'StringDType'``, it is `zarr`'s auto-loaded pytest plugin against an
   older numpy, nothing to do with difmapy: run with
@@ -503,3 +506,8 @@ number of workers (a test pins it). Things that look odd but are meant:
 - CASA writes correlations as RR, RL, LR, LL, which is not a regular
   FITS STOKES axis; `save_uvfits` reorders them (see the test in
   `tests/test_realdata.py`).
+- `PlotWindow._repr_png_` returns None outside a Jupyter kernel. Recent
+  IPython (`IPython.core.kitty`) renders image/png in the *terminal*
+  when it detects kitty-graphics support (iTerm2, kitty, WezTerm), so
+  every plot returned at the difmapy prompt also dumped a picture under
+  it. `IPYTHON_KITTY_GRAPHICS=0` turns that IPython feature off globally.

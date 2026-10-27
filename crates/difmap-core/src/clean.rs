@@ -7,7 +7,10 @@
 
 use crate::grid::MapBeam;
 use crate::model::{CmpType, ModComp};
+use rayon::prelude::*;
 use std::collections::HashMap;
+
+const PARALLEL_PIXELS: usize = 256 * 256;
 
 /// A rectangular CLEAN window in map coordinates (radians).
 #[derive(Clone, Copy, Debug)]
@@ -138,15 +141,30 @@ pub fn clean(
         let mut maxabs = 0.0f32;
         let mut maxidx: Option<usize> = None;
         for w in &wins {
-            for iy in w.ya..=w.yb {
+            let scan_row = |iy: usize| {
                 let row = iy * nx;
+                let mut peak = (0.0f32, usize::MAX);
                 for ix in w.xa..=w.xb {
                     let v = mb.map[row + ix];
-                    if v < -maxabs || v > maxabs {
-                        maxabs = v.abs();
-                        maxidx = Some(row + ix);
+                    if v < -peak.0 || v > peak.0 {
+                        peak = (v.abs(), row + ix);
                     }
                 }
+                peak
+            };
+            let first_peak = |a: (f32, usize), b: (f32, usize)| {
+                if b.0 > a.0 || (b.0 == a.0 && b.1 < a.1) { b } else { a }
+            };
+            let peak = if (w.xb - w.xa + 1) * (w.yb - w.ya + 1) >= PARALLEL_PIXELS
+                && rayon::current_num_threads() > 1 {
+                (w.ya..=w.yb).into_par_iter().map(scan_row)
+                    .reduce(|| (0.0, usize::MAX), first_peak)
+            } else {
+                (w.ya..=w.yb).map(scan_row).fold((0.0, usize::MAX), first_peak)
+            };
+            if peak.0 > maxabs {
+                maxabs = peak.0;
+                maxidx = Some(peak.1);
             }
         }
         let idx = match maxidx {
@@ -166,15 +184,23 @@ pub fn clean(
 
         // Subtract the scaled, shifted beam over the clean area.
         let (cx, cy) = ((idx % nx) as i64, (idx / nx) as i64);
-        for iy in iymin..=iymax {
+        let beam = &mb.beam;
+        let subtract_row = |(row, values): (usize, &mut [f32])| {
+            let iy = iymin + row;
             let by = (iy as i64 - cy) + (ny / 2) as i64;
             let brow = by as usize * nx;
-            let mrow = iy * nx;
             let bxoff = (nx / 2) as i64 - cx;
             for ix in ixmin..=ixmax {
                 let bx = (ix as i64 + bxoff) as usize;
-                mb.map[mrow + ix] -= mb.beam[brow + bx] * maxval;
+                values[ix] -= beam[brow + bx] * maxval;
             }
+        };
+        let rows = &mut mb.map[iymin * nx..(iymax + 1) * nx];
+        if (ixmax - ixmin + 1) * (iymax - iymin + 1) >= PARALLEL_PIXELS
+            && rayon::current_num_threads() > 1 {
+            rows.par_chunks_mut(nx).enumerate().for_each(subtract_row);
+        } else {
+            rows.chunks_mut(nx).enumerate().for_each(subtract_row);
         }
 
         n += 1;

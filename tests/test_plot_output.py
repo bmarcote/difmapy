@@ -55,7 +55,7 @@ def test_every_plot_renders_off_screen(obs, tmp_path):
     for i, p in enumerate(plots):
         assert not p.isVisible(), p          # drawn, never put on screen
         assert p.to_png().startswith(PNG), p
-        assert p._repr_png_().startswith(PNG), p
+        assert p._repr_png_() is None, p     # no image in a terminal
         out = p.savefig(tmp_path / f"plot{i}.png")
         assert os.path.getsize(out) > 1000, p
         p.close()

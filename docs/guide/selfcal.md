@@ -37,6 +37,43 @@ statistics cost nothing in an imaging loop, because self-calibration
 invalidates the map and the next `clean` would re-invert anyway;
 `mapstats=False` skips them.
 
+### Iterating with modelfit until the fit settles
+
+```python
+sc = obs.selfcal(amp=True, phase=True, solint="scan", converge=True)
+sc["converged"], sc["niter"], sc["fit_change"]
+```
+
+`converge=True` alternates self-calibration and `modelfit()` -
+selfcal, modelfit, selfcal, ... with the same selfcal parameters each
+time - until the model-data fit stops improving: the fit's `sigma`
+(`moddif()`) after one selfcal and after the next differ by less than
+`converge_threshold` (default 0.01, i.e. 1%). sigma rather than rms so
+that data flagged along the way (`flag=True`) does not read as a
+change; on the same data the two move together. So at least two
+selfcals run, and at most `converge_maxiter` (default 20); the result
+says whether it converged:
+
+```
+selfcal: alternating with modelfit until the fit changes by less than 1%
+  iteration 1: fit rms 0.42674 Jy, sigma 0.93078; gains moved 32% (median; max 71.6%)
+  iteration 2: fit rms 0.00058159 Jy, sigma 0.0012673 (99.9% change); gains moved 0.0135% (median; max 0.0923%)
+  ...
+selfcal: converged after 4 self-calibrations
+```
+
+The fit, rather than the gains, decides because it is what the loop is
+for, and because the gains need not settle when the fit has: phase
+self-calibration can absorb a position offset, so gains and model can
+drift together without the fit changing. How much each selfcal moved
+the gains (median and maximum of `|g_new / g_old - 1|` on the complex
+gains) is still printed and kept in `history`.
+
+The model needs free parameters (`addcmp(free=...)` or an earlier
+`modelfit`). The result is the last selfcal's, with `fit_before` and
+`map_before` taken from before the first one, plus the last `modelfit`
+result and a per-iteration `history`.
+
 !!! warning "Self-calibrate against a model"
 
     `selfcal` and `gscale` with an empty model produce meaningless

@@ -56,7 +56,7 @@ not.
 
 ```sh
 pip install maturin
-maturin develop --release --extras plot,ms   # Rust core + plots + MS support
+maturin develop --release --extras plot,ms   # + bayes_gscale figure + MS support
 ```
 
 (Do not follow it with a plain `pip install .`: that replaces the
@@ -202,6 +202,20 @@ adds the residual-map statistics whenever a map is already there -
 which costs nothing in an imaging loop, because self-cal invalidates the
 map and the next `clean` would have to re-invert anyway. Pass
 `mapstats=False` to skip them or `quiet=True` to print nothing.
+
+`selfcal(converge=True)` alternates self-calibration and `modelfit()`
+(same selfcal parameters every time) until the model-data fit stops
+improving - the fit's sigma after one selfcal and after the next differ
+by less than `converge_threshold`, 0.01 (1%) by default - or
+`converge_maxiter` (20) selfcals have run. The model needs free
+parameters. The result adds `converged`, `niter`, `fit_change`, the last
+`modelfit` result and a per-iteration `history`, which also records how
+much each selfcal moved the gains:
+
+```python
+sc = obs.selfcal(amp=True, phase=True, solint="scan", converge=True)
+sc["converged"], sc["niter"], sc["fit_change"]
+```
 
 With no model at all, `modelfit` seeds itself with a circular Gaussian of
 zero width at the peak of the residual map, so `obs.modelfit()` on a

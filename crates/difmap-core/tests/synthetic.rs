@@ -491,3 +491,20 @@ fn map_dimensions_need_only_be_multiples_of_four() {
     };
     assert!(invert(&ob, bad, &InvertPars::default()).is_err());
 }
+
+#[test]
+fn invert_is_bit_identical_with_one_or_four_threads() {
+    use rayon::ThreadPoolBuilder;
+    let cell = 0.5 * MAS;
+    let mut ob = synthetic_obs(2.5, 8.0 * cell, -5.0 * cell);
+    ob.stream = Some(Stream::select(&ob, Stokes::I, &[]).expect("select I"));
+    // Not a multiple of the column block, so the last block is partial.
+    let geom = MapGeom { nx: 264, ny: 264, xinc: cell, yinc: cell };
+    let run = |threads: usize| {
+        ThreadPoolBuilder::new().num_threads(threads).build().unwrap()
+            .install(|| invert(&ob, geom, &InvertPars::default()).expect("invert"))
+    };
+    let (a, b) = (run(1), run(4));
+    assert_eq!(a.map, b.map);
+    assert_eq!(a.beam, b.beam);
+}

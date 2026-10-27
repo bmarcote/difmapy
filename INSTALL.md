@@ -15,7 +15,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # In the difmapy checkout, inside the environment you want to use:
 pip install maturin
 maturin develop --release            # builds the Rust core, installs editable
-pip install ".[plot]"                # interactive plots (pyqtgraph + PySide6)
+pip install ".[plot]"                # matplotlib, for the bayes_gscale figure
 pip install ".[ms]"                  # Measurement Set support (casatools)
 ```
 
