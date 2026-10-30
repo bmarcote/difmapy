@@ -143,20 +143,20 @@ def test_selfcal_scan_interval_gives_one_solution_per_scan(scanned_uvfits_file):
 
     # nbins counts solution bins per (subarray, IF).
     per_if = o.nif
-    assert o.selfcal(phase=True, solint="scan", quiet=True)["nbins"] == nscan * per_if
+    assert o.selfcal(phase=True, solint="scan", quiet=False, verbose=False)["nbins"] == nscan * per_if
     o.uncalib()
-    assert o.selfcal(phase=True, solint="2scan", quiet=True)["nbins"] == 2 * per_if
+    assert o.selfcal(phase=True, solint="2scan", quiet=False, verbose=False)["nbins"] == 2 * per_if
     o.uncalib()
-    assert o.selfcal(phase=True, solint="4scan", quiet=True)["nbins"] == per_if
+    assert o.selfcal(phase=True, solint="4scan", quiet=False, verbose=False)["nbins"] == per_if
 
     # A duration cannot make that guarantee: fixed bins are aligned to
     # the clock, not to the scans, so they do not come out one per scan.
     o.uncalib()
-    assert o.selfcal(phase=True, solint="5min", quiet=True)["nbins"] != nscan * per_if
+    assert o.selfcal(phase=True, solint="5min", quiet=False, verbose=False)["nbins"] != nscan * per_if
 
     # More scans per solution than there are is one solution.
     o.uncalib()
-    assert o.selfcal(phase=True, solint="99scan", quiet=True)["nbins"] == per_if
+    assert o.selfcal(phase=True, solint="99scan", quiet=False, verbose=False)["nbins"] == per_if
 
 
 def test_selfcal_scangap_overrides_the_scan_detection(scanned_uvfits_file):
@@ -168,10 +168,10 @@ def test_selfcal_scangap_overrides_the_scan_detection(scanned_uvfits_file):
     o.addcmp(FLUX, X0_MAS, Y0_MAS)
     # With a gap longer than the ones in the data there is one scan, so
     # "scan" solves the whole observation at once.
-    res = o.selfcal(phase=True, solint="scan", scangap="30min", quiet=True)
+    res = o.selfcal(phase=True, solint="scan", scangap="30min", quiet=False, verbose=False)
     assert res["nbins"] == o.nif
     o.uncalib()
-    res = o.selfcal(phase=True, solint="scan", scangap=100, quiet=True)
+    res = o.selfcal(phase=True, solint="scan", scangap=100, quiet=False, verbose=False)
     assert res["nbins"] == nscan * o.nif
 
 
@@ -197,9 +197,9 @@ def test_selfcal_solint_number_is_still_minutes(scanned_uvfits_file):
     o = difmapy.load(path)
     o.select("I")
     o.addcmp(FLUX, X0_MAS, Y0_MAS)
-    a = o.selfcal(phase=True, solint=5, quiet=True)["nbins"]
+    a = o.selfcal(phase=True, solint=5, quiet=False, verbose=False)["nbins"]
     o.uncalib()
-    b = o.selfcal(phase=True, solint="5min", quiet=True)["nbins"]
+    b = o.selfcal(phase=True, solint="5min", quiet=False, verbose=False)["nbins"]
     assert a == b
 
 
@@ -224,7 +224,7 @@ def test_time_ranges_take_units(uvfits_file):
     # The same half of the observation, spelled four ways.
     counts = []
     for tmax in (half, f"{half}s", f"{half / 60.0}min", f"{half / 3600.0}h"):
-        counts.append(o.flag(tmin=0, tmax=tmax))
+        counts.append(o.flag(tmin=0, tmax=tmax, quiet=False))
         o.unflag()
     assert len(set(counts)) == 1 and counts[0] > 0
 

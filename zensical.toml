@@ -21,6 +21,7 @@ nav = [
     { "Model fitting" = "guide/modelfit.md" },
     { "Flagging" = "guide/flagging.md" },
     { "Plots" = "guide/plots.md" },
+    { "The dashboard" = "guide/dashboard.md" },
     { "Calibration tables for CASA and AIPS" = "guide/caltables.md" },
     { "Saving a session" = "guide/saving.md" },
   ] },

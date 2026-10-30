@@ -1,8 +1,6 @@
 """Random-groups UVFITS reader.
 
-Loads a single-source UVFITS file (as written by AIPS FITTP, difmap,
-CASA exportuvfits, ...) into the arrays expected by the Rust core:
-all IFs/channels/polarizations in RAM.
+Loads a single-source UVFITS file (as written by AIPS FITTP, difmap, CASA exportuvfits, ...) into the arrays expected by the Rust core: all IFs/channels/polarizations in RAM.
 """
 
 from __future__ import annotations
@@ -16,8 +14,7 @@ __all__ = ["load_uvfits", "save_uvfits"]
 
 
 def _group_parameter(hdu, names):
-    """Sum all group parameters whose name matches one of `names`
-    (UVFITS allows split parameters, e.g. two DATE entries)."""
+    """Sum all group parameters whose name matches one of `names` (UVFITS allows split parameters, e.g. two DATE entries)."""
     parnames = [p.upper().rstrip("-") for p in hdu.data.parnames]
     total = None
     for i, pname in enumerate(parnames):
@@ -247,13 +244,9 @@ def load_uvfits(path, wtscale=1.0):
 
 
 def save_uvfits(core, path, overwrite=True, freeze_shift=False):
-    """Write a CoreObservation to a random-groups UVFITS file
-    (difmap wobs). Antenna gains and baseline corrections are applied
-    to the data; flags are preserved as negative weights.
+    """Write a CoreObservation to a random-groups UVFITS file (difmap wobs). Antenna gains and baseline corrections are applied to the data; flags are preserved as negative weights.
 
-    As in difmap, accumulated phase-center shifts are *not* written
-    unless `freeze_shift` is true - `Observation.save()` instead records
-    the shift so that `get()` re-applies it.
+    As in difmap, accumulated phase-center shifts are *not* written unless `freeze_shift` is true - `Observation.save()` instead records the shift so that `get()` re-applies it.
     """
     vis, wt = core.calibrated_cube(apply_shift=freeze_shift)
     time, ant1, ant2, us, vs, ws = core.rows()

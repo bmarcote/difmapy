@@ -9,12 +9,10 @@ Mirrors the classic difmap workflow::
     obs.add_window(-2, 2, -2, 2)       # clean window (mas)
     obs.clean(200, 0.05)               # clean
     obs.selfcal(phase=True)            # selfcal
-    m = obs.restore()                  # restore
+    obs.restore()                      # restore (obs.restored_map)
     obs.wmap("clean.fits")             # wmap
 
-All user-facing positions/sizes are in milliarcseconds (mas), angles in
-degrees and UV radii in wavelengths; everything is converted to
-radians internally.
+All user-facing positions/sizes are in milliarcseconds (mas), angles in degrees and UV radii in wavelengths; everything is converted to radians internally.
 """
 
 from __future__ import annotations
@@ -26,8 +24,8 @@ import numpy as np
 
 from difmapy._core import CoreObservation
 from difmapy.report import write_json
-from difmapy.units import (format_flux, format_interval, format_value,
-                           parse_interval, parse_time)
+from difmapy.units import (format_flux, format_interval, format_uvdist, format_value,
+                           parse_interval, parse_time, parse_uvdist)
 
 MAS = np.pi / (180.0 * 3600.0 * 1000.0)  # mas -> radians
 DEG = np.pi / 180.0
@@ -38,6 +36,10 @@ DEG = np.pi / 180.0
 # no longer has to be a power of two - any multiple of four works - but
 # powers of two are still the fastest to transform.
 DEFAULT_NPIX = 4096
+#: The longest UV radius `uvtaper` accepts, in wavelengths (100 G-lambda: beyond any baseline, space VLBI included). A larger one was given in wavelengths where M-lambda was meant.
+MAX_UVDIST = 1e11
+#: The upper UV limit handed to the gridding when only a lower one is set (it cuts nothing; the core needs one to apply `uvmin` at all).
+NO_UVMAX = 1e30
 DEFAULT_OVERSAMPLE = 10
 #: The Briggs robustness values mapplot offers, and for which `save`
 #: writes a restored map each.
@@ -97,9 +99,7 @@ def _free_mask(free) -> int:
 
 
 def _bold(text) -> str:
-    """`text` in bold where the output can show it: a terminal or a
-    Jupyter cell, but not a file or a pipe, where the escape codes
-    would be so much noise."""
+    """`text` in bold where the output can show it: a terminal or a Jupyter cell, but not a file or a pipe, where the escape codes would be so much noise."""
     out = sys.stdout
     tty = out.isatty() and os.environ.get("TERM") != "dumb"
     if tty or type(out).__module__.startswith("ipykernel"):
@@ -127,7 +127,17 @@ def _comp_dict(comp, freepar=0) -> dict:
 __all__ = ["Observation", "load", "observe", "uvaver", "chanaver"]
 
 class Observation:
-    """An in-memory interferometric observation (difmap-style)."""
+    """An in-memory interferometric observation, with difmap's commands as its methods.
+
+    Create one with `difmapy.load` (difmap's `observe`), `Observation.from_uvfits`, `Observation.from_ms` or `Observation.get`. Positions and sizes are in milliarcseconds (mas), angles in degrees, UV distances in wavelengths and times in seconds unless a method says otherwise; strings with units ("30s", "2min") are accepted wherever a time is.
+
+    Commands that act on the data (``clean``, ``selfcal``, ``select``, ``flag``, ...) follow one convention so that the interactive prompt stays readable:
+
+    - ``quiet=True`` (the default) returns None, so nothing is echoed under the report the command prints. Pass ``quiet=False`` to get the result back - a dict, a count, the observation itself - for use in a script.
+    - ``verbose=True`` (the default, on the commands that print a report) prints that report; ``verbose=False`` prints nothing.
+
+    Queries whose whole purpose is their value (``imstat``, ``mapinfo``, ``scans``, ``spectrum``, ...) always return it, and plot commands always return their window.
+    """
 
     def __init__(self, core: CoreObservation):
         self._core = core
@@ -176,29 +186,15 @@ class Observation:
         path : str
             The UVFITS file.
         stokes : str | None, default "I"
-            Polarization to select once loaded: "I", "Q", "U", "V", or a
-            recorded one ("RR", "LL", "RL", "LR", "XX", ...). "I" uses difmap's
-            permissive combination (a visibility survives when only one
-            parallel hand is usable); Q/U/V are strict. ``None`` (or "none")
-            loads without a selection, as difmap's `observe` does; `select()`
-            changes it at any time.
+            Polarization to select once loaded: "I", "Q", "U", "V", or a recorded one ("RR", "LL", "RL", "LR", "XX", ...). "I" uses difmap's permissive combination (a visibility survives when only one parallel hand is usable); Q/U/V are strict. ``None`` (or "none") loads without a selection, as difmap's `observe` does; `select()` changes it at any time.
         channels : list of (int, int) | None, default None
-            Inclusive, 0-based channel ranges over the global channel axis (all
-            IFs concatenated), e.g. ``[(0, 31), (64, 95)]``, as `select` takes
-            them. With `freqavg`, only these channels go into the averages - the
-            way band edges are dropped - and the selection then covers every
-            averaged channel. ``None``: all channels.
+            Inclusive, 0-based channel ranges over the global channel axis (all IFs concatenated), e.g. ``[(0, 31), (64, 95)]``, as `select` takes them. With `freqavg`, only these channels go into the averages - the way band edges are dropped - and the selection then covers every averaged channel. ``None``: all channels.
         timeavg : float | str | None, default None
-            Time-average straight after loading (difmap `uvaver`): seconds as a
-            number, or a string with its unit ("10s", "2min"). ``None``: keep
-            the original integrations.
+            Time-average straight after loading (difmap `uvaver`): seconds as a number, or a string with its unit ("10s", "2min"). ``None``: keep the original integrations.
         freqavg : int | "all" | bool | None, default None
-            Average this many adjacent channels into one (`chanaver`); it must
-            divide every IF's number of channels. ``"all"`` or ``True`` averages
-            each IF down to a single channel. ``None``/``False``: no averaging.
+            Average this many adjacent channels into one (`chanaver`); it must divide every IF's number of channels. ``"all"`` or ``True`` averages each IF down to a single channel. ``None``/``False``: no averaging.
         scatter : bool, default False
-            With `timeavg`: derive the output weights from the scatter of the
-            averaged samples instead of summing the input weights.
+            With `timeavg`: derive the output weights from the scatter of the averaged samples instead of summing the input weights.
         wtscale : float, default 1.0
             Factor applied to the data weights as they are read.
         average : float | str | None, default None
@@ -210,11 +206,7 @@ class Observation:
 
         Notes
         -----
-        The work is done in the cheapest order: channels are averaged first,
-        then the Stokes selection is made, then the time averaging. Averaged
-        data from a Measurement Set still go back to one: `save` writes a new
-        MS with the averaged rows, `save_flags` flags every original sample
-        behind a flagged averaged one, and `savecaltable` works as usual.
+        The work is done in the cheapest order: channels are averaged first, then the Stokes selection is made, then the time averaging. Averaged data from a Measurement Set still go back to one: `save` writes a new MS with the averaged rows, `save_flags` flags every original sample behind a flagged averaged one, and `savecaltable` works as usual.
         """
         from difmapy.io.uvfits import load_uvfits
 
@@ -232,38 +224,21 @@ class Observation:
         path : str
             The Measurement Set directory.
         stokes : str | None, default "I"
-            Polarization to select once loaded: "I", "Q", "U", "V", or a
-            recorded one ("RR", "LL", "RL", "LR", "XX", ...). "I" uses difmap's
-            permissive combination (a visibility survives when only one
-            parallel hand is usable); Q/U/V are strict. ``None`` (or "none")
-            loads without a selection, as difmap's `observe` does; `select()`
-            changes it at any time.
+            Polarization to select once loaded: "I", "Q", "U", "V", or a recorded one ("RR", "LL", "RL", "LR", "XX", ...). "I" uses difmap's permissive combination (a visibility survives when only one parallel hand is usable); Q/U/V are strict. ``None`` (or "none") loads without a selection, as difmap's `observe` does; `select()` changes it at any time.
         channels : list of (int, int) | None, default None
-            Inclusive, 0-based channel ranges over the global channel axis (all
-            IFs concatenated), e.g. ``[(0, 31), (64, 95)]``, as `select` takes
-            them. With `freqavg`, only these channels go into the averages - the
-            way band edges are dropped - and the selection then covers every
-            averaged channel. ``None``: all channels.
+            Inclusive, 0-based channel ranges over the global channel axis (all IFs concatenated), e.g. ``[(0, 31), (64, 95)]``, as `select` takes them. With `freqavg`, only these channels go into the averages - the way band edges are dropped - and the selection then covers every averaged channel. ``None``: all channels.
         timeavg : float | str | None, default None
-            Time-average straight after loading (difmap `uvaver`): seconds as a
-            number, or a string with its unit ("10s", "2min"). ``None``: keep
-            the original integrations.
+            Time-average straight after loading (difmap `uvaver`): seconds as a number, or a string with its unit ("10s", "2min"). ``None``: keep the original integrations.
         freqavg : int | "all" | bool | None, default None
-            Average this many adjacent channels into one (`chanaver`); it must
-            divide every IF's number of channels. ``"all"`` or ``True`` averages
-            each IF down to a single channel. ``None``/``False``: no averaging.
+            Average this many adjacent channels into one (`chanaver`); it must divide every IF's number of channels. ``"all"`` or ``True`` averages each IF down to a single channel. ``None``/``False``: no averaging.
         scatter : bool, default False
-            With `timeavg`: derive the output weights from the scatter of the
-            averaged samples instead of summing the input weights.
+            With `timeavg`: derive the output weights from the scatter of the averaged samples instead of summing the input weights.
         wtscale : float, default 1.0
             Factor applied to the data weights as they are read.
         field : str | int | None, default None
-            Measurement Sets only: the field (name or FIELD_ID) to load. Needed
-            when the MS has several fields; difmapy, like difmap, is
-            single-source.
+            Measurement Sets only: the field (name or FIELD_ID) to load. Needed when the MS has several fields; difmapy, like difmap, is single-source.
         data_column : str, default "DATA"
-            Measurement Sets only: the visibility column to read, "DATA" or
-            "CORRECTED_DATA".
+            Measurement Sets only: the visibility column to read, "DATA" or "CORRECTED_DATA".
         average : float | str | None, default None
             The older name of `timeavg`, still accepted.
 
@@ -273,13 +248,7 @@ class Observation:
 
         Notes
         -----
-        The work is done in the cheapest order: channels are averaged first,
-        then the Stokes selection is made, then the time averaging. Averaged
-        data from a Measurement Set still go back to one: `save` writes a new
-        MS with the averaged rows, `save_flags` flags every original sample
-        behind a flagged averaged one, and `savecaltable` works as usual.
-        Autocorrelations are dropped, as difmap uses cross-correlations
-        only.
+        The work is done in the cheapest order: channels are averaged first, then the Stokes selection is made, then the time averaging. Averaged data from a Measurement Set still go back to one: `save` writes a new MS with the averaged rows, `save_flags` flags every original sample behind a flagged averaged one, and `savecaltable` works as usual. Autocorrelations are dropped, as difmap uses cross-correlations only.
         """
         from difmapy.io.ms import load_ms
 
@@ -289,10 +258,7 @@ class Observation:
 
     def _on_load(self, stokes, channels, timeavg, freqavg, scatter,
                  average=None):
-        """The selection and averaging asked for at load time, in the
-        order that costs least: channels are averaged first (only the
-        requested `channels` go into the averages, so band edges can be
-        dropped), then the Stokes selection, then the time averaging."""
+        """The selection and averaging asked for at load time, in the order that costs least: channels are averaged first (only the requested `channels` go into the averages, so band edges can be dropped), then the Stokes selection, then the time averaging."""
         if average is not None:
             if timeavg is not None and timeavg != average:
                 raise ValueError("give the time averaging as timeavg= only "
@@ -309,17 +275,13 @@ class Observation:
         return obs
 
     def _averaged(self, average, scatter=False):
-        """This observation time-averaged by `uvaver`, or itself when
-        `average` is None/0."""
+        """This observation time-averaged by `uvaver`, or itself when `average` is None/0."""
         if not average:
             return self
         return self.uvaver(average, doscatter=scatter)
 
     def _initial_select(self, stokes, channels=None):
-        """Apply the selection asked for at load time (difmap `observe`
-        selects nothing; difmapy defaults to total intensity, which is
-        what almost every session starts with). `stokes=None` skips it,
-        and `select()` can change it at any time."""
+        """Apply the selection asked for at load time (difmap `observe` selects nothing; difmapy defaults to total intensity, which is what almost every session starts with). `stokes=None` skips it, and `select()` can change it at any time."""
         if stokes is None or str(stokes).lower() == "none":
             return
         try:
@@ -333,28 +295,46 @@ class Observation:
 
     @property
     def source(self) -> str:
+        """The name of the observed source, as recorded in the file."""
         return self._core.source_name
 
     @property
+    def path(self):
+        """The file the data were loaded from (UVFITS file or Measurement Set), or None for data built in memory. It survives averaging and `copy()`; for a session restored with `get()` it is the saved ``.uvf``."""
+        origin = getattr(self._core, "_cal_origin", None) or {}
+        return origin.get("path")
+
+    @property
+    def filename(self):
+        """The name of the file the data were loaded from, without its directory (see `path`), or None."""
+        path = self.path
+        if not path:
+            return None
+        return os.path.basename(os.path.normpath(os.fspath(path)))
+
+    @property
     def nif(self) -> int:
+        """The number of IFs (spectral windows)."""
         return self._core.nif
 
     @property
     def nchan(self) -> list[int]:
+        """The number of channels of each IF, in IF order."""
         return [n for (_, _, n) in self._core.ifs]
 
     @property
     def npol(self) -> int:
+        """The number of recorded polarizations (correlations)."""
         return self._core.npol
 
     @property
     def antennas(self) -> list[str]:
+        """The station names, in the order antenna indices refer to."""
         return self._core.antenna_names
 
     @property
     def pols(self) -> list[str]:
-        """The recorded polarizations as names ("RR", "LL", ...), in the
-        order they appear on the data's polarization axis."""
+        """The recorded polarizations as names ("RR", "LL", ...), in the order they appear on the data's polarization axis."""
         try:
             return list(self._core.pol_names)
         except AttributeError:  # extension older than pol_names
@@ -365,7 +345,21 @@ class Observation:
         """The AIPS/FITS codes behind `pols` (-1 = RR, -2 = LL, ...)."""
         return [int(c) for c in self._core.pols]
 
-    def header(self) -> str:
+    def header(self, quiet=True, verbose=True) -> str:
+        """Print a summary of the observation (difmap `header`): source and position, rows, integrations and subarrays, the antennas, polarizations, IFs and the current selection.
+
+        Parameters
+        ----------
+        quiet : bool, default True
+            Return None. ``False`` returns the summary as a string.
+        verbose : bool, default True
+            Print the summary.
+
+        Returns
+        -------
+        str | None
+            The summary, one item per line, with ``quiet=False``.
+        """
         c = self._core
         lines = [
             f"Source: {c.source_name}   "
@@ -384,7 +378,10 @@ class Observation:
             lines.append(f"Selection: {sel['stokes']}  channels {sel['chlist']}")
         except RuntimeError:
             lines.append("Selection: none (call select())")
-        return "\n".join(lines)
+        text = "\n".join(lines)
+        if verbose:
+            print(text)
+        return None if quiet else text
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<difmapy.Observation {self.source}: {self._core.nrow} rows, {self.nif} IFs>"
@@ -393,26 +390,53 @@ class Observation:
     # selection
     # ------------------------------------------------------------------
 
-    def select(self, pol="I", channels=None):
-        """Select polarization and optional channel ranges.
+    def select(self, pol="I", channels=None, quiet=True):
+        """Select the polarization and, optionally, the channels to work on (difmap `select`).
 
-        `channels` is a list of inclusive (start, end) 0-based ranges
-        over the global channel axis (all IFs concatenated), like
-        difmap's `select`.
+        Everything downstream - imaging, model fitting, self-calibration, the plots - sees only the selection; changing it discards the current map.
+
+        Parameters
+        ----------
+        pol : str, default "I"
+            Stokes "I", "Q", "U", "V", or a recorded correlation ("RR", "LL", "RL", "LR", "XX", ...). "I" uses difmap's permissive combination: a visibility survives when only one parallel hand is usable. Q, U and V are strict.
+        channels : list of (int, int) | None, default None
+            Inclusive, 0-based channel ranges over the global channel axis (all IFs concatenated), e.g. ``[(0, 31), (64, 95)]``. ``None`` selects every channel.
+        quiet : bool, default True
+            Return None. ``False`` returns the observation, so that calls can be chained.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
         """
         self._core.select(str(pol), [(int(a), int(b)) for a, b in (channels or [])])
         self._dirty()
-        return self
+        return self._done(self, quiet)
 
     # ------------------------------------------------------------------
     # imaging setup
     # ------------------------------------------------------------------
 
-    def mapsize(self, nx, cell, ny=None, ycell=None):
-        """Set map dimensions (pixels) and cell size (mas).
+    def mapsize(self, nx, cell, ny=None, ycell=None, quiet=True):
+        """Set the map dimensions and the pixel size (difmap `mapsize`).
 
-        The dimensions must be multiples of four; powers of two are no
-        longer required, but are still the fastest to transform.
+        Parameters
+        ----------
+        nx : int
+            Map width in pixels. It must be a multiple of four; powers of two are not required but are still the fastest to transform.
+        cell : float
+            Pixel width in mas.
+        ny : int | None, default None
+            Map height in pixels; ``None`` makes the map square (`nx`).
+        ycell : float | None, default None
+            Pixel height in mas; ``None`` uses `cell`.
+        quiet : bool, default True
+            Return None. ``False`` returns the observation, so that calls can be chained.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
         """
         self._nx = int(nx)
         self._ny = int(ny) if ny else int(nx)
@@ -420,11 +444,21 @@ class Observation:
         self._yinc = float(ycell) * MAS if ycell else self._xinc
         self._mapsize_set = True
         self._dirty()
-        return self
+        return self._done(self, quiet)
 
     def estimated_resolution(self) -> float:
-        """Diffraction-limited resolution in mas: lambda / B_max over the
-        longest unflagged baseline of the current selection."""
+        """The diffraction-limited resolution, lambda / B_max, over the longest unflagged baseline of the current selection.
+
+        Returns
+        -------
+        float
+            The resolution in mas.
+
+        Raises
+        ------
+        RuntimeError
+            If there is no unflagged data.
+        """
         core = self._core
         _, _, _, us, vs, _ = core.rows()
         r_sec = np.hypot(np.asarray(us), np.asarray(vs))  # light-seconds
@@ -449,74 +483,162 @@ class Observation:
             raise RuntimeError("no unflagged data to estimate a resolution from")
         return (1.0 / bmax) / MAS
 
-    def auto_mapsize(self, npix=DEFAULT_NPIX, oversample=DEFAULT_OVERSAMPLE):
-        """Set a map size derived from the data: `npix` pixels of
-        `estimated_resolution() / oversample` each.
+    def auto_mapsize(self, npix=DEFAULT_NPIX, oversample=DEFAULT_OVERSAMPLE, quiet=True):
+        """Set a map size derived from the data: `npix` pixels of ``estimated_resolution() / oversample`` each.
 
-        This is what `mapplot()` uses when `mapsize()` has not been
-        called, so a first image needs no guessing.
+        This is what `mapplot()` uses when `mapsize()` has not been called, so a first image needs no guessing.
+
+        Parameters
+        ----------
+        npix : int, default 4096
+            Map width and height in pixels (a multiple of four).
+        oversample : float, default 10
+            Pixels across the diffraction-limited resolution.
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
         """
-        return self.mapsize(int(npix), self.estimated_resolution() / float(oversample))
+        self.mapsize(int(npix), self.estimated_resolution() / float(oversample))
+        return self._done(self, quiet)
 
     def _ensure_mapsize(self):
         """Pick a map size from the data if none was set explicitly."""
         if not self._mapsize_set:
             self.auto_mapsize()
 
-    def uvweight(self, binwid=2.0, errpow=0.0, radial=False, robust=None):
-        """Set gridding weights (difmap uvweight).
+    def uvweight(self, binwid=2.0, errpow=0.0, radial=False, robust=None, quiet=True):
+        """Set the weighting of the visibilities on the UV grid (difmap `uvweight`).
 
-        binwid : uniform-weighting bin width in UV pixels; 0 selects
-            natural weighting (i.e. no density correction).
-        errpow : if negative, scale weights by wt**(-errpow/2), i.e.
-            weight down noisy visibilities; 0 ignores the data weights.
-        radial : multiply weights by the UV radius.
-        robust : Briggs robustness. A single number from -2 (uniform,
-            sharpest beam) to +2 (natural, lowest noise), which
-            supersedes `binwid`/`errpow` when given; pass ``None`` to go
-            back to difmap's own scheme.
+        The defaults are difmap's: uniform weighting with a 2-pixel bin, ignoring the data weights. For natural weighting by the data weights use ``uvweight(0, -1)`` or ``uvweight(robust=2)``.
 
-        The defaults are difmap's (uniform, binwid=2, errpow=0). For
-        natural weighting using the data weights, use ``uvweight(0, -1)``
-        or ``uvweight(robust=2)``.
+        Parameters
+        ----------
+        binwid : float, default 2.0
+            Width of the uniform-weighting bins in UV pixels; 0 selects natural weighting (no density correction).
+        errpow : float, default 0.0
+            If negative, the weights are scaled by ``wt ** (-errpow / 2)``, weighting down noisy visibilities; 0 ignores the data weights.
+        radial : bool, default False
+            Also multiply the weights by the UV radius.
+        robust : float | None, default None
+            Briggs robustness, from -2 (uniform, sharpest beam) to +2 (natural, lowest noise). When given it supersedes `binwid` and `errpow`; ``None`` goes back to difmap's own scheme.
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
         """
         self._binwid = float(binwid)
         self._errpow = float(errpow)
         self._dorad = bool(radial)
         self._robust = None if robust is None else float(np.clip(robust, -2.0, 2.0))
         self._dirty()
-        return self
+        return self._done(self, quiet)
 
     @property
     def robust(self):
-        """The Briggs robustness in use, or None for difmap weighting."""
+        """The Briggs robustness in use (a float), or None while difmap's own `uvweight` scheme is."""
         return self._robust
 
-    def uvtaper(self, gauval=0.0, gaurad=0.0):
-        """Gaussian taper: weight `gauval` at radius `gaurad` (wavelengths)."""
-        self._gauval, self._gaurad = float(gauval), float(gaurad)
-        self._dirty()
-        return self
+    def uvtaper(self, value=0.0, radius=0.0, quiet=True):
+        """Taper the gridding weights with a Gaussian in UV radius (difmap `uvtaper`), weighting down the long baselines: a visibility at UV radius ``r`` has its weight multiplied by ``value ** ((r / radius) ** 2)``, i.e. ``exp(ln(value) * r**2 / radius**2)``, which is 1 at the centre of the UV plane and falls to `value` at `radius`. The map gets a broader beam and more sensitivity to extended emission. The taper stays in effect for every later image until it is changed; ``uvtaper()`` (or a `value` of 0 or 1) turns it off.
 
-    def uvrange(self, uvmin=0.0, uvmax=0.0):
-        """Restrict gridding to a UV radius range (wavelengths)."""
-        self._uvmin, self._uvmax = float(uvmin), float(uvmax)
-        self._dirty()
-        return self
+        Parameters
+        ----------
+        value : float, default 0.0
+            The taper at `radius`, between 0 and 1 (exclusive); 0 or 1 turns the taper off.
+        radius : float | str, default 0.0
+            The UV radius at which the taper falls to `value`: mega-wavelengths as a bare number, or a string with its unit - ``"50M"``, ``"500k"``, ``"5e7 lambda"``. 0 turns the taper off.
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
 
-    def uvzero(self, flux=0.0, weight=0.0):
-        """Set a zero-spacing flux estimate (difmap uvzero)."""
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
+
+        Raises
+        ------
+        ValueError
+            If `radius` is beyond 100 G-lambda - no baseline is that long, so it was almost certainly given in wavelengths, which a bare number no longer means.
+        """
+        value = float(value)
+        rad = parse_uvdist(radius, "M")
+        if rad > MAX_UVDIST:
+            hint = ("" if isinstance(radius, str) else
+                    f": for {float(radius):g} wavelengths write uvtaper({value:g}, {float(radius) / 1e6:g})")
+            raise ValueError(f"uvtaper radius {rad:.3g} wavelengths is beyond any baseline; a bare number "
+                             f"is in M-lambda{hint}")
+        if not 0.0 <= value <= 1.0 or rad < 0.0:
+            raise ValueError(f"uvtaper needs 0 <= value <= 1 and radius >= 0, got {value:g}, {radius!r}")
+        self._gauval, self._gaurad = value, rad
+        self._dirty()
+        return self._done(self, quiet)
+
+    def uvrange(self, uvmin=0.0, uvmax=0.0, quiet=True):
+        """Restrict imaging to the visibilities between two UV radii (difmap `uvrange`); the rest is left out of the map and beam, but not flagged. It stays in effect for every later image until it is changed; ``uvrange()`` uses every visibility again.
+
+        Parameters
+        ----------
+        uvmin : float | str, default 0.0
+            The shortest UV radius imaged: mega-wavelengths as a bare number, or a string with its unit (``"50M"``, ``"500k"``, ``"5e7 lambda"``).
+        uvmax : float | str | None, default 0.0
+            The longest UV radius imaged, in the same units; 0 or None means no upper limit.
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
+        """
+        lo = parse_uvdist(uvmin or 0.0, "M")
+        hi = parse_uvdist(uvmax or 0.0, "M")
+        if lo < 0 or hi < 0:
+            raise ValueError(f"uvrange needs non-negative radii, got {uvmin!r}, {uvmax!r}")
+        if hi and lo > hi:
+            lo, hi = hi, lo
+        self._uvmin, self._uvmax = lo, hi
+        self._dirty()
+        return self._done(self, quiet)
+
+    def uvzero(self, flux=0.0, weight=0.0, quiet=True):
+        """Add a zero-spacing flux estimate to the gridded data (difmap `uvzero`).
+
+        Parameters
+        ----------
+        flux : float, default 0.0
+            The total flux density of the source in Jy; 0 turns the zero spacing off.
+        weight : float, default 0.0
+            The weight given to that zero-spacing measurement.
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
+        """
         self._uvzero = (float(flux), float(weight))
         self._dirty()
-        return self
+        return self._done(self, quiet)
 
     def _report(self, data, outfile):
         """Return `data`, writing it to `outfile` as JSON if asked.
 
-        Every command that reports numbers takes `outfile=`, so a run
-        can keep its results without re-deriving the structure.
+        Every command that reports numbers takes `outfile=`, so a run can keep its results without re-deriving the structure.
         """
         return data if outfile is None else write_json(outfile, data)
+
+    def _done(self, value, quiet, outfile=None):
+        """What a command hands back: `value` when `quiet` is False and None otherwise, so that a command typed at the prompt does not echo its result under the report it has printed. With `outfile` the value is written out as JSON either way."""
+        value = self._report(value, outfile)
+        return None if quiet else value
 
     def _dirty(self):
         self._invert_result = None
@@ -526,64 +648,99 @@ class Observation:
     # invert / clean / restore
     # ------------------------------------------------------------------
 
-    def invert(self, outfile=None):
-        """Grid + FFT the current selection into dirty map and beam."""
-        res = self._core.invert(
-            self._nx,
-            self._ny,
-            self._xinc,
-            self._yinc,
-            uvmin=self._uvmin,
-            uvmax=self._uvmax,
-            gauval=self._gauval,
-            gaurad=self._gaurad,
-            dorad=self._dorad,
-            errpow=self._errpow,
-            binwid=self._binwid,
-            robust=self._robust,
-            uvzero_amp=self._uvzero[0],
-            uvzero_wt=self._uvzero[1],
-        )
+    def invert(self, outfile=None, quiet=True, verbose=True):
+        """Grid and Fourier-transform the selected visibilities into the dirty map and dirty beam (difmap `invert`).
+
+        The map size, weighting, taper, UV range and zero spacing set so far are used. Any model is subtracted first, so after a `clean` this gives the residual map. Most commands invert by themselves when they need a map; calling it is only needed to see a fresh one.
+
+        Parameters
+        ----------
+        outfile : str | None, default None
+            Also write the result to this file as JSON.
+        quiet : bool, default True
+            Return None. ``False`` returns the result dict.
+        verbose : bool, default True
+            Print the number of visibilities gridded, the estimated beam and the expected noise.
+
+        Returns
+        -------
+        dict | None
+            With ``quiet=False``: the estimated beam (`e_bmaj`, `e_bmin` in radians, `e_bpa` in radians), the expected thermal `noise` in Jy/beam and the number of visibilities used (`nused`).
+        """
+        try:
+            res = self._core.invert(
+                self._nx,
+                self._ny,
+                self._xinc,
+                self._yinc,
+                uvmin=self._uvmin,
+                uvmax=self._uvmax or (NO_UVMAX if self._uvmin else 0.0),
+                gauval=self._gauval,
+                gaurad=self._gaurad,
+                dorad=self._dorad,
+                errpow=self._errpow,
+                binwid=self._binwid,
+                robust=self._robust,
+                uvzero_amp=self._uvzero[0],
+                uvzero_wt=self._uvzero[1],
+            )
+        except RuntimeError as exc:
+            # A taper far inside the shortest baselines leaves every
+            # weight at zero (float32 underflow), which the core reports
+            # as "no data": say what actually happened.
+            if 0.0 < self._gauval < 1.0 and self._gaurad > 0.0 and "no data" in str(exc):
+                raise RuntimeError(
+                    f"{exc}: the taper ({self._gauval:g} at {format_uvdist(self._gaurad)} M-lambda) leaves "
+                    "no weight on the data - use a larger radius (or value), or uvtaper() to turn it off"
+                ) from None
+            raise
         self._invert_result = dict(res)
         self._restored = None
-        return self._report(self._invert_result, outfile)
+        if verbose:
+            r = self._invert_result
+            print(f"invert: {r['nused']} visibilities gridded on {self._nx}x{self._ny} "
+                  f"pixels of {self._xinc / MAS:.4g} mas; estimated beam "
+                  f"{r['e_bmaj'] / MAS:.4g} x {r['e_bmin'] / MAS:.4g} mas at "
+                  f"{r['e_bpa'] / DEG:.4g} deg, expected noise {r['noise']:.4g} Jy/beam")
+        return self._done(self._invert_result, quiet, outfile)
 
     def _ensure_map(self):
         if self._invert_result is None:
-            self.invert()
+            self.invert(verbose=False)
 
     @property
     def dmap(self) -> np.ndarray:
-        """Residual dirty map [ny, nx] (Jy/beam).
+        """The residual (dirty) map, a float array of shape (ny, nx) in Jy/beam, inverting first if needed.
 
-        Only the inner quarter (see `valid_slice`) is scientifically
-        usable: the outer margin is amplified by the gridding
-        correction and can even exceed the true peak. Use `imstat()` or
-        `valid(...)` rather than scanning the whole array.
+        Only the inner quarter (see `valid_slice`) is scientifically usable: the outer margin is amplified by the gridding correction and can even exceed the true peak. Use `imstat()` or `valid()` rather than scanning the whole array.
         """
         self._ensure_map()
         return self._core.map()
 
     @property
     def dbeam(self) -> np.ndarray:
-        """Dirty beam [ny, nx]; see `dmap` about the outer margin."""
+        """The dirty beam, a float array of shape (ny, nx) normalised to a peak of 1, inverting first if needed; see `dmap` about the outer margin."""
         self._ensure_map()
         return self._core.beam()
 
     @property
     def restored_map(self) -> np.ndarray:
+        """The restored map of the last `restore()`, a float array of shape (ny, nx) in Jy/beam.
+
+        Raises
+        ------
+        RuntimeError
+            If nothing has been restored since the map last changed.
+        """
         if self._restored is None:
             raise RuntimeError("no restored map; call restore()")
         return self._restored
 
     @property
     def valid_slice(self):
-        """Numpy slice of the scientifically valid map area: the inner
-        quarter, which is what CLEAN searches and `imstat` measures.
+        """The scientifically valid area of the map as a ``(rows, columns)`` tuple of slices: the inner quarter, which is what CLEAN searches and `imstat` measures.
 
-        Outside it the gridding-correction factor grows without bound,
-        so pixel values there are meaningless (difmap restricts its
-        map area the same way).
+        Outside it the gridding-correction factor grows without bound, so pixel values there are meaningless (difmap restricts its map area the same way).
         """
         return (
             slice(self._ny // 4, self._ny - self._ny // 4),
@@ -591,14 +748,35 @@ class Observation:
         )
 
     def valid(self, image=None) -> np.ndarray:
-        """The valid inner quarter of `image` (default: the dirty map)."""
+        """The valid inner quarter of an image (see `valid_slice`).
+
+        Parameters
+        ----------
+        image : numpy.ndarray | None, default None
+            A map of the current map size, e.g. `restored_map`; ``None`` uses the residual map `dmap`.
+
+        Returns
+        -------
+        numpy.ndarray
+            A view of the inner quarter of `image`.
+        """
         if image is None:
             image = self.dmap
         return image[self.valid_slice]
 
     def peak_offset(self, image=None):
-        """(east, north) offset in mas of the brightest valid pixel, and
-        its value: ``((x, y), value)``."""
+        """Where the brightest pixel of the valid map area is, and its value.
+
+        Parameters
+        ----------
+        image : numpy.ndarray | None, default None
+            A map of the current map size; ``None`` uses the residual map `dmap`.
+
+        Returns
+        -------
+        tuple
+            ``((east, north), value)``: the offset from the phase centre in mas and the pixel value in Jy/beam.
+        """
         img = self.dmap if image is None else image
         sy, sx = self.valid_slice
         sub = img[sy, sx]
@@ -613,36 +791,76 @@ class Observation:
 
     @property
     def extent(self):
-        """(east_max, east_min, south, north) map extent in mas, for
-        plotting with RA increasing leftward."""
+        """The map extent in mas as ``(east_max, east_min, south, north)``, the order matplotlib's ``imshow(extent=...)`` takes for RA increasing to the left."""
         ex = self._nx / 2 * self._xinc / MAS
         ey = self._ny / 2 * self._yinc / MAS
         return (ex, -ex, -ey, ey)
 
     @property
     def estimated_beam(self):
-        """(bmaj_mas, bmin_mas, bpa_deg) estimated from the UV coverage."""
+        """The beam estimated from the UV coverage by `invert`, as ``(bmaj, bmin, bpa)``: the FWHM axes in mas and the position angle in degrees."""
         self._ensure_map()
         r = self._invert_result
         return (r["e_bmaj"] / MAS, r["e_bmin"] / MAS, r["e_bpa"] / DEG)
 
-    def add_window(self, xmin, xmax, ymin, ymax):
-        """Add a CLEAN window (mas, relative to phase center)."""
+    def add_window(self, xmin, xmax, ymin, ymax, quiet=True):
+        """Add a rectangular CLEAN window (difmap `addwin`). CLEAN only looks for components inside the windows; with none it searches the whole valid map area.
+
+        Parameters
+        ----------
+        xmin, xmax : float
+            East-west extent of the window in mas relative to the phase centre (east positive).
+        ymin, ymax : float
+            North-south extent of the window in mas relative to the phase centre (north positive).
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
+        """
         self.windows.append((float(xmin), float(xmax), float(ymin), float(ymax)))
-        return self
+        return self._done(self, quiet)
 
-    def clear_windows(self):
+    def clear_windows(self, quiet=True):
+        """Remove every CLEAN window (difmap `delwin`).
+
+        Parameters
+        ----------
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
+        """
         self.windows.clear()
-        return self
+        return self._done(self, quiet)
 
-    def clean(self, niter=100, gain=0.05, cutoff=0.0, quiet=False,
-              outfile=None):
-        """Högbom CLEAN within the current windows (difmap clean).
-        Negative `niter` stops at the first negative component.
+    def clean(self, niter=100, gain=0.05, cutoff=0.0, quiet=True, verbose=True, outfile=None):
+        """Run Högbom CLEAN within the current windows (difmap `clean`), adding the components found to the model.
 
-        Returns (and, unless `quiet`, prints) a dict summarising the
-        run: iterations done, components added, flux cleaned in this
-        call and in total, and the residual statistics afterwards.
+        Parameters
+        ----------
+        niter : int, default 100
+            The number of CLEAN iterations. A negative value runs ``abs(niter)`` iterations but stops at the first negative component.
+        gain : float, default 0.05
+            The loop gain: the fraction of the peak residual taken out at each iteration.
+        cutoff : float, default 0.0
+            Stop when the peak residual falls below this flux density, in Jy/beam.
+        quiet : bool, default True
+            Return None. ``False`` returns the summary dict.
+        verbose : bool, default True
+            Print the summary.
+        outfile : str | None, default None
+            Also write the summary to this file as JSON.
+
+        Returns
+        -------
+        dict | None
+            With ``quiet=False``: the iterations done (`niter`), the components added (`ncomp`) and the flux they carry (`cleaned_flux`, Jy), the model afterwards (`total_ncomp`, `total_flux`), the residual statistics (`residual_rms`, `residual_peak`, Jy/beam), the `gain` and `cutoff` used, and whether the run stopped at the cutoff (`hit_cutoff`) or at a negative component (`hit_negative`).
         """
         self._ensure_map()
         wins = [
@@ -660,7 +878,7 @@ class Observation:
             residual_rms=stats["rms"],
             residual_peak=stats["max"],
         )
-        if not quiet:
+        if verbose:
             print(
                 f"clean: {res['niter']} iterations, {res['ncomp']} components, "
                 f"{res['cleaned_flux']:.5g} Jy cleaned "
@@ -673,33 +891,70 @@ class Observation:
                 print("  stopped: reached the cutoff flux")
             if res["hit_negative"]:
                 print("  stopped: first negative component")
-        return self._report(res, outfile)
+        return self._done(res, quiet, outfile)
 
-    def clrmod(self):
-        """Discard the model (difmap clrmod); `clearmodel()` does the
-        same and can also drop the CLEAN windows."""
+    def clrmod(self, quiet=True):
+        """Discard the model (difmap `clrmod`). `clearmodel()` does the same and can also drop the CLEAN windows.
+
+        Parameters
+        ----------
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
+        """
         self._core.clear_models(True, True)
         self._dirty()
-        return self
+        return self._done(self, quiet)
 
-    def clearmodel(self, windows=False):
-        """Remove every model component - CLEAN components as well as
-        hand-placed or fitted Gaussians - so that the next `invert()`
-        gives the dirty map again and imaging can start from scratch.
+    def clearmodel(self, windows=False, quiet=True):
+        """Remove every model component - CLEAN components as well as hand-placed or fitted ones - so that the next `invert()` gives the dirty map again and imaging can start from scratch.
 
-        CLEAN windows are kept unless `windows=True`.
+        Parameters
+        ----------
+        windows : bool, default False
+            Also remove the CLEAN windows.
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
         """
         self._core.clear_models(True, True)
         if windows:
             self.windows.clear()
         self._dirty()
-        return self
+        return self._done(self, quiet)
 
-    def restore(self, bmaj=None, bmin=None, bpa=None, no_residual=False, do_smooth=False):
-        """Convolve the model with the restoring beam and add residuals.
+    def restore(self, bmaj=None, bmin=None, bpa=None, no_residual=False, do_smooth=False, quiet=True, verbose=True):
+        """Convolve the model with a restoring beam and add the residual map (difmap `restore`). The result is kept in `restored_map`, which `wmap` writes and `mapplot("clean")` shows.
 
-        Beam axes in mas, position angle in degrees; defaults to the
-        beam estimated by invert. Returns the restored map [ny, nx].
+        Parameters
+        ----------
+        bmaj : float | None, default None
+            FWHM of the restoring beam's major axis in mas; ``None`` uses the beam `invert` estimated.
+        bmin : float | None, default None
+            FWHM of the minor axis in mas; ``None`` uses the estimated beam.
+        bpa : float | None, default None
+            Position angle of the major axis in degrees, north through east; ``None`` uses the estimated beam.
+        no_residual : bool, default False
+            Leave the residuals out: the model convolved with the beam only.
+        do_smooth : bool, default False
+            Smooth the residual map with a 3x3 mask before adding it (difmap's `restore` smoothing flag).
+        quiet : bool, default True
+            Return None. ``False`` returns the restored map.
+        verbose : bool, default True
+            Print the restoring beam and the peak of the restored map.
+
+        Returns
+        -------
+        numpy.ndarray | None
+            With ``quiet=False``: the restored map, shape (ny, nx), in Jy/beam.
         """
         self._ensure_map()
         r = self._invert_result
@@ -711,22 +966,47 @@ class Observation:
         freq = float(np.mean(freqs)) if freqs else 0.0
         self._restored = self._core.restore(bmaj, bmin, bpa, no_residual, do_smooth, freq)
         self._restore_beam = (bmaj / MAS, bmin / MAS, bpa / DEG)
-        return self._restored
+        if verbose:
+            valid = self.valid(self._restored)
+            print(f"restore: beam {bmaj / MAS:.4g} x {bmin / MAS:.4g} mas at "
+                  f"{bpa / DEG:.4g} deg; peak {float(np.nanmax(valid)):.5g} Jy/beam, "
+                  f"model {self.model_flux:.5g} Jy")
+        return self._done(self._restored, quiet)
 
     def imstat(self, outfile=None):
-        """Statistics of the residual map inner quarter."""
+        """Statistics of the valid inner quarter of the residual map (difmap `imstat`), inverting first if needed.
+
+        Parameters
+        ----------
+        outfile : str | None, default None
+            Also write the statistics to this file as JSON.
+
+        Returns
+        -------
+        dict
+            The `min`, `max`, `mean` and `rms` of the pixel values, in Jy/beam.
+        """
         self._ensure_map()
         return self._report(dict(self._core.map_stats()), outfile)
 
     def noise_stats(self, image=None, nsigma=3.0, niter=5, outfile=None):
-        """Robust noise estimate of the residual map: the mean and
-        standard deviation of a Gaussian fitted to the pixel histogram
-        after iterative sigma clipping, which removes real emission.
+        """A robust noise estimate of a map: the mean and standard deviation of its pixels after iterative sigma clipping, which removes real emission.
 
-        Returns a dict with `mean`, `rms` (the clipped, i.e. noise-only,
-        standard deviation), `raw_rms` over all valid pixels, the pixel
-        count `npix` and how many of them the clipping rejected
-        (`nclipped`).
+        Parameters
+        ----------
+        image : numpy.ndarray | None, default None
+            The pixels to measure; ``None`` uses the valid area of the residual map (`valid()`).
+        nsigma : float, default 3.0
+            Pixels further than this many standard deviations from the mean are clipped at each pass.
+        niter : int, default 5
+            The maximum number of clipping passes.
+        outfile : str | None, default None
+            Also write the result to this file as JSON.
+
+        Returns
+        -------
+        dict
+            `mean` and `rms` of the clipped (noise-only) pixels, `raw_rms` over all of them, the pixel count `npix` and how many the clipping rejected (`nclipped`). All in the image's units.
         """
         img = self.valid() if image is None else np.asarray(image)
         flat = np.asarray(img, dtype=np.float64).ravel()
@@ -757,16 +1037,21 @@ class Observation:
         }, outfile)
 
     def moddif(self, uvmin=0.0, uvmax=0.0, outfile=None):
-        """Goodness of fit between the model and the data
-        (a port of difmap's `moddif`, which is what its self-cal reports
-        before and after a solution).
+        """How well the model fits the data (a port of difmap's `moddif`, which is what its self-calibration reports before and after a solution). Only unflagged samples inside the UV range count.
 
-        Returns a dict with the `rms` of the complex model-data
-        difference in Jy, `sigma` = sqrt(chisq/ndata) (1 for a fit
-        consistent with the data weights), the `chisq` itself, the
-        number of measurements `ndata` (real and imaginary counted
-        separately, as difmap does) and the number of visibilities
-        `nvis`. Only unflagged samples inside the UV range count.
+        Parameters
+        ----------
+        uvmin : float, default 0.0
+            The shortest UV radius included, in wavelengths.
+        uvmax : float, default 0.0
+            The longest UV radius included, in wavelengths; 0 means no limit.
+        outfile : str | None, default None
+            Also write the result to this file as JSON.
+
+        Returns
+        -------
+        dict
+            `rms`: the rms of the complex model-data difference in Jy; `sigma`: ``sqrt(chisq / ndata)``, which is 1 for a fit consistent with the data weights; the `chisq` itself; the number of measurements `ndata` (real and imaginary parts counted separately, as difmap does) and of visibilities `nvis`.
         """
         vis, wt = self._core.stream_vis()
         vis = np.asarray(vis)
@@ -800,11 +1085,17 @@ class Observation:
         }, outfile)
 
     def mapinfo(self, outfile=None):
-        """Everything worth knowing about the current image, as a dict:
-        the beam, the peak, the model, and the residual noise.
+        """Everything worth knowing about the current image, as a dict: the map geometry and weighting, the beam, the peak, the model and the residual noise. `print_mapinfo()` prints it, as `mapplot`'s "x" key does.
 
-        This is what `mapplot`'s "x" key prints, and it is a plain dict
-        so it can be stored, compared or written out.
+        Parameters
+        ----------
+        outfile : str | None, default None
+            Also write the result to this file as JSON.
+
+        Returns
+        -------
+        dict
+            `source`, `mapsize` (pixels), `cellsize` (mas), `uvweight`, `uvtaper` (`value`, `radius` in wavelengths), `uvrange` (`uvmin`, `uvmax` in wavelengths; 0 = no limit), `beam` (mas, degrees; `restored` says whether it is the restoring beam or the estimate), `estimated_beam`, `peak` (Jy/beam and its offset in mas), the model `flux` (Jy), `model` (its components), `residual` (rms, min, max in Jy/beam) and the accumulated `shift` (mas).
         """
         self._ensure_map()
         stats = self.imstat()
@@ -825,6 +1116,8 @@ class Observation:
                 "errpow": self._errpow,
                 "radial": self._dorad,
             },
+            "uvtaper": {"value": self._gauval, "radius": self._gaurad},
+            "uvrange": {"uvmin": self._uvmin, "uvmax": self._uvmax},
             "beam": {"bmaj": beam[0], "bmin": beam[1], "bpa": beam[2],
                      "restored": self._restore_beam is not None},
             "estimated_beam": self.estimated_beam,
@@ -841,8 +1134,21 @@ class Observation:
             "shift": self.total_shift,
         }, outfile)
 
-    def print_mapinfo(self, info=None):
-        """Print `mapinfo()` as a short human-readable report."""
+    def print_mapinfo(self, info=None, quiet=True):
+        """Print `mapinfo()` as a short human-readable report.
+
+        Parameters
+        ----------
+        info : dict | None, default None
+            A dict from an earlier `mapinfo()`; ``None`` measures the current image.
+        quiet : bool, default True
+            Return None. ``False`` returns the dict printed.
+
+        Returns
+        -------
+        dict | None
+            The `mapinfo()` dict, with ``quiet=False``.
+        """
         d = self.mapinfo() if info is None else info
         b = d["beam"]
         print(f"--- {d['source']}: {d['mapsize'][0]}x{d['mapsize'][1]} pixels of "
@@ -851,6 +1157,13 @@ class Observation:
         weighting = (f"robust {w['robust']:+g}" if w["robust"] is not None
                      else f"binwid {w['binwid']:g}, errpow {w['errpow']:g}")
         print(f"    weighting: {weighting}")
+        t = d.get("uvtaper") or {}
+        if 0.0 < t.get("value", 0.0) < 1.0 and t.get("radius", 0.0) > 0.0:
+            print(f"    taper: {t['value']:g} at {format_uvdist(t['radius'])} M-lambda")
+        r = d.get("uvrange") or {}
+        if r.get("uvmin") or r.get("uvmax"):
+            hi = f"{format_uvdist(r['uvmax'])} M-lambda" if r.get("uvmax") else "no limit"
+            print(f"    uv range: {format_uvdist(r.get('uvmin', 0.0))} to {hi}")
         print(f"    {'restored' if b['restored'] else 'estimated'} beam: "
               f"{b['bmaj']:.4g} x {b['bmin']:.4g} mas at {b['bpa']:.4g} deg")
         pk = d["peak"]
@@ -863,7 +1176,7 @@ class Observation:
         r = d["residual"]
         print(f"    residual: rms {r['rms']:.5g} Jy/beam (noise-only), "
               f"min {r['min']:.5g}, max {r['max']:.5g}")
-        return d
+        return self._done(d, quiet)
 
     # ------------------------------------------------------------------
     # model access
@@ -871,12 +1184,9 @@ class Observation:
 
     @property
     def model(self) -> list[dict]:
-        """The model components (mas/deg units), each with the `freepar`
-        bitmask of the parameters `modelfit` may vary.
+        """The whole model, as a list of dicts, one per component: `type` ("delta", "gauss", "disk", ...), `flux` (Jy), position `x` (east) and `y` (north) in mas, `major` axis (FWHM) in mas, axial `ratio`, position angle `phi` in degrees, reference frequency `freq0` (Hz) and spectral index `spcind`, and the `freepar` bitmask of the parameters `modelfit` may vary.
 
-        This is always the whole model: what `addcmp`, `clean`, `rmodel`
-        and `modelfit` produce is part of it at once, with no separate
-        step to establish it.
+        What `addcmp`, `clean`, `rmodel` and `modelfit` produce is part of it at once, with no separate step to establish it.
         """
         old, new = self._core.get_models()
         masks = list(self._core.freepars)
@@ -884,23 +1194,44 @@ class Observation:
 
     @property
     def model_flux(self) -> float:
+        """The total flux density of the model, in Jy."""
         return float(sum(c["flux"] for c in self.model))
 
     @property
     def nvariable(self) -> int:
-        """How many components `modelfit` would vary: those with a free
-        parameter. They keep it after a fit, so running `modelfit` again
-        continues fitting them (as in difmap).
-        """
+        """How many model components `modelfit` would vary: those with a free parameter. They keep it after a fit, so running `modelfit` again continues fitting them (as in difmap)."""
         return int(self._core.nvariable)
 
-    def addcmp(self, flux, x, y, type="delta", major=0.0, ratio=1.0, phi=0.0,
-               freq0=0.0, spcind=0.0, free=None):
-        """Add a model component by hand (difmap addcmp); positions and
-        sizes in mas, angles in degrees.
+    def addcmp(self, flux, x, y, type="delta", major=0.0, ratio=1.0, phi=0.0, freq0=0.0, spcind=0.0, free=None, quiet=True):
+        """Add a model component by hand (difmap `addcmp`).
 
-        `free` marks parameters as variable for modelfit, e.g.
-        ``free=["flux", "pos"]`` or ``free="shape"``.
+        Parameters
+        ----------
+        flux : float
+            Flux density in Jy.
+        x, y : float
+            Position east and north of the phase centre, in mas.
+        type : str, default "delta"
+            "delta" (a point source), "gauss", "disk", "ellipse", "ring", "rect" or "sz".
+        major : float, default 0.0
+            FWHM of the major axis in mas (0 for a point).
+        ratio : float, default 1.0
+            Axial ratio, minor over major (1 for a circular component).
+        phi : float, default 0.0
+            Position angle of the major axis in degrees, north through east.
+        freq0 : float, default 0.0
+            Reference frequency of the spectral index, in Hz; 0 for none.
+        spcind : float, default 0.0
+            Spectral index at `freq0`.
+        free : str | list of str | int | None, default None
+            Parameters `modelfit` may vary: any of "flux", "pos" (x and y), "major", "ratio", "phi", "spcind", or "shape" for the last three, e.g. ``free=["flux", "pos"]``; or difmap's bitmask. ``None`` keeps the component fixed.
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
         """
         self._core.add_component(
             CMP_CODES[type],
@@ -915,11 +1246,10 @@ class Observation:
             freepar=_free_mask(free),
         )
         self._dirty()
-        return self
+        return self._done(self, quiet)
 
     def _replace_model(self, comps):
-        """Replace the whole model with `comps` (dicts as `model` returns
-        them), keeping their free-parameter masks."""
+        """Replace the whole model with `comps` (dicts as `model` returns them), keeping their free-parameter masks."""
         self._core.clear_models(True, True)
         for c in comps:
             self._core.add_component(
@@ -931,50 +1261,64 @@ class Observation:
             )
         self._dirty()
 
-    def seed_model(self, type="gauss", free=("flux", "pos", "major")):
-        """Add one component at the brightest point of the residual map,
-        as a starting guess for `modelfit`.
+    def seed_model(self, type="gauss", free=("flux", "pos", "major"), quiet=True):
+        """Add one component at the brightest point of the residual map, as a starting guess for `modelfit`. It carries the peak flux and has zero width: a point source that the fit is free to resolve.
 
-        The default is a circular Gaussian of zero width (i.e. a point
-        source that the fit is free to resolve) carrying the peak flux.
-        Returns the seeded component as a dict.
+        Parameters
+        ----------
+        type : str, default "gauss"
+            The component type, as for `addcmp`.
+        free : sequence of str, default ("flux", "pos", "major")
+            The parameters `modelfit` may vary, as for `addcmp`.
+        quiet : bool, default True
+            Return None. ``False`` returns the component.
+
+        Returns
+        -------
+        dict | None
+            The seeded component, as `model` lists it, with ``quiet=False``.
         """
         self._ensure_map()
         (x, y), peak = self.peak_offset()
         self.addcmp(float(peak), x, y, type=type, major=0.0, ratio=1.0,
                     free=list(free))
-        return self.model[-1]
+        return self._done(self.model[-1], quiet)
 
-    def modelfit(self, niter=-1, free=None, uvmin=0.0, uvmax=0.0, quiet=False,
-                 outfile=None):
-        """Fit the model to the visibilities (difmap modelfit), by
-        Levenberg-Marquardt least squares on the residual real/imaginary
-        parts. The fitted values replace the old ones in the model;
-        there is nothing to keep afterwards.
+    def modelfit(self, niter=-1, free=None, uvmin=0.0, uvmax=0.0, quiet=True, verbose=True, outfile=None):
+        """Fit the model to the visibilities (difmap `modelfit`) by Levenberg-Marquardt least squares on the real and imaginary residuals. The fitted values replace the old ones in the model; there is nothing to keep afterwards.
 
-        Which parameters vary is set per component by `addcmp(free=)`,
-        and persists, so running modelfit again continues the fit.
-        `free` overrides it: a list gives one spec per model component,
-        in `model` order; a single spec sets which parameters vary on
-        the components that already have a free parameter (or on every
-        component, if none has), leaving the fixed ones - CLEAN
-        components above all - fixed. As in difmap (`obvarmod`), the
-        fixed components' visibilities are subtracted first, so the fit
-        works on the residuals after them. With no model at all, one is
-        seeded by `seed_model()`: a circular Gaussian of zero width at
-        the peak of the residual map.
+        Which parameters vary is set per component by `addcmp(free=...)`, and persists, so running modelfit again continues the fit. As in difmap (`obvarmod`), the visibilities of the fixed components - CLEAN components above all - are subtracted first, so the fit works on the residuals after them. With no model at all, one is seeded by `seed_model()`: a circular Gaussian of zero width at the peak of the residual map.
 
-        `niter` is the number of Levenberg-Marquardt iterations; the
-        default of -1 iterates until the fit converges.
+        Parameters
+        ----------
+        niter : int, default -1
+            The number of Levenberg-Marquardt iterations; negative iterates until the fit converges (capped at a few hundred).
+        free : list | str | None, default None
+            Overrides which parameters vary. A list with one spec per component (in `model` order) sets each component's; a single spec ("flux", ["flux", "pos"], "shape", ...) sets it on the components that already have a free parameter - or on every component, if none has - and leaves the fixed ones fixed. ``None`` keeps what the components have.
+        uvmin : float, default 0.0
+            Fit only visibilities at UV radii of at least this, in wavelengths.
+        uvmax : float, default 0.0
+            Fit only visibilities at UV radii up to this, in wavelengths; 0 means no limit.
+        quiet : bool, default True
+            Return None. ``False`` returns the result dict.
+        verbose : bool, default True
+            Print the fit summary and every fitted component with its uncertainties.
+        outfile : str | None, default None
+            Also write the result to this file as JSON.
 
-        Returns (and, unless `quiet`, prints) a dict with
-        rchisq/chisq/ndfree/nvis/nfree, whether it `converged`, the
-        fitted `components`, and a list of 1-sigma `errors` per
-        component, in mas/degrees.
+        Returns
+        -------
+        dict | None
+            With ``quiet=False``: `rchisq`, `chisq`, `ndfree`, `nvis` and `nfree` of the fit, whether it `converged` and after how many iterations (`niter`), the fitted `components` (as `model` lists them), their 1-sigma `errors` (same units), the number fitted (`ncomp`) and the whole model's `total_ncomp` and `total_flux` (Jy).
+
+        Raises
+        ------
+        ValueError
+            If no component has a free parameter.
         """
         if not self.model:
-            seeded = self.seed_model()
-            if not quiet:
+            seeded = self.seed_model(quiet=False)
+            if verbose:
                 print(
                     f"modelfit: no model given; starting from a circular "
                     f"Gaussian of {seeded['flux']:.5g} Jy at "
@@ -1037,9 +1381,9 @@ class Observation:
         res["ncomp"] = len(res["components"])
         res["total_ncomp"] = len(self.model)
         res["total_flux"] = self.model_flux
-        if not quiet:
+        if verbose:
             self._print_modelfit(res)
-        return self._report(res, outfile)
+        return self._done(res, quiet, outfile)
 
     @staticmethod
     def _print_modelfit(res):
@@ -1092,19 +1436,19 @@ class Observation:
     # ------------------------------------------------------------------
 
     def scans(self, gap=None, outfile=None) -> list[dict]:
-        """The scans of the observation, as a list of dicts with the
-        integration index range (`first`, `last`), the time range
-        (`tmin`, `tmax`, seconds) and the number of integrations
-        (`nint`).
+        """The scans of the observation. Two integrations more than `gap` apart are in different scans - difmap's definition. This is what `selfcal(solint="scan")` bins by, so it is the thing to check when a per-scan solution looks wrong.
 
-        Two integrations more than `gap` apart are in different scans -
-        difmap's definition, with a default of five times the median
-        integration spacing rather than difmap's flat hour, which is
-        meant for breaking plot axes rather than for self-calibrating
-        per scan. `gap` takes a unit string ("5min") or seconds.
+        Parameters
+        ----------
+        gap : float | str | None, default None
+            The gap that separates scans: seconds, or a string with a unit ("5min"). ``None`` uses `default_scangap`, five times the median integration spacing (rather than difmap's flat hour, which is meant for breaking plot axes).
+        outfile : str | None, default None
+            Also write the list to this file as JSON.
 
-        This is what `selfcal(solint="scan")` bins by, so it is the
-        thing to check when a per-scan solution looks wrong.
+        Returns
+        -------
+        list of dict
+            One dict per scan: the integration index range (`first`, `last`), the time range (`tmin`, `tmax`, seconds) and the number of integrations (`nint`).
         """
         g = 0.0 if gap is None else parse_time(gap, "s")
         times = np.asarray(self._core.times())
@@ -1120,55 +1464,59 @@ class Observation:
 
     @property
     def default_scangap(self) -> float:
-        """The gap in seconds that `scans()` uses by default."""
+        """The gap in seconds that `scans()` and `selfcal(solint="scan")` use by default to separate scans."""
         return float(self._core.default_scangap)
 
-    def selfcal(self, amp=False, phase=True, float_scale=False, solint=0.0,
-                gauval=0.0, gaurad=0.0, maxamp=0.0, maxphs=0.0,
-                uvmin=0.0, uvmax=0.0, mintel=0, flag=False,
-                quiet=False, mapstats=None, scangap=None, outfile=None,
-                converge=False, converge_threshold=0.01, converge_maxiter=20):
-        """Self-calibrate against the current model (difmap selfcal).
+    def selfcal(self, amp=False, phase=True, float_scale=False, solint=0.0, gauval=0.0, gaurad=0.0, maxamp=0.0, maxphs=0.0, uvmin=0.0, uvmax=0.0, mintel=0, flag=False, quiet=True, verbose=True, mapstats=None, scangap=None, outfile=None, converge=False, converge_threshold=0.01, converge_maxiter=20):
+        """Self-calibrate the antenna gains against the current model (difmap `selfcal`). Each IF of each subarray is solved independently, and the solutions are applied to the data the rest of the session sees.
 
-        `solint` is the solution interval: a bare number in minutes
-        (difmap's unit; 0 = one solution per integration), or a string
-        carrying its own unit - ``"30s"``, ``"90 sec"``, ``"1min"``,
-        ``"2h"``. ``"scan"`` solves each scan as a single interval, so
-        every scan gets exactly one solution however long it is, and
-        ``"2scan"`` (or ``"3 scans"``) groups that many scans per
-        solution. Scans are delimited by a gap of `scangap` (seconds,
-        or a string with a unit); the default is five times the median
-        integration spacing - see `scans()` to check what that gives.
+        Parameters
+        ----------
+        amp : bool, default False
+            Solve for amplitudes.
+        phase : bool, default True
+            Solve for phases.
+        float_scale : bool, default False
+            With `amp`, let the overall amplitude scale float onto the model's, instead of keeping the data's.
+        solint : float | str, default 0.0
+            The solution interval: a bare number in minutes (difmap's unit; 0 = one solution per integration), or a string with its own unit - ``"30s"``, ``"90 sec"``, ``"1min"``, ``"2h"``. ``"scan"`` solves each scan as one interval, so every scan gets exactly one solution however long it is; ``"2scan"`` (or ``"3 scans"``) groups that many scans per solution. A finite interval is smoothed onto the integrations as in difmap.
+        gauval : float, default 0.0
+            Value of a Gaussian taper on the solution weights at radius `gaurad`; 0 for none.
+        gaurad : float, default 0.0
+            UV radius of that taper, in wavelengths.
+        maxamp : float, default 0.0
+            With `amp`, reject amplitude corrections outside ``[1/maxamp, maxamp]``; values up to 1 set no limit.
+        maxphs : float, default 0.0
+            Reject phase corrections larger than this, in degrees; 0 for no limit.
+        uvmin : float, default 0.0
+            Use only baselines at UV radii of at least this, in wavelengths.
+        uvmax : float, default 0.0
+            Use only baselines at UV radii up to this, in wavelengths; 0 means no limit.
+        mintel : int, default 0
+            The fewest telescopes a solution needs; 0 sets no minimum.
+        flag : bool, default False
+            Flag the data of a solution that fails, instead of leaving it uncorrected.
+        quiet : bool, default True
+            Return None. ``False`` returns the result dict.
+        verbose : bool, default True
+            Print the solution summary and the fit before and after.
+        mapstats : bool | None, default None
+            Also measure the residual map before and after (`map_before`/`map_after`). ``None`` does so whenever a map already exists, which costs nothing in an imaging loop: self-calibration invalidates the map and the next `clean` would re-invert anyway.
+        scangap : float | str | None, default None
+            The gap that separates scans for ``solint="scan"``: seconds or a string with a unit. ``None``: five times the median integration spacing (see `scans()`).
+        outfile : str | None, default None
+            Also write the result to this file as JSON.
+        converge : bool, default False
+            Alternate self-calibration with `modelfit()` (selfcal, modelfit, selfcal, ...; every selfcal with these parameters) until the model-data fit stops improving. The model needs free parameters (`addcmp(free=...)`, or an earlier `modelfit`).
+        converge_threshold : float, default 0.01
+            With `converge`: stop when the relative change of the fit's `sigma` (`moddif()`) between one selfcal and the next is below this (0.01 is 1%). sigma rather than rms, so that data flagged on the way does not count as a change.
+        converge_maxiter : int, default 20
+            With `converge`: the most self-calibrations run (at least two always are).
 
-        maxphs is in degrees. Each IF of each subarray is solved
-        independently, so the returned `nbins` counts solution
-        intervals over all of them.
-
-        Returns (and, unless `quiet`, prints) how well the model fits
-        the data before and after the solution, as difmap does:
-        `fit_before` and `fit_after` are `moddif()` dicts. With
-        `mapstats` the residual map is measured on both sides too, into
-        `map_before`/`map_after`; the default measures it whenever a map
-        already exists, which costs nothing in an imaging loop because
-        self-cal invalidates the map and the next `clean` would have to
-        re-invert anyway.
-
-        With `converge`, self-calibration alternates with `modelfit()`
-        (selfcal, modelfit, selfcal, ...; every selfcal with these same
-        parameters) until the model-data fit stops improving: the
-        relative change of the fit's `sigma` (`moddif()`) after one
-        selfcal and after the next is below `converge_threshold` - 0.01
-        is 1%. sigma rather than rms so that data flagged on the way
-        (`flag=True`) does not count as a change; with the same data the
-        two change alike. At least two and at most `converge_maxiter`
-        selfcals are run. The model needs free parameters
-        (`addcmp(free=...)`, or a previous `modelfit`). The result is the
-        last selfcal's, with `fit_before`/`map_before` from before the
-        first one, plus `converged`, `niter`, the final `fit_change`, the
-        last `modelfit` result and a per-iteration `history`, which also
-        records how much each selfcal moved the gains (`gain_change`,
-        the median of ``|g_new / g_old - 1|`` over the solved complex
-        gains, and its maximum).
+        Returns
+        -------
+        dict | None
+            With ``quiet=False``: the number of solution bins (`nbins`, over every subarray and IF), unusable solutions (`nbadsol`) and bad telescope solutions (`nbadtel`), the fit before and after (`fit_before`, `fit_after`, as `moddif()` gives them) and, with `mapstats`, `map_before`/`map_after` (as `imstat()`). With `converge` also `converged`, `niter`, the final `fit_change`, the last `modelfit` result and a per-iteration `history` that records how much each selfcal moved the gains (`gain_change`, the median of ``|g_new / g_old - 1|``, and its maximum).
         """
         if converge:
             return self._selfcal_converge(
@@ -1177,7 +1525,7 @@ class Observation:
                      maxamp=maxamp, maxphs=maxphs, uvmin=uvmin, uvmax=uvmax,
                      mintel=mintel, flag=flag, scangap=scangap),
                 threshold=converge_threshold, maxiter=converge_maxiter,
-                quiet=quiet, mapstats=mapstats, outfile=outfile,
+                quiet=quiet, verbose=verbose, mapstats=mapstats, outfile=outfile,
             )
         secs, nscan = parse_interval(solint, "min")
         gap = 0.0 if scangap is None else parse_time(scangap, "s")
@@ -1209,15 +1557,14 @@ class Observation:
         if mapstats:
             res["map_before"] = map_before
             res["map_after"] = self.imstat()
-        if not quiet:
+        if verbose:
             self._print_selfcal(res, amp=amp, phase=phase,
                                 every=format_interval(secs, nscan))
-        return self._report(res, outfile)
+        return self._done(res, quiet, outfile)
 
-    def _selfcal_converge(self, pars, threshold, maxiter, quiet, mapstats,
-                          outfile):
-        """selfcal(converge=True): alternate selfcal and modelfit until
-        the gains settle."""
+    def _selfcal_converge(self, pars, threshold, maxiter, quiet, verbose,
+                          mapstats, outfile):
+        """selfcal(converge=True): alternate selfcal and modelfit until the gains settle."""
         if not self.nvariable:
             raise ValueError(
                 "selfcal(converge=True) alternates with modelfit(), so the "
@@ -1232,16 +1579,16 @@ class Observation:
         if mapstats is None:
             mapstats = self._invert_result is not None
         map_before = self.imstat() if mapstats else None
-        if not quiet:
+        if verbose:
             print(f"selfcal: alternating with modelfit until the fit changes "
                   f"by less than {100 * threshold:.3g}%")
         history, first, fit, prev = [], None, None, None
         change = float("nan")
         for it in range(1, int(maxiter) + 1):
             if it > 1:
-                fit = self.modelfit(quiet=True)
+                fit = self.modelfit(quiet=False, verbose=False)
             g_old, _ = self._gain_complex()
-            res = self.selfcal(**pars, quiet=True, mapstats=False)
+            res = self.selfcal(**pars, quiet=False, verbose=False, mapstats=False)
             first = first or res
             gain, worst = self._gain_change(g_old)
             sigma = res["fit_after"]["sigma"]
@@ -1254,7 +1601,7 @@ class Observation:
                 "rchisq": None if fit is None else fit["rchisq"],
                 "fit_after": res["fit_after"],
             })
-            if not quiet:
+            if verbose:
                 moved = "" if it == 1 else f" ({100 * change:.3g}% change)"
                 print(f"  iteration {it}: fit rms {res['fit_after']['rms']:.5g} "
                       f"Jy, sigma {sigma:.5g}{moved}; gains moved "
@@ -1267,16 +1614,15 @@ class Observation:
             res["map_after"] = self.imstat()
         res.update(converged=bool(change < threshold), niter=it,
                    fit_change=change, modelfit=fit, history=history)
-        if not quiet:
+        if verbose:
             end = "converged" if res["converged"] else "did not converge"
             print(f"selfcal: {end} after {it} self-calibrations")
             self._print_selfcal(res, amp=pars["amp"], phase=pars["phase"],
                                 every=format_interval(secs, nscan))
-        return self._report(res, outfile)
+        return self._done(res, quiet, outfile)
 
     def _gain_complex(self):
-        """The complex gain table [ntimes, nif, nant], 1 where unsolved,
-        and its "solved" mask."""
+        """The complex gain table [ntimes, nif, nant], 1 where unsolved, and its "solved" mask."""
         amp, phs, _ = self._core.gains()
         shape = (self._core.ntimes, self.nif, len(self.antennas))
         used = np.asarray(self._core.gains_used()).reshape(shape)
@@ -1285,8 +1631,7 @@ class Observation:
         return np.where(used, g, 1.0), used
 
     def _gain_change(self, g_old):
-        """Median and maximum of ``|g_new / g_old - 1|`` over the solved
-        gains; NaN if nothing is solved."""
+        """Median and maximum of ``|g_new / g_old - 1|`` over the solved gains; NaN if nothing is solved."""
         g_new, used = self._gain_complex()
         ok = used & (np.abs(g_old) > 0) & np.isfinite(g_new) & np.isfinite(g_old)
         if not ok.any():
@@ -1305,8 +1650,7 @@ class Observation:
 
     @staticmethod
     def _print_fit(res):
-        """The model-data fit, and the residual map, before and after a
-        calibration step."""
+        """The model-data fit, and the residual map, before and after a calibration step."""
         for when in ("before", "after"):
             f = res.get(f"fit_{when}")
             if f is None:
@@ -1319,26 +1663,28 @@ class Observation:
                 print(f"  map {when:<6}: peak {m['max']:.5g}, "
                       f"min {m['min']:.5g}, rms {m['rms']:.5g} Jy/beam")
 
-    def gscale(self, float_scale=False, quiet=False, mapstats=None,
-               outfile=None):
-        """Overall telescope amplitude corrections (difmap gscale).
+    def gscale(self, float_scale=False, quiet=True, verbose=True, mapstats=None, outfile=None):
+        """Solve for one overall amplitude correction per telescope and IF over the whole observation, and apply it (difmap `gscale`). Like `selfcal`, this changes the data the rest of the session sees.
 
-        One amplitude correction per telescope and IF is solved for the
-        whole observation, and applied - like `selfcal`, this changes
-        the data the rest of the session sees. Returns (and, unless
-        `quiet`, prints) a dict whose `gains` maps each station name to
-        the correction this call applied, with the per-IF values in
-        `gains_per_if`; `norms` holds the per-(subarray, IF)
-        renormalisation factors, and is empty when the overall scale is
-        left floating.
+        With ``float_scale=False`` (the default, as in difmap) the gains are renormalised to preserve the data's flux scale rather than pull it onto the model, so the corrections can be large while the map peak barely moves; the fit statistics are what show the improvement.
 
-        As for `selfcal`, `fit_before`/`fit_after` report how the fit to
-        the model changed, and `map_before`/`map_after` the residual map
-        when there is one. Note that with `float_scale=False` (the
-        default, as in difmap) the gains are renormalised to preserve
-        the *data's* flux scale rather than pull it onto the model, so
-        the corrections can be large while the map peak barely moves -
-        the fit statistics are what show the improvement.
+        Parameters
+        ----------
+        float_scale : bool, default False
+            Let the overall flux scale float onto the model's.
+        quiet : bool, default True
+            Return None. ``False`` returns the result dict.
+        verbose : bool, default True
+            Print each station's correction and the fit before and after.
+        mapstats : bool | None, default None
+            Also measure the residual map before and after; ``None`` does so whenever a map already exists.
+        outfile : str | None, default None
+            Also write the result to this file as JSON.
+
+        Returns
+        -------
+        dict | None
+            With ``quiet=False``: `gains`, station name -> the correction this call applied (median over IFs), `gains_per_if`, station -> one value per IF, the per-(subarray, IF) renormalisation factors `norms` (empty with `float_scale`), `nbins`, `nbadtel`, and `fit_before`/`fit_after` (and `map_before`/`map_after`) as for `selfcal`.
         """
         if mapstats is None:
             mapstats = self._invert_result is not None
@@ -1376,7 +1722,7 @@ class Observation:
             res["gains_per_if"][name] = per_if
             good = [v for v in per_if if np.isfinite(v)]
             res["gains"][name] = float(np.median(good)) if good else float("nan")
-        if not quiet:
+        if verbose:
             scale = "floating" if float_scale else "renormalised"
             print(f"gscale: amplitude corrections, {scale} scale "
                   f"({res['nbins']} solution bins, "
@@ -1392,32 +1738,62 @@ class Observation:
                 else:
                     print(f"  {name:<8}    -      (no solution)")
             self._print_fit(res)
-        return self._report(res, outfile)
+        return self._done(res, quiet, outfile)
 
-    def bayes_gscale(self, models=("clean", "gauss1", "gauss2", "gauss3"),
-                     prior_sigma=0.10, outlier_sigma=1.0, jackknife=True, per_if=True,
-                     float_scale=False, norm="median", nloop=2, solint=0.0, clean_gain=0.05,
-                     sigma_floor=0.01, model_sigma=None, timeavg=None, workers=None, apply=True,
-                     prefix=None, outformat=None, ms=None, uvfits=None,
-                     plot=None, quiet=False):
-        """Bayesian amplitude calibration of every station: `gscale`
-        with each station left out of the source model in turn, several
-        source models weighed against each other, and the result shrunk
-        towards the a-priori calibration: a station within its a-priori
-        accuracy (`prior_sigma`) is left alone, one clearly off it gets
-        its correction almost in full (`outlier_sigma`). The flux scale of each
-        IF is kept by its median station (``norm="median"``), not by the
-        mean gain as `gscale` does, which one station far off its
-        a-priori calibration drags.
+    def bayes_gscale(self, models=("gauss1", "gauss2", "gauss3"), prior_sigma=0.10, outlier_sigma=1.0, jackknife=True, per_if=True, float_scale=False, norm="median", nloop=2, solint=0.0, clean_gain=0.05, sigma_floor=0.01, model_sigma=None, timeavg=None, workers=None, apply=True, prefix=None, outformat=None, ms=None, uvfits=None, plot=None, quiet=True, verbose=True):
+        """Bayesian amplitude calibration of every station: `gscale` with each station left out of the source model in turn, several source models weighed against each other, and the result shrunk towards the a-priori calibration. A station within its a-priori accuracy (`prior_sigma`) is left alone; one clearly off it gets its correction almost in full (`outlier_sigma`). The flux scale of each IF is kept by its median station, not by the mean gain as `gscale` does, which one station far off its calibration drags. See `difmapy.bayescal` for the method.
 
-        See `difmapy.bayescal` for the method and every parameter. The
-        runs are independent and go in parallel threads (`workers`).
-        With `apply` the corrections are applied like `gscale`'s; with
-        `prefix` the JSON report, the diagnostic figure and the
-        calibration table of the constant corrections (for other sources
-        of the observation; `outformat` as for `savecaltable`) are
-        written. Returns a `BayesGainResult`: print it for the summary,
-        ``.plot()`` for the diagnostics.
+        Parameters
+        ----------
+        models : sequence of str, default ("gauss1", "gauss2", "gauss3")
+            The source-model families to compare: ``"gaussN"``/``"pointN"`` (N circular Gaussians or point sources, seeded at the residual peak and fitted), ``"clean"`` (``"clean500"`` for 500 iterations a round) and ``"current"`` (the model in the observation now). CLEAN is not in the default: the comparison often favoured it where it should not have.
+        prior_sigma : float, default 0.10
+            The fractional accuracy of the a-priori amplitude calibration.
+        outlier_sigma : float, default 1.0
+            The width of the log-amplitude errors of a station that is off (1.0: a factor of a few).
+        jackknife : bool, default True
+            Do the leave-one-station-out runs.
+        per_if : bool, default True
+            One correction per station and IF; ``False`` combines the IFs into one per station.
+        float_scale : bool, default False
+            Let the flux scale float onto the model's instead of keeping the data's.
+        norm : str, default "median"
+            How the flux scale is kept without `float_scale`: "median" (the median station of each IF gets no correction) or "mean" (difmap's mean gain of one).
+        nloop : int, default 2
+            Rounds of model building and phase self-calibration per run.
+        solint : float | str, default 0.0
+            Phase self-calibration interval, as for `selfcal`.
+        clean_gain : float, default 0.05
+            CLEAN loop gain for the ``"clean"`` models.
+        sigma_floor : float, default 0.01
+            The smallest uncertainty assumed for a log-gain.
+        model_sigma : dict | None, default None
+            Station -> extra uncertainty of its log-gain coming from the source model (one value, or one per IF).
+        timeavg : float | str | None, default None
+            Average the working data in time first, as `uvaver`.
+        workers : int | None, default None
+            Threads to run on; ``None`` uses every CPU.
+        apply : bool, default True
+            Apply the corrections to this observation, as `gscale` would.
+        prefix : str | None, default None
+            Write ``<prefix>.json``, ``<prefix>.png`` and a calibration table of the corrections.
+        outformat : str | None, default None
+            Format of that table, as for `savecaltable`.
+        ms : str | None, default None
+            Measurement Set a CASA table refers to, as for `savecaltable`.
+        uvfits : str | None, default None
+            UVFITS file an AIPS table is numbered for, as for `savecaltable`.
+        plot : bool | None, default None
+            Show the diagnostic figure; ``None`` shows it when nothing is written and `verbose` is on.
+        quiet : bool, default True
+            Return None. ``False`` returns the `BayesGainResult`.
+        verbose : bool, default True
+            Print the progress and the summary.
+
+        Returns
+        -------
+        BayesGainResult | None
+            With ``quiet=False``: the result; print it for the summary, ``.plot()`` for the diagnostics.
         """
         from difmapy.bayescal import bayes_gscale
 
@@ -1426,11 +1802,10 @@ class Observation:
             per_if=per_if, float_scale=float_scale, norm=norm, nloop=nloop, solint=solint,
             clean_gain=clean_gain, sigma_floor=sigma_floor, model_sigma=model_sigma, timeavg=timeavg,
             workers=workers, apply=apply, prefix=prefix, outformat=outformat,
-            ms=ms, uvfits=uvfits, plot=plot, quiet=quiet)
+            ms=ms, uvfits=uvfits, plot=plot, quiet=quiet, verbose=verbose)
 
     def _gain_amps(self, fill=np.nan):
-        """The gain-table amplitudes and their "solved" mask, both
-        [ntimes, nif, nant]; `fill` replaces unsolved entries."""
+        """The gain-table amplitudes and their "solved" mask, both [ntimes, nif, nant]; `fill` replaces unsolved entries."""
         amp, _, _ = self._core.gains()
         nt, nif, nant = self._core.ntimes, self.nif, len(self.antennas)
         used = np.asarray(self._core.gains_used()).reshape(nt, nif, nant)
@@ -1438,13 +1813,19 @@ class Observation:
         return np.where(used, amp, fill), used
 
     def station_gains(self, per_if=False, outfile=None):
-        """The accumulated amplitude gain corrections per station.
+        """The accumulated amplitude gain corrections per station: the factors difmapy multiplies the data by (`savecaltable` writes their reciprocal for CASA). A station with no solution reports 1.0, since its data is passed through unchanged.
 
-        With `per_if`, each station maps to a list of per-IF values;
-        otherwise to their median. Values are the corrections difmapy
-        multiplies the data by (`savecaltable` writes their reciprocal,
-        which is CASA's convention), so a station with no solution is
-        reported as 1.0 - the data is passed through unchanged.
+        Parameters
+        ----------
+        per_if : bool, default False
+            Give one value per IF instead of their median.
+        outfile : str | None, default None
+            Also write the result to this file as JSON.
+
+        Returns
+        -------
+        dict
+            Station name -> its correction (a float), or a list with one per IF with `per_if`.
         """
         amps, _ = self._gain_amps(fill=np.nan)
         out = {}
@@ -1457,36 +1838,54 @@ class Observation:
             out[name] = cols if per_if else float(np.median(cols))
         return self._report(out, outfile)
 
-    def uncalib(self, amp=True, phase=True, flags=False):
-        """Undo selfcal corrections (difmap uncalib)."""
+    def uncalib(self, amp=True, phase=True, flags=False, quiet=True):
+        """Undo the self-calibration corrections (difmap `uncalib`): a pure reset of the gain table.
+
+        Parameters
+        ----------
+        amp : bool, default True
+            Reset the amplitude corrections.
+        phase : bool, default True
+            Reset the phase corrections.
+        flags : bool, default False
+            Also clear the flags self-calibration set on failed solutions.
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
+        """
         self._core.uncalib(amp, phase, flags)
         self._dirty()
-        return self
+        return self._done(self, quiet)
 
     #: Names that `selfant` takes to mean "every antenna in the array".
     ALL_ANTENNAS = ("all", "*")
 
-    def selfant(self, name=None, fix=None, weight=None, quiet=False,
-                outfile=None) -> list[dict]:
-        """Constrain antennas in self-calibration (difmap selfant).
+    def selfant(self, name=None, fix=None, weight=None, quiet=True, verbose=True, outfile=None) -> list[dict]:
+        """Constrain antennas in self-calibration (difmap `selfant`). A fixed antenna keeps its gain of 1 while the others solve against it, and `weight` scales how much its baselines count in the solution. With no `name`, nothing is changed and the current constraints are reported - the way to check what a session has accumulated.
 
-        A fixed antenna keeps its gain of 1 while the others solve
-        against it, and `weight` scales how much a baseline to that
-        antenna counts in the solution.
+        Parameters
+        ----------
+        name : str | list of str | None, default None
+            An antenna name, ``"all"`` or ``"*"`` for every antenna, or a list of names; ``None`` only reports.
+        fix : bool | None, default None
+            Hold the antennas' gains fixed (True) or let them solve (False); ``None`` keeps what they have.
+        weight : float | None, default None
+            Weight of the antennas' baselines in the solution; ``None`` keeps what they have.
+        quiet : bool, default True
+            Return None. ``False`` returns the constraints.
+        verbose : bool, default True
+            Print the constraints as a table.
+        outfile : str | None, default None
+            Also write the constraints to this file as JSON.
 
-        `name` is an antenna name, ``"all"`` or ``"*"`` for every
-        antenna in the array, or a list of names. With no `name` at all
-        nothing is changed and the current constraints are simply
-        reported, which is the way to check what a session has
-        accumulated.
-
-        `fix` and `weight` left as None keep whatever the named
-        antennas already have, so one can be set without disturbing the
-        other.
-
-        Returns (and, unless `quiet`, prints) the constraints on every
-        antenna as a list of dicts with `antenna`, `subarray`, `fixed`
-        and `weight`.
+        Returns
+        -------
+        list of dict | None
+            With ``quiet=False``: one dict per antenna with `antenna`, `subarray`, `fixed` and `weight`.
         """
         if name is not None:
             if isinstance(name, str):
@@ -1514,9 +1913,9 @@ class Observation:
              "fixed": bool(f), "weight": float(w)}
             for n, sub, f, w in self._core.antenna_constraints
         ]
-        if not quiet:
+        if verbose:
             self._print_selfant(out)
-        return self._report(out, outfile)
+        return self._done(out, quiet, outfile)
 
     @staticmethod
     def _print_selfant(rows):
@@ -1538,43 +1937,88 @@ class Observation:
         print(f"{len(rows)} antennas: {nfix} fixed, "
               f"{nwt} with a weight other than 1")
 
-    def startmod(self, model=None, solint=0.0, flux=1.0):
-        """Phase self-calibrate against a starting model, then discard
-        it (difmap startmod).
+    def startmod(self, model=None, solint=0.0, flux=1.0, quiet=True, verbose=True):
+        """Phase self-calibrate against a starting model, then discard it (difmap `startmod`).
 
-        `model` is a .mod file name; with no model a point source of
-        `flux` Jy at the phase center is used, as difmap does. `solint`
-        is passed to `selfcal`, so it takes the same units and the
-        same "scan"/"Nscan" forms.
+        Parameters
+        ----------
+        model : str | None, default None
+            A difmap .mod file to start from; ``None`` uses a point source of `flux` Jy at the phase centre, as difmap does.
+        solint : float | str, default 0.0
+            The solution interval, as for `selfcal` (minutes, a string with a unit, or "scan").
+        flux : float, default 1.0
+            Flux density of the point-source model, in Jy.
+        quiet : bool, default True
+            Return None. ``False`` returns the `selfcal` result dict.
+        verbose : bool, default True
+            Print the self-calibration summary.
+
+        Returns
+        -------
+        dict | None
+            The `selfcal` result, with ``quiet=False``.
         """
         self.clrmod()
         if model is None:
             self.addcmp(flux, 0.0, 0.0)
         else:
             self.rmodel(model)
-        res = self.selfcal(phase=True, solint=solint)
+        res = self.selfcal(phase=True, solint=solint, quiet=False, verbose=verbose)
         self.clrmod()
-        return res
+        return self._done(res, quiet)
 
-    def resoff(self, baseline=None):
-        """Solve for per-baseline amplitude/phase offsets against the
-        current model, to absorb non-closing errors (difmap resoff).
-        Returns the number of (baseline, IF) corrections set."""
+    def resoff(self, baseline=None, quiet=True):
+        """Solve for per-baseline amplitude and phase offsets against the current model, to absorb non-closing errors (difmap `resoff`). The corrections are applied until `clroff()`.
+
+        Parameters
+        ----------
+        baseline : tuple of str | None, default None
+            Solve for this baseline only, as a pair of station names; ``None`` solves every baseline.
+        quiet : bool, default True
+            Return None. ``False`` returns the number of corrections set.
+
+        Returns
+        -------
+        int | None
+            The number of (baseline, IF) corrections set, with ``quiet=False``.
+        """
         bl = None
         if baseline is not None:
             bl = (self._ant_index(baseline[0]), self._ant_index(baseline[1]))
         n = self._core.resoff(baseline=bl)
         self._dirty()
-        return n
+        return self._done(n, quiet)
 
-    def clroff(self):
-        """Undo all baseline corrections (difmap clroff)."""
+    def clroff(self, quiet=True):
+        """Undo every baseline correction set by `resoff` (difmap `clroff`).
+
+        Parameters
+        ----------
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
+        """
         self._core.clroff()
         self._dirty()
-        return self
+        return self._done(self, quiet)
 
     def baseline_corrections(self, outfile=None):
-        """Baseline corrections as a list of dicts (amp, phase in deg)."""
+        """The per-baseline corrections set by `resoff`.
+
+        Parameters
+        ----------
+        outfile : str | None, default None
+            Also write the list to this file as JSON.
+
+        Returns
+        -------
+        list of dict
+            One dict per corrected baseline: `baseline` (a pair of station names), `amp` (the amplitude factor per IF) and `phase` (the phase per IF, in degrees).
+        """
         bls, amp, phs = self._core.baseline_corrections()
         names = self._core.antenna_names
         amp = np.asarray(amp)
@@ -1592,10 +2036,23 @@ class Observation:
     # geometry
     # ------------------------------------------------------------------
 
-    def shift(self, east, north):
-        """Shift the phase center by (east, north) in mas: the map
-        contents move by the same amount, and the model components and
-        CLEAN windows follow (difmap shift)."""
+    def shift(self, east, north, quiet=True):
+        """Shift the phase centre (difmap `shift`): the map contents move by (east, north), and the model components and CLEAN windows move with them. Shifts accumulate; `unshift()` undoes them all.
+
+        Parameters
+        ----------
+        east : float
+            Shift towards the east, in mas.
+        north : float
+            Shift towards the north, in mas.
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
+        """
         east, north = float(east), float(north)
         self._core.shift(east * MAS, north * MAS)
         self.windows[:] = [
@@ -1603,10 +2060,21 @@ class Observation:
             for (x0, x1, y0, y1) in self.windows
         ]
         self._dirty()
-        return self
+        return self._done(self, quiet)
 
-    def unshift(self):
-        """Undo all accumulated shifts (difmap unshift)."""
+    def unshift(self, quiet=True):
+        """Undo every accumulated phase-centre shift (difmap `unshift`).
+
+        Parameters
+        ----------
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
+        """
         east, north = self.total_shift
         self._core.unshift()
         self.windows[:] = [
@@ -1614,26 +2082,23 @@ class Observation:
             for (x0, x1, y0, y1) in self.windows
         ]
         self._dirty()
-        return self
+        return self._done(self, quiet)
 
     @property
     def total_shift(self):
-        """Accumulated (east, north) shift in mas."""
+        """The accumulated phase-centre shift as ``(east, north)`` in mas."""
         e, n = self._core.shift_total
         return (e / MAS, n / MAS)
 
     def uvaver(self, aver_time, doscatter=False):
-        """Return a new observation with the calibrated data averaged
-        into `aver_time` integrations (difmap uvaver).
+        """Return a new observation with the calibrated data averaged into `aver_time` integrations (difmap uvaver).
 
         Parameters
         ----------
         aver_time : float | str
-            The new integration time: seconds as a bare number, or a
-            string carrying its unit (``"30s"``, ``"2min"``).
+            The new integration time: seconds as a bare number, or a string carrying its unit (``"30s"``, ``"2min"``).
         doscatter : bool, default False
-            Derive the output weights from the scatter of the averaged
-            samples instead of summing the input weights.
+            Derive the output weights from the scatter of the averaged samples instead of summing the input weights.
 
         Returns
         -------
@@ -1642,9 +2107,7 @@ class Observation:
 
         Notes
         -----
-        The gains, baseline corrections and any shift are applied before
-        averaging, and the new observation starts uncalibrated, with this
-        one's selection, imaging setup and windows.
+        The gains, baseline corrections and any shift are applied before averaging, and the new observation starts uncalibrated, with this one's selection, imaging setup and windows.
         """
         from difmapy.average import uvaver
 
@@ -1654,18 +2117,14 @@ class Observation:
         return new
 
     def chanaver(self, nchan=None, channels=None):
-        """Return a new observation with every `nchan` adjacent channels
-        of each IF averaged into one (AIPS AVSPC, CASA split's `width`).
+        """Return a new observation with every `nchan` adjacent channels of each IF averaged into one (AIPS AVSPC, CASA split's `width`).
 
         Parameters
         ----------
         nchan : int | "all" | None, default None
-            Channels per output channel; it must divide each IF's number
-            of channels. ``None`` (or ``"all"``) averages every IF down
-            to a single channel.
+            Channels per output channel; it must divide each IF's number of channels. ``None`` (or ``"all"``) averages every IF down to a single channel.
         channels : list of (int, int) | None, default None
-            Inclusive global channel ranges, as for `select`, to average
-            only those - the way band edges are left out. ``None``: all.
+            Inclusive global channel ranges, as for `select`, to average only those - the way band edges are left out. ``None``: all.
 
         Returns
         -------
@@ -1674,9 +2133,7 @@ class Observation:
 
         Notes
         -----
-        As with `uvaver`, the calibrated data are averaged and the new
-        observation starts uncalibrated; the channel selection is reset
-        to all (averaged) channels, keeping the Stokes selection.
+        As with `uvaver`, the calibrated data are averaged and the new observation starts uncalibrated; the channel selection is reset to all (averaged) channels, keeping the Stokes selection.
         """
         from difmapy.average import chanaver
 
@@ -1685,18 +2142,9 @@ class Observation:
                              same_channels=False)
 
     def _derived(self, core, same_channels=True):
-        """A new observation around `core` - made from this one's data by
-        averaging - with this one's imaging setup, windows, selection
-        and provenance.
+        """A new observation around `core` - made from this one's data by averaging - with this one's imaging setup, windows, selection and provenance.
 
-        The rows (time averaging) or channels (frequency averaging) no
-        longer map one-to-one onto the source file's, so `_ms_origin` is
-        not carried over. What is: the calibration provenance
-        (`_cal_origin`: antennas, IFs, field - enough for calibration
-        tables and for `save` to build a new MS), and the trace of which
-        MS rows and channels each averaged sample came from
-        (`_ms_avg_origin`, see `_trace_averaging`), which `save_flags`
-        uses.
+        The rows (time averaging) or channels (frequency averaging) no longer map one-to-one onto the source file's, so `_ms_origin` is not carried over. What is: the calibration provenance (`_cal_origin`: antennas, IFs, field - enough for calibration tables and for `save` to build a new MS), and the trace of which MS rows and channels each averaged sample came from (`_ms_avg_origin`, see `_trace_averaging`), which `save_flags` uses.
         """
         new = Observation(core)
         origin = getattr(self._core, "_ms_origin", None)
@@ -1746,14 +2194,9 @@ class Observation:
         return new
 
     def _trace_averaging(self, core):
-        """Record, on an averaged `core`, which rows and channels of the
-        Measurement Set each of its samples was made from.
+        """Record, on an averaged `core`, which rows and channels of the Measurement Set each of its samples was made from.
 
-        `uvaver`/`chanaver` leave the map of their own step on the new
-        core; this composes it with the map so far (the identity for
-        data straight from the MS), so that any chain of averagings can
-        be traced back - which is what lets `save_flags` put a flag set
-        on an averaged sample onto every original sample behind it.
+        `uvaver`/`chanaver` leave the map of their own step on the new core; this composes it with the map so far (the identity for data straight from the MS), so that any chain of averagings can be traced back - which is what lets `save_flags` put a flag set on an averaged sample onto every original sample behind it.
         """
         row_step = core.__dict__.pop("_avg_row_map", None)
         chan_step = core.__dict__.pop("_avg_chan_map", None)
@@ -1779,10 +2222,13 @@ class Observation:
         core._ms_avg_origin = new
 
     def copy(self) -> "Observation":
-        """An independent copy of this observation: data, flags, gains,
-        model, selection, map and every imaging setting. Changing one
-        never affects the other (which is what lets calibration
-        experiments run side by side, see `bayes_gscale`)."""
+        """An independent copy of this observation: data, flags, gains, model, selection, map and every imaging setting. Changing one never affects the other, which is what lets calibration experiments run side by side (see `bayes_gscale`).
+
+        Returns
+        -------
+        Observation
+            The copy.
+        """
         import copy as _copy
 
         new = Observation.__new__(Observation)
@@ -1828,27 +2274,72 @@ class Observation:
             sel_chan=bool(selected_channels_only),
         )
 
-    def flag(self, baseline=None, station=None, tmin=None, tmax=None,
-             subarray=None, if_index=None, selected_channels_only=False):
-        """Flag visibilities (difmap flag). Restrict by baseline
-        (name pair), station name, time range (seconds since the
-        reference day, or a string with a unit such as "1.5h"),
-        subarray or IF. Returns #rows affected."""
+    def flag(self, baseline=None, station=None, tmin=None, tmax=None, subarray=None, if_index=None, selected_channels_only=False, quiet=True):
+        """Flag visibilities (difmap `flag`). With no restriction at all, everything is flagged; each argument narrows the selection.
+
+        Parameters
+        ----------
+        baseline : tuple of str | None, default None
+            Only this baseline, as a pair of station names.
+        station : str | None, default None
+            Only the baselines of this station.
+        tmin : float | str | None, default None
+            Start of the time range: seconds since the reference day, or a string with a unit ("1.5h"); ``None``: from the start.
+        tmax : float | str | None, default None
+            End of the time range, as `tmin`; ``None``: to the end.
+        subarray : int | None, default None
+            Only this subarray (0-based).
+        if_index : int | None, default None
+            Only this IF (0-based).
+        selected_channels_only : bool, default False
+            Only the channels of the current selection, instead of every channel of the IFs concerned.
+        quiet : bool, default True
+            Return None. ``False`` returns the number of rows affected.
+
+        Returns
+        -------
+        int | None
+            The number of rows affected, with ``quiet=False``.
+        """
         n = self._edit(True, baseline, station, tmin, tmax, subarray,
                        if_index, selected_channels_only)
         self._reapply_ignores()
         self._dirty()
-        return n
+        return self._done(n, quiet)
 
-    def unflag(self, baseline=None, station=None, tmin=None, tmax=None,
-               subarray=None, if_index=None, selected_channels_only=False):
-        """Unflag visibilities (difmap unflag)."""
+    def unflag(self, baseline=None, station=None, tmin=None, tmax=None, subarray=None, if_index=None, selected_channels_only=False, quiet=True):
+        """Unflag visibilities (difmap `unflag`). Deleted data (weight 0) stays flagged, and so do the baselines of `ignore`d stations.
+
+        Parameters
+        ----------
+        baseline : tuple of str | None, default None
+            Only this baseline, as a pair of station names.
+        station : str | None, default None
+            Only the baselines of this station.
+        tmin : float | str | None, default None
+            Start of the time range: seconds since the reference day, or a string with a unit ("1.5h"); ``None``: from the start.
+        tmax : float | str | None, default None
+            End of the time range, as `tmin`; ``None``: to the end.
+        subarray : int | None, default None
+            Only this subarray (0-based).
+        if_index : int | None, default None
+            Only this IF (0-based).
+        selected_channels_only : bool, default False
+            Only the channels of the current selection, instead of every channel of the IFs concerned.
+        quiet : bool, default True
+            Return None. ``False`` returns the number of rows affected.
+
+        Returns
+        -------
+        int | None
+            The number of rows affected, with ``quiet=False``.
+        """
         n = self._edit(False, baseline, station, tmin, tmax, subarray,
                        if_index, selected_channels_only)
         # An unflag must not resurrect an ignored station.
         self._reapply_ignores()
         self._dirty()
-        return n
+        return self._done(n, quiet)
 
     # ------------------------------------------------------------------
     # ignoring stations
@@ -1856,7 +2347,7 @@ class Observation:
 
     @property
     def ignored(self) -> list[str]:
-        """The stations currently being ignored (see `ignore`)."""
+        """The names of the stations currently set aside by `ignore`, sorted."""
         return sorted(self._ignored)
 
     def _station_rows(self, name) -> np.ndarray:
@@ -1870,10 +2361,7 @@ class Observation:
     def _flags_without_ignores(self, rows) -> np.ndarray:
         """The flags `rows` would carry if nothing were being ignored.
 
-        A baseline between two ignored stations belongs to both, so its
-        current flags are ignore flags, not the user's; the snapshot
-        taken when the *other* station was ignored is what that row
-        really looked like.
+        A baseline between two ignored stations belongs to both, so its current flags are ignore flags, not the user's; the snapshot taken when the *other* station was ignored is what that row really looked like.
         """
         block = np.array(self._core.flags_rows([int(r) for r in rows]), copy=True)
         where = {int(r): i for i, r in enumerate(rows)}
@@ -1887,33 +2375,30 @@ class Observation:
     def _reapply_ignores(self):
         """Re-flag the ignored stations' data.
 
-        Called after anything that edits flags, so that ignoring
-        outlives an `unflag` that would otherwise bring the station
-        back without anyone asking.
+        Called after anything that edits flags, so that ignoring outlives an `unflag` that would otherwise bring the station back without anyone asking.
         """
         for rows, _ in self._ignored.values():
             self._core.edit_rows([int(r) for r in rows], True,
                                  if_index=None, sel_chan=False)
 
-    def ignore(self, *antennas):
+    def ignore(self, *antennas, quiet=True):
         """Set aside every baseline of these stations until `unignore`.
 
-        Names are case-insensitive. The data is flagged, so imaging,
-        model fitting, self-calibration and the plots all skip it - but
-        unlike `flag`, the exact flag state of those baselines is
-        remembered first, so `unignore` puts them back as they were
-        rather than wholesale unflagged. That is the point: everyone
-        else's data can be flagged and calibrated in the meantime, and
-        the station still returns with its own history intact.
+        The data is flagged, so imaging, model fitting, self-calibration and the plots all skip it - but unlike `flag`, the exact flag state of those baselines is remembered first, so `unignore` puts them back as they were rather than wholesale unflagged. Everyone else's data can be flagged and calibrated in the meantime, and the station returns with its own history intact.
 
-        Two things worth knowing. Flag edits made to an ignored
-        station's own baselines while it is ignored are discarded by
-        `unignore`, since it restores the remembered state. And
-        self-calibration solved while a station is ignored has no
-        solution for it, so it comes back uncalibrated for those
-        intervals - `selfcal` again, or `selfant` to hold it fixed.
+        Flag edits made to an ignored station's own baselines while it is ignored are discarded by `unignore`, since it restores the remembered state. And self-calibration solved while a station is ignored has no solution for it, so it comes back uncalibrated for those intervals - `selfcal` again, or `selfant` to hold it fixed. Ignores are session state: `save()` does not write them.
 
-        Returns the list of stations ignored after the call.
+        Parameters
+        ----------
+        *antennas : str
+            Station names (case-insensitive), at least one.
+        quiet : bool, default True
+            Return None. ``False`` returns the stations ignored after the call.
+
+        Returns
+        -------
+        list of str | None
+            The stations ignored after the call, with ``quiet=False``.
         """
         if not antennas:
             raise ValueError(
@@ -1931,14 +2416,22 @@ class Observation:
             self._core.edit_rows([int(r) for r in rows], True,
                                  if_index=None, sel_chan=False)
         self._dirty()
-        return self.ignored
+        return self._done(self.ignored, quiet)
 
-    def unignore(self, *antennas):
-        """Bring back stations set aside by `ignore` (all, by default).
+    def unignore(self, *antennas, quiet=True):
+        """Bring back stations set aside by `ignore`. Their baselines are restored to the flag state they had when they were ignored; baselines shared with a station that is still ignored stay out.
 
-        Their baselines are restored to the flag state they had when
-        they were ignored; baselines shared with a station that is
-        still ignored stay out.
+        Parameters
+        ----------
+        *antennas : str
+            Station names (case-insensitive); none brings back every ignored station.
+        quiet : bool, default True
+            Return None. ``False`` returns the stations still ignored.
+
+        Returns
+        -------
+        list of str | None
+            The stations still ignored after the call, with ``quiet=False``.
         """
         names = ([self.antennas[self._ant_index(a)] for a in antennas]
                  if antennas else list(self._ignored))
@@ -1953,11 +2446,11 @@ class Observation:
             )
         self._reapply_ignores()
         self._dirty()
-        return self.ignored
+        return self._done(self.ignored, quiet)
 
     @property
     def flags(self) -> np.ndarray:
-        """The FLAG column, [nrow, nchan_total, npol] (True = flagged)."""
+        """The FLAG column, a boolean array of shape (nrow, nchan_total, npol), True where flagged. It can be assigned an array of the same shape."""
         return self._core.flags()
 
     @flags.setter
@@ -1967,13 +2460,18 @@ class Observation:
 
     @property
     def flagged_fraction(self) -> float:
+        """The fraction of all samples (rows x channels x polarizations) that are flagged, between 0 and 1."""
         c = self._core
         return c.nflagged / (c.nrow * c.nctotal * c.npol)
 
     def gain_snapshot(self):
-        """A copy of the current gain table, for use as `savecaltable`'s
-        `since=` argument so that later calibration can be exported as a
-        separate, incremental table."""
+        """A copy of the current gain table, for `savecaltable`'s `since=` argument, so that later calibration can be exported as a separate, incremental table.
+
+        Returns
+        -------
+        dict
+            `amp`, `phs` (radians) and the boolean `used`, each of shape (ntimes, nif, nant).
+        """
         amp, phs, _ = (np.asarray(x) for x in self._core.gains())
         nt, nif, nant = self._core.ntimes, self.nif, len(self.antennas)
         return {
@@ -1988,11 +2486,22 @@ class Observation:
                         "both": ("casa", "aips")}
 
     def caltable_formats(self, outformat=None, ms=None, uvfits=None) -> tuple:
-        """The formats `savecaltable` writes for `outformat`: by default
-        the native one of the file the data came from - a CASA table for
-        a Measurement Set, an AIPS SN table for UVFITS - unless a
-        reference file of the other kind is given (`ms`/`uvfits`), which
-        says which table is wanted."""
+        """The formats `savecaltable` writes for `outformat`.
+
+        Parameters
+        ----------
+        outformat : str | None, default None
+            "CASA", "AIPS" or "both" (any case). ``None`` (or "auto") picks the format native to the data - CASA for a Measurement Set, AIPS for UVFITS - unless only one of `ms`/`uvfits` is given, which says which table is wanted.
+        ms : str | None, default None
+            The Measurement Set a CASA table would refer to.
+        uvfits : str | None, default None
+            The UVFITS file an AIPS table would be numbered for.
+
+        Returns
+        -------
+        tuple of str
+            ``("casa",)``, ``("aips",)`` or ``("casa", "aips")``.
+        """
         if outformat is None or str(outformat).lower() == "auto":
             if ms and not uvfits:
                 return ("casa",)
@@ -2013,11 +2522,20 @@ class Observation:
 
     @staticmethod
     def caltable_paths(path, formats) -> dict:
-        """Where each format goes. A single format is written to `path`
-        itself. With both, a `path` ending in ``.fits`` is the AIPS file
-        and the CASA table is that name without ``.fits`` (and without a
-        ``.TASAV`` before it); any other `path` is the CASA table, and
-        the AIPS file is ``<path>.TASAV.FITS``."""
+        """Where `savecaltable` puts each format. A single format is written to `path` itself. With both, a `path` ending in ``.fits`` is the AIPS file and the CASA table is that name without ``.fits`` (and without a ``.TASAV`` before it); any other `path` is the CASA table, and the AIPS file is ``<path>.TASAV.FITS``.
+
+        Parameters
+        ----------
+        path : str
+            The path given to `savecaltable`.
+        formats : tuple of str
+            The formats, as `caltable_formats` returns them.
+
+        Returns
+        -------
+        dict
+            Format -> path.
+        """
         path = os.fspath(path)
         if len(formats) == 1:
             return {formats[0]: path}
@@ -2028,46 +2546,40 @@ class Observation:
             return {"casa": base, "aips": path}
         return {"casa": path, "aips": f"{path}.TASAV.FITS"}
 
-    def savecaltable(self, path, outformat=None, ms=None, uvfits=None,
-                     spw_ids=None, flag_uncalibrated=False, overwrite=True,
-                     quiet=False, since=None, solutions=None):
-        """Export the accumulated antenna gains as a calibration table
-        that CASA or AIPS can apply to the data.
+    def savecaltable(self, path, outformat=None, ms=None, uvfits=None, spw_ids=None, flag_uncalibrated=False, overwrite=True, quiet=True, verbose=True, since=None, solutions=None):
+        """Export the accumulated antenna gains as a calibration table that CASA or AIPS can apply to the data.
 
-        `outformat` is ``"CASA"`` (a "G Jones" table for `applycal`),
-        ``"AIPS"`` (an SN table inside a TASAV FITS file, for FITLD and
-        TACOP) or ``"both"``, in any case. By default it follows the
-        data: a Measurement Set gets a CASA table, a UVFITS file an AIPS
-        one - or, given only `ms` or only `uvfits`, the table that file is
-        for. See `caltable_paths` for where `path` puts each of the two.
+        The table is a snapshot of every correction applied so far (the gains accumulate over `selfcal`/`gscale` calls). CASA divides the data by its gains, so a CASA table holds the reciprocal of difmapy's corrections; AIPS multiplies by them, so an SN table holds their conjugate. Either way, applying the table reproduces what difmapy shows. Baseline corrections (`resoff`) and phase-centre `shift`s cannot be expressed in such a table, and are reported as warnings rather than dropped silently.
 
-        The table is a snapshot of every correction applied so far (the
-        gains accumulate over `selfcal`/`gscale` calls). CASA divides
-        the data by its gains, so a CASA table holds the reciprocal of
-        difmapy's corrections; AIPS multiplies by them, so an SN table
-        holds them as they are. Either way, applying the table
-        reproduces what difmapy shows.
+        Parameters
+        ----------
+        path : str
+            Where to write; see `caltable_paths` for where each format goes when both are written.
+        outformat : str | None, default None
+            "CASA" (a "G Jones" table for `applycal`), "AIPS" (an SN table in a TASAV FITS file, for FITLD and TACOP) or "both", in any case. ``None`` follows the data: a Measurement Set gets a CASA table, a UVFITS file an AIPS one - or, given only `ms` or only `uvfits`, the table that file is for.
+        ms : str | None, default None
+            The Measurement Set a CASA table refers to; ``None`` uses the one the data came from (required for UVFITS input).
+        uvfits : str | None, default None
+            The UVFITS file an SN table is numbered for; ``None`` uses the one the data came from (for MS input, antennas are numbered in ANTENNA-table order, as exportuvfits does). Antennas are matched by name, so another source of the same observation may be given.
+        spw_ids : list of int | None, default None
+            CASA only: the spectral-window ids of the IFs; ``None`` uses those recorded on loading.
+        flag_uncalibrated : bool, default False
+            Write entries with no solution as flagged rather than as unity gains.
+        overwrite : bool, default True
+            Replace an existing table.
+        quiet : bool, default True
+            Return None. ``False`` returns the writer's summary.
+        verbose : bool, default True
+            Print what was written, and any warnings.
+        since : dict | None, default None
+            A `gain_snapshot()` taken earlier: write only the calibration accumulated since then, giving one table per self-cal round. Applying the chain is equivalent to applying one cumulative table.
+        solutions : dict | None, default None
+            Write this set of gains instead of the gain table (`bayes_gscale` uses it).
 
-        `ms` is the Measurement Set a CASA table refers to (default: the
-        one the data came from; required for UVFITS input), and
-        `uvfits` the UVFITS file an SN table is numbered for (default:
-        the one the data came from; for MS input, antennas are numbered
-        in ANTENNA-table order as exportuvfits does). In both cases
-        antennas are matched by name, so a different but compatible
-        file - another source of the same observation - may be given.
-        Baseline corrections (`resoff`) and phase-centre `shift`s cannot
-        be expressed in such a table and are reported instead of being
-        dropped silently.
-
-        Pass `since=obs.gain_snapshot()` (taken earlier) to write only
-        the calibration accumulated since then, giving one table per
-        self-cal round; applying the chain together is equivalent to
-        applying one cumulative table. `solutions` writes a given set of
-        gains instead of the gain table (`bayes_gscale` uses it).
-
-        Returns the writer's summary (`path`, `nrows`, `nflagged`,
-        `warnings`, `format`); with both formats, one per format under
-        ``"casa"`` and ``"aips"``, and the warnings once at the top.
+        Returns
+        -------
+        dict | None
+            With ``quiet=False``: `path`, `nrows`, `nflagged`, `warnings` and `format`; with both formats, one such dict under ``"casa"`` and ``"aips"``, and `warnings` and the list of paths at the top.
         """
         from difmapy.io.aips import save_sntable
         from difmapy.io.caltable import save_caltable
@@ -2088,7 +2600,7 @@ class Observation:
                                     solutions=solutions)
             info["format"] = fmt
             infos[fmt] = info
-        if not quiet:
+        if verbose:
             label = {"casa": "CASA G table", "aips": "AIPS SN table (TASAV)"}
             for fmt, info in infos.items():
                 print(f"Wrote {label[fmt]} {info['path']}: {info['nrows']} "
@@ -2096,46 +2608,46 @@ class Observation:
             for w in next(iter(infos.values()))["warnings"]:
                 print(f"  warning: {w}")
         if len(infos) == 1:
-            return next(iter(infos.values()))
+            return self._done(next(iter(infos.values())), quiet)
         out = dict(infos)
         out["warnings"] = next(iter(infos.values()))["warnings"]
         out["path"] = [info["path"] for info in infos.values()]
-        return out
+        return self._done(out, quiet)
 
     def flag_commands(self) -> dict:
-        """The flags added in this session as a compact list of
-        selections (station or baseline, IFs, channels, time range,
-        polarizations); see `difmapy.io.flags.flag_entries`."""
+        """The flags added in this session as a compact list of selections (station or baseline, IFs, channels, time range, polarizations); see `difmapy.io.flags.flag_entries`.
+
+        Returns
+        -------
+        dict
+            The selections under `rows`, and the number of flagged samples they cover under `nsamples`.
+        """
         from difmapy.io.flags import flag_entries
 
         return flag_entries(self)
 
-    def wflags(self, path, outformat=None, uvfits=None, quiet=False):
-        """Write the flags added in this session as a flag table that
-        AIPS or CASA can apply - to the data that were loaded or to
-        other data of the same observation.
+    def wflags(self, path, outformat=None, uvfits=None, quiet=True, verbose=True):
+        """Write the flags added in this session as a flag table that AIPS or CASA can apply - to the data that were loaded or to other data of the same observation.
 
-        `outformat` is ``"AIPS"`` - an FG table in a TASAV FITS file
-        (FITLD it, TACOP ``INEXT 'FG'`` onto the UV data) - or
-        ``"CASA"`` - a flag-command list for
-        ``flagdata(vis, mode='list', inpfile=path)`` - or ``"both"``;
-        by default the one native to the data, as for `savecaltable`.
-        With both, `path` is the CASA list and the FG file is
-        ``<path>.FG.TASAV.FITS`` (or the other way round for a `path`
-        ending in ``.fits``). `uvfits` is the UV file an FG table is
-        numbered for (default: the one loaded).
+        Only flags set since loading are written (those already in the file are not repeated), as selections of a station or baseline, IFs, channels and a time range. After averaging on load a time range is the whole averaging bin and the channels are the original ones, so every sample behind a flagged average is covered. Samples *un*flagged in the session cannot be expressed in such a list; `save_flags` writes the exact flag state into a Measurement Set instead.
 
-        Only flags set since loading are written (those already in the
-        file are not repeated), as selections of a station or baseline,
-        IFs, channels and a time range. After averaging on load a time
-        range is the whole averaging bin and the channels are the
-        original ones, so every sample behind a flagged average is
-        covered. Samples *un*flagged in the session cannot be expressed
-        in such a list; `save_flags` writes the exact flag state into a
-        Measurement Set instead.
+        Parameters
+        ----------
+        path : str
+            Where to write. With both formats `path` is the CASA list and the FG file is ``<path>.FG.TASAV.FITS`` (or the other way round for a `path` ending in ``.fits``).
+        outformat : str | None, default None
+            "AIPS" - an FG table in a TASAV FITS file (FITLD it, TACOP ``INEXT 'FG'`` onto the UV data) - "CASA" - a flag-command list for ``flagdata(vis, mode='list', inpfile=path)`` - or "both"; ``None`` picks the format native to the data, as for `savecaltable`.
+        uvfits : str | None, default None
+            The UV file an FG table is numbered for; ``None`` uses the one loaded.
+        quiet : bool, default True
+            Return None. ``False`` returns the writer's summary.
+        verbose : bool, default True
+            Print what was written.
 
-        Returns the writer's summary (`path`, `nrows`, `nsamples`,
-        `format`), one per format under ``"casa"``/``"aips"`` if both.
+        Returns
+        -------
+        dict | None
+            With ``quiet=False``: `path`, `nrows`, `nsamples` and `format`; one such dict under ``"casa"``/``"aips"`` if both were written.
         """
         from difmapy.io.aips import save_fgtable
         from difmapy.io.flags import flag_entries, save_flagcmds
@@ -2161,56 +2673,81 @@ class Observation:
                 info = save_fgtable(self, paths[fmt], entries, uvfits=uvfits)
             info.update(format=fmt, nsamples=entries["nsamples"])
             infos[fmt] = info
-            if not quiet:
+            if verbose:
                 kind = ("CASA flag commands" if fmt == "casa"
                         else "AIPS FG table (TASAV)")
                 print(f"Wrote {kind} {info['path']}: {info['nrows']} "
                       f"entries for {entries['nsamples']} flagged samples")
-        return next(iter(infos.values())) if len(infos) == 1 else infos
+        return self._done(next(iter(infos.values())) if len(infos) == 1 else infos, quiet)
 
-    def save_flags(self, path=None, flag_row=True):
-        """Write the flags back into the Measurement Set the data came
-        from - the standard MS way of persisting them: only FLAG (and
-        FLAG_ROW) are modified, data and weights are untouched.
+    def save_flags(self, path=None, flag_row=True, quiet=True):
+        """Write the flags back into the Measurement Set the data came from - the standard MS way of persisting them: only FLAG (and FLAG_ROW) are modified, data and weights are untouched.
 
-        For data as loaded, the FLAG column becomes exactly the current
-        flags. For data averaged in time or frequency (on load or
-        later), a flagged averaged sample flags every sample of the MS
-        that went into it, and unflagged ones are left as the file has
-        them - an average cannot say which of its inputs were good - so
-        flags are only added.
+        For data as loaded, the FLAG column becomes exactly the current flags. For data averaged in time or frequency (on load or later), a flagged averaged sample flags every sample of the MS that went into it, and unflagged ones are left as the file has them - an average cannot say which of its inputs were good - so flags are only added.
 
-        `path`, if given, must be that same Measurement Set. Returns the
-        number of MS rows written.
+        Parameters
+        ----------
+        path : str | None, default None
+            The Measurement Set to write to; it must be the one the data came from, which ``None`` uses.
+        flag_row : bool, default True
+            Also set FLAG_ROW on rows whose every sample is flagged.
+        quiet : bool, default True
+            Return None. ``False`` returns the number of rows written.
+
+        Returns
+        -------
+        int | None
+            The number of MS rows written, with ``quiet=False``.
         """
         from difmapy.io.ms import save_flags
 
-        return save_flags(self._core, path=path, flag_row=flag_row)
+        return self._done(save_flags(self._core, path=path, flag_row=flag_row), quiet)
 
     # ------------------------------------------------------------------
     # interactive plots (pyqtgraph)
     # ------------------------------------------------------------------
 
     def radplot(self, quantity="ap", colorby="spw", block=None):
-        """Amplitude and/or phase vs UV radius, with interactive
-        flagging.
+        """Amplitude and phase against UV radius (difmap `radplot`), with the model overplotted and interactive flagging. In the window, ``n``/``p`` highlight one antenna's baselines at a time and ``h`` lists every key.
 
-        `quantity` is "amp", "phase", or "ap" (also spelled "anp" or
-        "a&p") for stacked amplitude and phase panels, the default.
-        `colorby` chooses the point colouring: "spw" (a gradient over
-        the IFs, the default), "time", "baseline", "amp", or "none".
+        Parameters
+        ----------
+        quantity : str, default "ap"
+            "amp", "phase", or "ap" (also "anp", "a&p") for an amplitude panel above a phase panel.
+        colorby : str, default "spw"
+            Point colouring: "spw" (a gradient over the IFs), "time", "baseline", "amp", or "none".
+        block : bool | None, default None
+            Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+        Returns
+        -------
+        PlotWindow
+            The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
         """
         from difmapy.plots import radplot
 
         return radplot(self, quantity=quantity, colorby=colorby, block=block)
 
-    def projplot(self, angle=0.0, quantity="ap", colorby="spw", block=None,
-                 step=10.0):
-        """Amp/phase vs projected UV distance (difmap projplot).
+    def projplot(self, angle=0.0, quantity="ap", colorby="spw", block=None, step=10.0):
+        """Amplitude and phase against the UV distance projected on a direction (difmap `projplot`), with interactive flagging. In the window ``<`` and ``>`` turn the projection by `step` degrees and redraw.
 
-        `angle` is the position angle of the projection direction in
-        degrees, north through east. In the window ``<`` and ``>`` turn
-        it by `step` degrees and redraw.
+        Parameters
+        ----------
+        angle : float, default 0.0
+            Position angle of the projection direction, in degrees north through east.
+        quantity : str, default "ap"
+            "amp", "phase", or "ap" (also "anp", "a&p") for an amplitude panel above a phase panel.
+        colorby : str, default "spw"
+            Point colouring: "spw" (a gradient over the IFs), "time", "baseline", "amp", or "none".
+        block : bool | None, default None
+            Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+        step : float, default 10.0
+            The angle, in degrees, that ``<``/``>`` turn the projection by.
+
+        Returns
+        -------
+        PlotWindow
+            The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
         """
         from difmapy.plots import projplot
 
@@ -2218,105 +2755,257 @@ class Observation:
                         colorby=colorby, block=block, step=step)
 
     def uvplot(self, colorby="spw", block=None):
-        """UV coverage with interactive flagging."""
+        """The UV coverage (difmap `uvplot`), conjugate points included, with interactive flagging.
+
+        Parameters
+        ----------
+        colorby : str, default "spw"
+            Point colouring: "spw" (a gradient over the IFs), "time", "baseline", "amp", or "none".
+        block : bool | None, default None
+            Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+        Returns
+        -------
+        PlotWindow
+            The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+        """
         from difmapy.plots import uvplot
 
         return uvplot(self, colorby=colorby, block=block)
 
     def vplot(self, nplot=3, reftel=None, quantity="ap", block=None):
-        """Visibility amplitude and phase vs time, `nplot` baselines to
-        a page, with a per-IF legend and interactive flagging.
+        """Visibility amplitude and phase against time (difmap `vplot`), `nplot` baselines to a page, each framed as one, with a per-IF legend and interactive flagging. ``n``/``p`` page through the baselines, the space bar switches between flagging per baseline and per antenna, ``z``/``u`` restore the y/x ranges (the time axis spans the whole observation).
 
-        The arguments come in difmap's order: ``vplot(3)`` is three
-        baselines to a page, ``vplot(3, "EF")`` only EF's baselines, and
-        0 puts all of a station's baselines on one page.
+        The arguments come in difmap's order: ``vplot(3)`` is three baselines to a page, ``vplot(3, "EF")`` only EF's baselines, and ``vplot("EF")`` the same with the default page size.
+
+        Parameters
+        ----------
+        nplot : int | str, default 3
+            Baselines per page; 0 puts all of a station's baselines on one page. A station name here is taken as `reftel`.
+        reftel : str | int | None, default None
+            Show only this station's baselines (a name, case-insensitive, or an antenna index).
+        quantity : str, default "ap"
+            "amp", "phase", or "ap" (also "anp", "a&p") for an amplitude panel above a phase panel.
+        block : bool | None, default None
+            Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+        Returns
+        -------
+        PlotWindow
+            The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
         """
         from difmapy.plots import vplot
 
         return vplot(self, nplot=nplot, reftel=reftel, quantity=quantity,
                      block=block)
 
-    def mapplot(self, what="map", mapsize=None, cellsize=None, uvweight=None,
-                block=None, scale="linear", cmap="color", **clean_args):
-        """Interactive map display with CLEAN windows, model editing and
-        model fitting.
+    def mapplot(self, what="map", mapsize=None, cellsize=None, uvweight=None, block=None, scale="linear", cmap="color", uvrange=None, uvtaper=None, **clean_args):
+        """The interactive map display (difmap `mapplot`), with CLEAN windows, model editing and model fitting. The title names the file the data came from; ``h`` lists every key.
 
-        `mapsize` (pixels), `cellsize` (mas) and `uvweight` (a Briggs
-        robustness from -2 to +2) override the current imaging setup for
-        this and later images. With none of them given and `mapsize()`
-        never called, `auto_mapsize()` picks a sensible default.
+        The "Weighting" box at the top of the window switches between difmap's own `uvweight` scheme and robust -2, -1, 0, +1, +2, and re-images at once; like `uvweight()`, the choice stays in effect after the window closes. Beside it, the "UV range" (min, max) and "Taper" (value, radius) fields set `uvrange` and `uvtaper` - M-lambda, or a number with a unit such as ``500k`` - and re-image when Enter is pressed. As in difmap, the colours span the displayed map from its minimum to its peak.
 
-        `scale` is "linear" or "log" for the colour scale, which the
-        "l" key also toggles. `cmap` is "color" (difmap's pseudo-colour
-        table, the default), "grey" (black and white; the "g" key
-        switches between the two) or "viridis". As in difmap, the
-        colours span the displayed map from its minimum to its peak.
+        Parameters
+        ----------
+        what : str, default "map"
+            The image shown first: "map" (the residual map), "beam" (the dirty beam), "clean" (the restored map) or "model" (the model restored without residuals).
+        mapsize : int | None, default None
+            Map size in pixels for this and later images; with none of `mapsize`, `cellsize`, `uvweight` given and `mapsize()` never called, `auto_mapsize()` picks one.
+        cellsize : float | None, default None
+            Pixel size in mas for this and later images.
+        uvweight : float | None, default None
+            A Briggs robustness, -2 to +2, for this and later images.
+        uvrange : tuple | None, default None
+            ``(uvmin, uvmax)`` for this and later images, as `uvrange` takes them: M-lambda, or strings with a unit.
+        uvtaper : tuple | None, default None
+            ``(value, radius)`` for this and later images, as `uvtaper` takes them.
+        block : bool | None, default None
+            Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+        scale : str, default "linear"
+            The colour scale, "linear" or "log"; the ``l`` key toggles it.
+        cmap : str, default "color"
+            "color" (difmap's pseudo-colour table), "grey" (the ``g`` key switches between the two) or "viridis".
+        **clean_args
+            Arguments for the `clean` that the ``c`` key runs (`niter`, `gain`, `cutoff`), and `verbose`.
 
-        The "Weighting" box at the top of the window switches between
-        difmap's own `uvweight` scheme and robust -2, -1, 0, +1, +2, and
-        re-images at once; like `uvweight()`, the choice stays in effect
-        after the window closes.
+        Returns
+        -------
+        PlotWindow
+            The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
         """
         from difmapy.plots import mapplot
 
         return mapplot(self, what=what, mapsize=mapsize, cellsize=cellsize,
                        uvweight=uvweight, block=block, scale=scale,
-                       cmap=cmap, **clean_args)
+                       cmap=cmap, uvrange=uvrange, uvtaper=uvtaper, **clean_args)
 
     #: `mapplot` under difmap's shorter spelling.
     maplot = mapplot
 
     def cpplot(self, triangles=None, if_index=None, nplot=4, block=None):
-        """Closure phases vs time, with the model overplotted
-        (difmap cpplot). `triangles` is a list of antenna-name triples;
-        all closed triangles are shown by default."""
+        """Closure phases against time, with the model overplotted (difmap `cpplot`), `nplot` triangles to a page.
+
+        Parameters
+        ----------
+        triangles : list of tuple of str | None, default None
+            The triangles to show, as triples of station names; ``None`` shows every closed triangle.
+        if_index : int | None, default None
+            One IF (0-based); ``None`` shows each.
+        nplot : int, default 4
+            Triangles per page.
+        block : bool | None, default None
+            Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+        Returns
+        -------
+        PlotWindow
+            The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+        """
         from difmapy.plots import cpplot
 
         return cpplot(self, triangles=triangles, if_index=if_index,
                       nplot=nplot, block=block)
 
     def tplot(self, block=None):
-        """Per-antenna time sampling of unflagged data (difmap tplot)."""
+        """The time sampling of each antenna (difmap `tplot`): one row per station with a mark at every integration where it has unflagged data, in the primary colour when all of its baselines are unflagged and in the secondary colour when some are flagged.
+
+        Parameters
+        ----------
+        block : bool | None, default None
+            Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+        Returns
+        -------
+        PlotWindow
+            The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+        """
         from difmapy.plots import tplot
 
         return tplot(self, block=block)
 
     def corplot(self, quantity="both", nplot=3, block=None):
-        """Self-cal gain corrections vs time (difmap corplot).
+        """The self-calibration gain corrections against time (difmap `corplot`): one antenna to a pair of panels, amplitude above and phase below on a shared time axis.
 
-        One antenna to a pair of panels, amplitude above and phase
-        below on a shared time axis, `nplot` antennas to a page.
-        `quantity` is "both" (the default), "amp" or "phase".
+        Parameters
+        ----------
+        quantity : str, default "both"
+            "both", "amp" or "phase".
+        nplot : int, default 3
+            Antennas per page.
+        block : bool | None, default None
+            Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+        Returns
+        -------
+        PlotWindow
+            The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
         """
         from difmapy.plots import corplot
 
         return corplot(self, quantity=quantity, nplot=nplot, block=block)
 
-    def fplot(self, reftel=None, baselines=None, nplot=3, tmin=None,
-              tmax=None, calibrated=True, block=None):
-        """Amplitude and phase vs frequency, one baseline to a pair of
-        panels, averaged over the whole time range.
+    def fplot(self, reftel=None, baselines=None, nplot=3, tmin=None, tmax=None, calibrated=True, block=None):
+        """Amplitude and phase against frequency, one baseline to a pair of panels, averaged over time. Amplitudes are scalar-averaged, so they do not decorrelate, and phases vector-averaged. `possm()` shows the vector average of both, on a grid of baselines; `specplot()` averages every baseline at once.
 
-        The frequency counterpart of `vplot`: `nplot` baselines to a
-        page (n/p to page through them), every channel of every IF
-        averaged over the observation, or over `tmin`..`tmax` (seconds,
-        or strings with units such as "30min").
-        `reftel` keeps only one station's baselines, `baselines` names
-        them explicitly. Amplitudes are scalar-averaged and phases
-        vector-averaged, and the accumulated calibration is applied
-        unless `calibrated=False`.
+        Parameters
+        ----------
+        reftel : str | int | None, default None
+            Show only this station's baselines.
+        baselines : list of tuple of str | None, default None
+            The baselines to show, as pairs of station names; ``None`` shows all.
+        nplot : int, default 3
+            Baselines per page.
+        tmin : float | str | None, default None
+            Start of the averaging range: seconds, or a string with a unit ("30min"); ``None``: from the start.
+        tmax : float | str | None, default None
+            End of the averaging range; ``None``: to the end.
+        calibrated : bool, default True
+            Apply the accumulated calibration; ``False`` shows the data as loaded.
+        block : bool | None, default None
+            Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
 
-        Use `specplot()` for the same thing averaged over all baselines
-        at once.
+        Returns
+        -------
+        PlotWindow
+            The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
         """
         from difmapy.plots import fplot
 
         return fplot(self, reftel=reftel, baselines=baselines, nplot=nplot,
                      tmin=tmin, tmax=tmax, calibrated=calibrated, block=block)
 
+    def possm(self, nplot=9, reftel=None, baselines=None, ncols=3, tmin=None, tmax=None, calibrated=True, block=None):
+        """Vector-averaged amplitude and phase against frequency (AIPS POSSM), a grid of baselines to a page - 3 x 3 by default - each an amplitude panel above a phase panel. Every channel of every IF is vector-averaged over the whole observation (or `tmin`..`tmax`), so phase slopes and ripples across the band show, and decorrelate the amplitudes as POSSM does. ``n``/``p`` page through the baselines in the same order as `vplot`.
+
+        Parameters
+        ----------
+        nplot : int, default 9
+            Baselines per page; 0 puts them all on one.
+        reftel : str | int | None, default None
+            Show only this station's baselines (a name, case-insensitive, or an antenna index).
+        baselines : list of tuple of str | None, default None
+            The baselines to show, as pairs of station names; ``None`` shows all.
+        ncols : int, default 3
+            Baselines per row of the grid.
+        tmin : float | str | None, default None
+            Start of the averaging range: seconds, or a string with a unit ("30min"); ``None``: from the start.
+        tmax : float | str | None, default None
+            End of the averaging range; ``None``: to the end.
+        calibrated : bool, default True
+            Apply the accumulated calibration; ``False`` shows the data as loaded.
+        block : bool | None, default None
+            Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+        Returns
+        -------
+        PlotWindow
+            The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+        """
+        from difmapy.plots import possm
+
+        return possm(self, nplot=nplot, reftel=reftel, baselines=baselines,
+                     ncols=ncols, tmin=tmin, tmax=tmax, calibrated=calibrated,
+                     block=block)
+
+    def dashboard(self, block=None):
+        """Every view of the session in one window, kept in step: vplot, tplot and possm (top left, in tabs), radplot, projplot and corplot (top right), mapplot (bottom left), and the controls (bottom right).
+
+        The plots are the usual interactive ones, with their keys and flagging; whatever changes the data or the model in one - a flag edit, a CLEAN, a fit - or from the controls reloads the others, as ``r`` would in each. The Main tab loads another file (with optional time and frequency averaging) and runs `selfcal` (phase and/or amplitude, at a solution interval), `gscale` (with or without a floating scale) and `bayes_gscale` (over the source models ticked); the Output tab shows everything the session prints and has buttons to save the maps, the beam, the model, the visibilities, the calibration and flag tables, and the whole session. `difmapy.dashboard()` opens one with no data loaded.
+
+        Parameters
+        ----------
+        block : bool | None, default None
+            Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+        Returns
+        -------
+        Dashboard
+            The dashboard window; `Dashboard.obs` is the observation it shows, which changes when a file is loaded from it.
+        """
+        from difmapy.plots import dashboard
+
+        return dashboard(self, block=block)
+
     def specplot(self, baseline=None, tmin=None, tmax=None, xaxis="freq", block=None):
-        """Time-averaged spectrum of the selected polarization
-        (difmap specplot)."""
+        """The time-averaged spectrum of the selected polarization (difmap `specplot`), over every baseline or one.
+
+        Parameters
+        ----------
+        baseline : tuple of str | None, default None
+            One baseline, as a pair of station names; ``None`` averages every baseline.
+        tmin : float | str | None, default None
+            Start of the averaging range: seconds, or a string with a unit; ``None``: from the start.
+        tmax : float | str | None, default None
+            End of the averaging range; ``None``: to the end.
+        xaxis : str, default "freq"
+            "freq" for frequency or "chan" for channel number.
+        block : bool | None, default None
+            Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+        Returns
+        -------
+        PlotWindow
+            The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+        """
         from difmapy.plots import specplot
 
         return specplot(self, baseline=baseline, tmin=tmin, tmax=tmax,
@@ -2327,8 +3016,22 @@ class Observation:
     # ------------------------------------------------------------------
 
     def closure_phases(self, triangle=None, if_index=None, outfile=None):
-        """Closure phase time series (radians). Returns a list of dicts
-        with triangle/if_index/time/phase/model/error."""
+        """Closure-phase time series of the data and of the model.
+
+        Parameters
+        ----------
+        triangle : tuple of str | None, default None
+            One triangle, as three station names; ``None`` gives every closed triangle.
+        if_index : int | None, default None
+            One IF (0-based); ``None`` gives each IF.
+        outfile : str | None, default None
+            Also write the list to this file as JSON.
+
+        Returns
+        -------
+        list of dict
+            One dict per triangle and IF with `triangle`, `if_index`, and arrays `time` (seconds), `phase`, `model` and `error` (radians).
+        """
         idx = None
         if triangle is not None:
             idx = tuple(sorted(self._ant_index(t) for t in triangle))
@@ -2338,16 +3041,26 @@ class Observation:
             outfile,
         )
 
-    def spectrum(self, baseline=None, tmin=None, tmax=None, calibrated=True,
-                 outfile=None):
-        """Time-averaged spectrum of the current polarization selection.
+    def spectrum(self, baseline=None, tmin=None, tmax=None, calibrated=True, outfile=None):
+        """The time-averaged spectrum of the current polarization selection. It covers every channel, not only the selected ones, so it can be used to decide which channels to select. The visibilities are vector-averaged with the accumulated calibration applied per channel.
 
-        Covers all channels (not only the selected ones), so it can be
-        used to decide which channels to select. The visibilities are
-        vector-averaged over `tmin`..`tmax` (the whole observation by
-        default; seconds, or strings with units) with the accumulated
-        calibration applied per channel; `calibrated=False` averages
-        the data as it was loaded.
+        Parameters
+        ----------
+        baseline : tuple of str | None, default None
+            One baseline, as a pair of station names; ``None`` averages every baseline.
+        tmin : float | str | None, default None
+            Start of the averaging range: seconds, or a string with a unit; ``None``: from the start.
+        tmax : float | str | None, default None
+            End of the averaging range; ``None``: to the end.
+        calibrated : bool, default True
+            Apply the accumulated calibration; ``False`` averages the data as loaded.
+        outfile : str | None, default None
+            Also write the result to this file as JSON.
+
+        Returns
+        -------
+        dict
+            Per-channel arrays: `chan`, `freq` (Hz), the averaged `re` and `im` (Jy), the scalar-averaged `amp` (Jy) and the summed weight `wt` (0 where there is no data).
         """
         bl = None
         if baseline is not None:
@@ -2405,24 +3118,54 @@ class Observation:
         )
 
     def wmap(self, path, overwrite=True):
-        """Write the restored map (restoring first if needed)."""
+        """Write the restored map to a FITS file (difmap `wmap`), restoring with the default beam first if that has not been done.
+
+        Parameters
+        ----------
+        path : str
+            The FITS file to write.
+        overwrite : bool, default True
+            Replace an existing file.
+        """
         if self._restored is None:
-            self.restore()
+            self.restore(verbose=False)
         self._write_fits_image(path, self._restored, "JY/BEAM", beam=self._restore_beam,
                                overwrite=overwrite)
 
     def wdmap(self, path, overwrite=True):
-        """Write the residual dirty map."""
+        """Write the residual (dirty) map to a FITS file (difmap `wdmap`).
+
+        Parameters
+        ----------
+        path : str
+            The FITS file to write.
+        overwrite : bool, default True
+            Replace an existing file.
+        """
         self._ensure_map()
         self._write_fits_image(path, self._core.map(), "JY/BEAM", overwrite=overwrite)
 
     def wbeam(self, path, overwrite=True):
-        """Write the dirty beam."""
+        """Write the dirty beam to a FITS file (difmap `wbeam`).
+
+        Parameters
+        ----------
+        path : str
+            The FITS file to write.
+        overwrite : bool, default True
+            Replace an existing file.
+        """
         self._ensure_map()
         self._write_fits_image(path, self._core.beam(), "", overwrite=overwrite)
 
     def wmodel(self, path):
-        """Write the model in difmap/Caltech .mod format."""
+        """Write the model to a difmap/Caltech ``.mod`` file (difmap `wmodel`).
+
+        Parameters
+        ----------
+        path : str
+            The file to write.
+        """
         comps = self.model
         with open(path, "w") as f:
             f.write("! Flux (Jy) Radius (mas)  Theta (deg)  "
@@ -2440,9 +3183,21 @@ class Observation:
                         f"{t} {m['freq0']:.5g} {m['spcind']:9.6g}\n"
                     )
 
-    def rmodel(self, path):
-        """Read a difmap/Caltech .mod model file, adding its components
-        to the model."""
+    def rmodel(self, path, quiet=True):
+        """Read a difmap/Caltech ``.mod`` model file, adding its components to the model (difmap `rmodel`).
+
+        Parameters
+        ----------
+        path : str
+            The file to read.
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
+        """
         with open(path) as f:
             for line in f:
                 line = line.strip()
@@ -2460,15 +3215,19 @@ class Observation:
                 spcind = float(vals[8]) if len(vals) > 8 else 0.0
                 self.addcmp(flux, x, y, type=CMP_TYPES[t], major=major, ratio=ratio,
                             phi=phi, freq0=freq0, spcind=spcind)
-        return self
+        return self._done(self, quiet)
 
     def wobs(self, path, overwrite=True, freeze_shift=False):
-        """Write the calibrated, edited UV data to a random-groups
-        UVFITS file (difmap wobs).
+        """Write the calibrated, edited UV data to a random-groups UVFITS file (difmap `wobs`). Antenna gains and baseline corrections are applied.
 
-        Antenna gains and baseline corrections are applied. Accumulated
-        phase-center shifts are excluded unless `freeze_shift=True`
-        (difmap's default too); `save()` records the shift separately.
+        Parameters
+        ----------
+        path : str
+            The UVFITS file to write.
+        overwrite : bool, default True
+            Replace an existing file.
+        freeze_shift : bool, default False
+            Also apply the accumulated phase-centre shift (difmap's default is not to; `save()` records the shift separately).
         """
         from difmapy.io.uvfits import save_uvfits
 
@@ -2476,14 +3235,9 @@ class Observation:
                     freeze_shift=freeze_shift)
 
     def _save_ms(self, prefix, ms):
-        """The ``<prefix>.ms`` half of `save`, if this session came from
-        a Measurement Set.
+        """The ``<prefix>.ms`` half of `save`, if this session came from a Measurement Set.
 
-        `ms` is None to write one when it is possible and say nothing
-        when it is not, False to skip it, True to require it. Data still
-        row-for-row with the originating MS are written into a copy of
-        it (`save_ms`); averaged data get a new MS built on its
-        structure (`save_averaged_ms`).
+        `ms` is None to write one when it is possible and say nothing when it is not, False to skip it, True to require it. Data still row-for-row with the originating MS are written into a copy of it (`save_ms`); averaged data get a new MS built on its structure (`save_averaged_ms`).
         """
         if ms is False:
             return None
@@ -2513,9 +3267,7 @@ class Observation:
             return None
 
     def _save_caltable(self, prefix, caltable):
-        """The calibration-table part of `save`: the accumulated gains,
-        in the format native to the data (`<prefix>.G` for a Measurement
-        Set, `<prefix>.TASAV.FITS` for UVFITS), when there are any."""
+        """The calibration-table part of `save`: the accumulated gains, in the format native to the data (`<prefix>.G` for a Measurement Set, `<prefix>.TASAV.FITS` for UVFITS), when there are any."""
         if caltable is False:
             return None
         if not np.asarray(self._core.gains_used()).any():
@@ -2526,7 +3278,7 @@ class Observation:
         fmt = self.caltable_formats()[0]
         path = f"{prefix}.G" if fmt == "casa" else f"{prefix}.TASAV.FITS"
         try:
-            return self.savecaltable(path, outformat=fmt, quiet=True)["path"]
+            return self.savecaltable(path, outformat=fmt, quiet=False, verbose=False)["path"]
         except Exception as exc:
             if caltable:
                 raise
@@ -2534,10 +3286,7 @@ class Observation:
             return None
 
     def _save_flagtable(self, prefix, flags):
-        """The flag part of `save`: the flags added in the session, in
-        the format native to the data (`<prefix>.flagcmd` for a
-        Measurement Set, `<prefix>.FG.TASAV.FITS` for UVFITS), when
-        there are any."""
+        """The flag part of `save`: the flags added in the session, in the format native to the data (`<prefix>.flagcmd` for a Measurement Set, `<prefix>.FG.TASAV.FITS` for UVFITS), when there are any."""
         if flags is False:
             return None
         from difmapy.io.flags import flag_entries
@@ -2551,7 +3300,7 @@ class Observation:
                     raise ValueError("flags=True, but no flags have been "
                                      "added in this session")
                 return None
-            return self.wflags(path, outformat=fmt, quiet=True)["path"]
+            return self.wflags(path, outformat=fmt, quiet=False, verbose=False)["path"]
         except Exception as exc:
             if flags:
                 raise
@@ -2559,10 +3308,7 @@ class Observation:
             return None
 
     def _save_image(self, prefix, image):
-        """The image part of `save`: the restored (CLEAN) map as
-        ``<prefix>.fits`` with the weighting in use, and one
-        ``<prefix>.robust<R>.fits`` for each robustness in
-        `ROBUST_CHOICES`, when there is a model to restore.
+        """The image part of `save`: the restored (CLEAN) map as ``<prefix>.fits`` with the weighting in use, and one ``<prefix>.robust<R>.fits`` for each robustness in `ROBUST_CHOICES`, when there is a model to restore.
 
         Returns ``(main path, [per-weighting paths])``.
         """
@@ -2584,11 +3330,7 @@ class Observation:
         return main, self._save_weighted_images(prefix, image)
 
     def _save_weighted_images(self, prefix, image):
-        """Write the restored map once per robustness in
-        `ROBUST_CHOICES`, each with its own estimated beam. The imaging
-        runs on a copy, so the session's weighting, maps and restoring
-        beam are untouched (re-inverting here would replace the residual
-        map CLEAN left with a freshly gridded one)."""
+        """Write the restored map once per robustness in `ROBUST_CHOICES`, each with its own estimated beam. The imaging runs on a copy, so the session's weighting, maps and restoring beam are untouched (re-inverting here would replace the residual map CLEAN left with a freshly gridded one)."""
         work = self.copy()
         paths = []
         for r in ROBUST_CHOICES:
@@ -2596,7 +3338,7 @@ class Observation:
             try:
                 work.uvweight(self._binwid, self._errpow, radial=self._dorad,
                               robust=r)
-                work.restore()
+                work.restore(verbose=False)
                 work._write_fits_image(path, work._restored, "JY/BEAM",
                                        beam=work._restore_beam)
                 paths.append(path)
@@ -2607,59 +3349,34 @@ class Observation:
         return paths
 
     def save(self, prefix, ms=None, caltable=None, image=None, flags=None,
-             quiet=False):
+             quiet=True, verbose=True):
         """Save the whole session with a common prefix (difmap save).
 
-        Always written, and read back by `get()`: ``<prefix>.uvf`` (the
-        calibrated UV data), ``.mod`` (model), ``.win`` (CLEAN windows)
-        and ``.par.json`` (the imaging parameters).
+        Always written, and read back by `get()`: ``<prefix>.uvf`` (the calibrated UV data), ``.mod`` (model), ``.win`` (CLEAN windows) and ``.par.json`` (the imaging parameters).
 
         Written when there is something to write:
 
-        * ``<prefix>.ms`` - for an observation that came from a
-          Measurement Set, so a session that started from CASA can go
-          back to it. Unaveraged data go into a copy of the originating
-          MS (calibrated visibilities in CORRECTED_DATA, current flags
-          in FLAG). Data averaged in time or frequency, on load or
-          later, get a new MS with the averaged rows and, if channels
-          were averaged, updated spectral windows (see
-          `difmapy.io.ms.save_averaged_ms`).
-        * ``<prefix>.G`` or ``<prefix>.TASAV.FITS`` - the calibration
-          table of the gains accumulated in the session, as
-          `savecaltable` writes it for the data's own format (CASA for a
-          Measurement Set, AIPS for UVFITS), once any self-calibration
-          has been applied.
-        * ``<prefix>.flagcmd`` or ``<prefix>.FG.TASAV.FITS`` - the
-          flags added in the session, as `wflags` writes them for the
-          data's own format (a CASA flag-command list for a Measurement
-          Set, an AIPS FG table for UVFITS), once any have been.
-        * ``<prefix>.fits`` - the restored CLEAN map (`wmap`), once
-          there is a model; it is restored with the current beam if it
-          has not been yet.
-        * ``<prefix>.robust-2.fits`` ... ``<prefix>.robust+2.fits`` -
-          the restored map once for each robustness mapplot offers
-          (-2, -1, 0, +1, +2), each with that weighting's own estimated
-          beam, written alongside ``<prefix>.fits``. They are imaged on
-          a copy, so the session's weighting and maps are untouched.
+        * ``<prefix>.ms`` - for an observation that came from a Measurement Set, so a session that started from CASA can go back to it. Unaveraged data go into a copy of the originating MS (calibrated visibilities in CORRECTED_DATA, current flags in FLAG). Data averaged in time or frequency, on load or later, get a new MS with the averaged rows and, if channels were averaged, updated spectral windows (see `difmapy.io.ms.save_averaged_ms`).
+        * ``<prefix>.G`` or ``<prefix>.TASAV.FITS`` - the calibration table of the gains accumulated in the session, as `savecaltable` writes it for the data's own format (CASA for a Measurement Set, AIPS for UVFITS), once any self-calibration has been applied.
+        * ``<prefix>.flagcmd`` or ``<prefix>.FG.TASAV.FITS`` - the flags added in the session, as `wflags` writes them for the data's own format (a CASA flag-command list for a Measurement Set, an AIPS FG table for UVFITS), once any have been.
+        * ``<prefix>.fits`` - the restored CLEAN map (`wmap`), once there is a model; it is restored with the current beam if it has not been yet.
+        * ``<prefix>.robust-2.fits`` ... ``<prefix>.robust+2.fits`` - the restored map once for each robustness mapplot offers (-2, -1, 0, +1, +2), each with that weighting's own estimated beam, written alongside ``<prefix>.fits``. They are imaged on a copy, so the session's weighting and maps are untouched.
 
         Parameters
         ----------
         prefix : str
             Common path prefix of every file.
         ms, caltable, image, flags : bool | None, default None
-            ``None`` writes that file when it applies, and only warns if
-            it then cannot be written; ``False`` skips it; ``True``
-            makes its absence an error.
-        quiet : bool, default False
-            Do not print the list of files written.
+            ``None`` writes that file when it applies, and only warns if it then cannot be written; ``False`` skips it; ``True`` makes its absence an error.
+        quiet : bool, default True
+            Return None. ``False`` returns the files written.
+        verbose : bool, default True
+            Print the list of files written.
 
         Returns
         -------
-        dict
-            The files written, by kind (``"uvf"``, ``"ms"``, ``"mod"``,
-            ``"win"``, ``"par"``, ``"caltable"``, ``"flags"``,
-            ``"image"``, and ``"images"``, the list of per-weighting
-            maps).
+        dict | None
+            With ``quiet=False``, the files written, by kind (``"uvf"``, ``"ms"``, ``"mod"``, ``"win"``, ``"par"``, ``"caltable"``, ``"flags"``, ``"image"``, and ``"images"``, the list of per-weighting maps).
         """
         import json
 
@@ -2693,15 +3410,26 @@ class Observation:
         files["flags"] = self._save_flagtable(prefix, flags)
         files["image"], files["images"] = self._save_image(prefix, image)
         files = {k: v for k, v in files.items() if v}
-        if not quiet:
+        if verbose:
             names = [p for v in files.values()
                      for p in (v if isinstance(v, list) else [v])]
             print("Saved " + ", ".join(names))
-        return files
+        return self._done(files, quiet)
 
     @classmethod
     def get(cls, prefix) -> "Observation":
-        """Restore a session saved with save() (difmap get)."""
+        """Restore a session written by `save()` (difmap `get`): the UV data, selection, imaging parameters, shift, model and CLEAN windows.
+
+        Parameters
+        ----------
+        prefix : str
+            The prefix given to `save`.
+
+        Returns
+        -------
+        Observation
+            The restored session.
+        """
         import json
         import os
 
@@ -2715,8 +3443,10 @@ class Observation:
             nx, cell, ny, ycell = pars["mapsize"]
             obs.mapsize(nx, cell, ny, ycell)
             obs.uvweight(*pars["uvweight"])
-            obs.uvtaper(*pars["uvtaper"])
-            obs.uvrange(*pars["uvrange"])
+            # Saved in wavelengths, which a bare number no longer means.
+            value, radius = pars["uvtaper"]
+            obs.uvtaper(value, f"{radius!r} lambda")
+            obs.uvrange(*(f"{r!r} lambda" for r in pars["uvrange"]))
             obs.uvzero(*pars["uvzero"])
             # The saved .uvf holds unshifted data, so re-apply the
             # shift before loading the model and windows, whose
@@ -2731,13 +3461,32 @@ class Observation:
         return obs
 
     def wwins(self, path):
-        """Write CLEAN windows (mas) to a difmap .win file."""
+        """Write the CLEAN windows (mas) to a difmap ``.win`` file (difmap `wwins`).
+
+        Parameters
+        ----------
+        path : str
+            The file to write.
+        """
         with open(path, "w") as f:
             for (x0, x1, y0, y1) in self.windows:
                 f.write(f"{x0:g} {x1:g} {y0:g} {y1:g}\n")
 
-    def rwins(self, path):
-        """Read CLEAN windows from a difmap .win file."""
+    def rwins(self, path, quiet=True):
+        """Read CLEAN windows from a difmap ``.win`` file, adding them to the current ones (difmap `rwins`).
+
+        Parameters
+        ----------
+        path : str
+            The file to read.
+        quiet : bool, default True
+            Return None. ``False`` returns the observation.
+
+        Returns
+        -------
+        Observation | None
+            This observation, with ``quiet=False``.
+        """
         with open(path) as f:
             for line in f:
                 line = line.strip()
@@ -2745,7 +3494,7 @@ class Observation:
                     continue
                 x0, x1, y0, y1 = (float(v) for v in line.split()[:4])
                 self.windows.append((x0, x1, y0, y1))
-        return self
+        return self._done(self, quiet)
 
 
 def load(path, stokes="I", channels=None, timeavg=None, freqavg=None,
@@ -2753,48 +3502,28 @@ def load(path, stokes="I", channels=None, timeavg=None, freqavg=None,
          average=None) -> Observation:
     """Load a UVFITS file or a Measurement Set (difmap `observe`).
 
-    Unlike difmap, the total intensity is selected straight away, since
-    that is how nearly every session starts.
+    Unlike difmap, the total intensity is selected straight away, since that is how nearly every session starts.
 
     Parameters
     ----------
     path : str
-        A random-groups UVFITS file, or a Measurement Set directory
-        (read with casatools); a directory is taken to be an MS. Both
-        must hold a single source.
+        A random-groups UVFITS file, or a Measurement Set directory (read with casatools); a directory is taken to be an MS. Both must hold a single source.
     stokes : str | None, default "I"
-        Polarization to select once loaded: "I", "Q", "U", "V", or a
-        recorded one ("RR", "LL", "RL", "LR", "XX", ...). "I" uses difmap's
-        permissive combination (a visibility survives when only one
-        parallel hand is usable); Q/U/V are strict. ``None`` (or "none")
-        loads without a selection, as difmap's `observe` does; `select()`
-        changes it at any time.
+        Polarization to select once loaded: "I", "Q", "U", "V", or a recorded one ("RR", "LL", "RL", "LR", "XX", ...). "I" uses difmap's permissive combination (a visibility survives when only one parallel hand is usable); Q/U/V are strict. ``None`` (or "none") loads without a selection, as difmap's `observe` does; `select()` changes it at any time.
     channels : list of (int, int) | None, default None
-        Inclusive, 0-based channel ranges over the global channel axis (all
-        IFs concatenated), e.g. ``[(0, 31), (64, 95)]``, as `select` takes
-        them. With `freqavg`, only these channels go into the averages - the
-        way band edges are dropped - and the selection then covers every
-        averaged channel. ``None``: all channels.
+        Inclusive, 0-based channel ranges over the global channel axis (all IFs concatenated), e.g. ``[(0, 31), (64, 95)]``, as `select` takes them. With `freqavg`, only these channels go into the averages - the way band edges are dropped - and the selection then covers every averaged channel. ``None``: all channels.
     timeavg : float | str | None, default None
-        Time-average straight after loading (difmap `uvaver`): seconds as a
-        number, or a string with its unit ("10s", "2min"). ``None``: keep
-        the original integrations.
+        Time-average straight after loading (difmap `uvaver`): seconds as a number, or a string with its unit ("10s", "2min"). ``None``: keep the original integrations.
     freqavg : int | "all" | bool | None, default None
-        Average this many adjacent channels into one (`chanaver`); it must
-        divide every IF's number of channels. ``"all"`` or ``True`` averages
-        each IF down to a single channel. ``None``/``False``: no averaging.
+        Average this many adjacent channels into one (`chanaver`); it must divide every IF's number of channels. ``"all"`` or ``True`` averages each IF down to a single channel. ``None``/``False``: no averaging.
     scatter : bool, default False
-        With `timeavg`: derive the output weights from the scatter of the
-        averaged samples instead of summing the input weights.
+        With `timeavg`: derive the output weights from the scatter of the averaged samples instead of summing the input weights.
     wtscale : float, default 1.0
         Factor applied to the data weights as they are read.
     field : str | int | None, default None
-        Measurement Sets only: the field (name or FIELD_ID) to load. Needed
-        when the MS has several fields; difmapy, like difmap, is
-        single-source.
+        Measurement Sets only: the field (name or FIELD_ID) to load. Needed when the MS has several fields; difmapy, like difmap, is single-source.
     data_column : str, default "DATA"
-        Measurement Sets only: the visibility column to read, "DATA" or
-        "CORRECTED_DATA".
+        Measurement Sets only: the visibility column to read, "DATA" or "CORRECTED_DATA".
     average : float | str | None, default None
         The older name of `timeavg`, still accepted.
 
@@ -2804,11 +3533,7 @@ def load(path, stokes="I", channels=None, timeavg=None, freqavg=None,
 
     Notes
     -----
-    The work is done in the cheapest order: channels are averaged first,
-    then the Stokes selection is made, then the time averaging. Averaged
-    data from a Measurement Set still go back to one: `save` writes a new
-    MS with the averaged rows, `save_flags` flags every original sample
-    behind a flagged averaged one, and `savecaltable` works as usual.
+    The work is done in the cheapest order: channels are averaged first, then the Stokes selection is made, then the time averaging. Averaged data from a Measurement Set still go back to one: `save` writes a new MS with the averaged rows, `save_flags` flags every original sample behind a flagged averaged one, and `savecaltable` works as usual.
 
     Examples
     --------
@@ -2834,39 +3559,31 @@ def load(path, stokes="I", channels=None, timeavg=None, freqavg=None,
 
 
 def chanaver(obs, nchan=None, channels=None) -> Observation:
-    """Average adjacent channels of each IF, returning a new observation
-    (`obs` is left as it is); the same as ``obs.chanaver(nchan,
-    channels)``.
+    """Average adjacent channels of each IF, returning a new observation (`obs` is left as it is); the same as ``obs.chanaver(nchan, channels)``.
 
     Parameters
     ----------
     obs : Observation
         The observation to average.
     nchan : int | "all" | None, default None
-        Channels per output channel; it must divide every IF's number
-        of channels. ``None``/``"all"``: one channel per IF.
+        Channels per output channel; it must divide every IF's number of channels. ``None``/``"all"``: one channel per IF.
     channels : list of (int, int) | None, default None
-        Inclusive global channel ranges to use; the others are left out
-        of the averages. ``None``: all channels.
+        Inclusive global channel ranges to use; the others are left out of the averages. ``None``: all channels.
     """
     return obs.chanaver(nchan, channels=channels)
 
 
 def uvaver(obs, aver_time, scatter=False) -> Observation:
-    """Time-average an observation into `aver_time` integrations (difmap
-    uvaver), returning a new one; `obs` is left as it is. The same as
-    ``obs.uvaver(aver_time, doscatter=scatter)``.
+    """Time-average an observation into `aver_time` integrations (difmap uvaver), returning a new one; `obs` is left as it is. The same as ``obs.uvaver(aver_time, doscatter=scatter)``.
 
     Parameters
     ----------
     obs : Observation
         The observation to average (its calibration is applied first).
     aver_time : float | str
-        The new integration time: seconds, or a string with its unit
-        ("10s", "2min").
+        The new integration time: seconds, or a string with its unit ("10s", "2min").
     scatter : bool, default False
-        Derive the weights from the scatter of the averaged samples
-        instead of summing the input weights.
+        Derive the weights from the scatter of the averaged samples instead of summing the input weights.
     """
     return obs.uvaver(aver_time, doscatter=scatter)
 

@@ -1,12 +1,12 @@
 # Saving a session
 
 ```python
-files = obs.save("mysession")
+files = obs.save("mysession", quiet=False)
 obs = difmapy.Observation.get("mysession")      # later
 ```
 
-`save` keeps the whole session under one prefix, and returns (and
-prints) the files it wrote.
+`save` keeps the whole session under one prefix, and prints the files
+it wrote (returning them with `quiet=False`).
 
 | file | written | contents |
 |---|---|---|

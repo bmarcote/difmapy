@@ -48,10 +48,10 @@ def test_mode_resolution(monkeypatch):
 def test_every_plot_renders_off_screen(obs, tmp_path):
     base.set_mode("inline")
     obs.addcmp(2.5, 4.0, -2.5)
-    obs.selfcal(phase=True, quiet=True)
+    obs.selfcal(phase=True, quiet=False, verbose=False)
     plots = [obs.radplot(), obs.projplot(30), obs.uvplot(), obs.vplot(2),
              obs.tplot(), obs.cpplot(), obs.corplot(), obs.fplot(),
-             obs.specplot(), obs.mapplot(quiet=True)]
+             obs.specplot(), obs.mapplot(verbose=False)]
     for i, p in enumerate(plots):
         assert not p.isVisible(), p          # drawn, never put on screen
         assert p.to_png().startswith(PNG), p

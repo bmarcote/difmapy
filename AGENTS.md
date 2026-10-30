@@ -109,7 +109,17 @@ Note the MS contains autocorrelations; both loaders drop them.
 - Map pixel (ix, iy) ↔ sky: x = (ix−nx/2)·xinc east, y = (iy−ny/2)·yinc
   north; FITS output flips the x axis (RA decreases with pixel).
 - User-facing units in the Python API: mas for positions/sizes,
-  degrees for angles, wavelengths for uv radii.
+  degrees for angles, wavelengths for uv radii - **except** `uvtaper`
+  and `uvrange`, which take M-lambda as bare numbers (the user's
+  choice, 2026-10-30) or strings with a unit via
+  `units.parse_uvdist` ("500k", "2e7 lambda"). They are still *stored*
+  in wavelengths (`_gauval`/`_gaurad`, `_uvmin`/`_uvmax`), `save()`
+  writes wavelengths and `get()` reads them back as "... lambda"
+  strings. A taper radius > 100 G-lambda is refused (old wavelength
+  spelling). `_uvmax == 0` means no upper limit; `invert` passes
+  `NO_UVMAX` then, because the core swaps (uvmin, 0) into a max cut.
+  `tests/test_uvtaper.py` checks the tapered beam against a direct
+  Fourier sum with Gaussian weights.
 
 ## Reference
 
@@ -282,6 +292,33 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
   (`observation._bold`), so captured or redirected output has no escape
   codes. "(fixed)" comes from the component's `freepar` bits, not from
   a NaN error - a fitted parameter can have a NaN error too.
+- **Return/print convention** (asked for by the user, 2026-10-30):
+  every command takes `quiet=True` by default and then returns None, so
+  the IPython prompt does not echo `Out[n]: {...}` under the report it
+  printed; `quiet=False` returns the dict/count/observation (setters
+  return `self`, so chaining needs `quiet=False`). Printing is a
+  separate switch, `verbose=True`. Internal callers that want the
+  value silently pass `quiet=False, verbose=False` - never `quiet=True`,
+  whose meaning changed (it used to mean "print nothing"). Queries
+  (`imstat`, `mapinfo`, `scans`, `spectrum`, ...) and plot commands
+  always return. `Observation._done` is the one place that decides.
+  vlbipy (`backends/difmap.py`) calls these and must follow the same
+  convention.
+- Docstrings are numpy-style with typed parameters (`name : type,
+  default X`), and each paragraph is **one line**: the user wants the
+  terminal to wrap them, not hard wraps at 70 columns.
+- `vplot` frames each baseline's panels with `plots.base.frame_panels`
+  (heavy left/right axes on every panel, top on the first, bottom on
+  the last); every panel then has a label-less right axis of
+  `RIGHT_AXIS_WIDTH`, so the plot areas still line up. `u` ranges the
+  shared x axis over the data of *every* linked panel
+  (`PlotWindow.reset_ranges`, `default_x_range`; vplot: the whole
+  observation): ranging on the first panel alone left a page whose
+  first baseline was all flagged at pyqtgraph's empty 0..1 view.
+- `tplot` colours: C0 when every baseline of the station is unflagged
+  at that integration, C1 when some are flagged; a flagged baseline
+  counts only if the station at its other end has data then (a station
+  that is out altogether would otherwise turn every row C1).
 - `selfcal` reports difmap's `moddif` fit before and after the solution,
   and the residual-map statistics too when a map already exists. The
   extra invert that costs is the one the next `clean` would have done,

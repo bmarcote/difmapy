@@ -1,33 +1,18 @@
 """The flags of a session as a list of flagging commands.
 
-AIPS and CASA both carry flags separately from the data as a list of
-selections - "this baseline, these IFs and channels, this time range" -
-an FG table in AIPS, a flag-command list for ``flagdata(mode='list')``
-in CASA. `flag_entries` turns the flags a difmapy session has *added*
-(those set now that were not set when the data were loaded) into such a
-list, as compactly as it can:
+AIPS and CASA both carry flags separately from the data as a list of selections - "this baseline, these IFs and channels, this time range" - an FG table in AIPS, a flag-command list for ``flagdata(mode='list')`` in CASA. `flag_entries` turns the flags a difmapy session has *added* (those set now that were not set when the data were loaded) into such a list, as compactly as it can:
 
-* per baseline and IF, consecutive integrations with the same flags
-  become one time range;
+* per baseline and IF, consecutive integrations with the same flags become one time range;
 * the same range on consecutive IFs becomes one entry spanning them;
-* an integration and IF in which everything of a station that could
-  be flagged has been becomes an entry for the station, found first.
+* an integration and IF in which everything of a station that could be flagged has been becomes an entry for the station, found first.
 
-Samples already flagged in the file (or holding no data) are "don't
-care": a selection may cover them, so they never break a run.
+Samples already flagged in the file (or holding no data) are "don't care": a selection may cover them, so they never break a run.
 
-Entries refer to the data *as it was loaded*: after averaging on load,
-a time range is the whole averaging bin (so it covers every original
-integration that went into the flagged sample) and channels are the
-original ones behind each averaged channel.
+Entries refer to the data *as it was loaded*: after averaging on load, a time range is the whole averaging bin (so it covers every original integration that went into the flagged sample) and channels are the original ones behind each averaged channel.
 
-Flags that were in the file already are not repeated, and samples
-unflagged during the session cannot be expressed this way (neither
-package's list can undo a flag in the data) - `save_flags` writes the
-exact state back into a Measurement Set when that is what is wanted.
+Flags that were in the file already are not repeated, and samples unflagged during the session cannot be expressed this way (neither package's list can undo a flag in the data) - `save_flags` writes the exact state back into a Measurement Set when that is what is wanted.
 
-`save_flagcmds` writes the list for CASA; the AIPS FG table is
-`difmapy.io.aips.save_fgtable`.
+`save_flagcmds` writes the list for CASA; the AIPS FG table is `difmapy.io.aips.save_fgtable`.
 """
 
 from __future__ import annotations
@@ -39,8 +24,7 @@ __all__ = ["flag_entries", "save_flagcmds"]
 
 
 def _current_flags(obs):
-    """The flags now, with stations set aside by `ignore` given back the
-    flags they had: ignoring is session state, not a flag to export."""
+    """The flags now, with stations set aside by `ignore` given back the flags they had: ignoring is session state, not a flag to export."""
     flags = np.array(obs.flags, copy=True)
     for rows, block in obs._ignored.values():
         flags[np.asarray(rows, dtype=int)] = block
@@ -50,10 +34,7 @@ def _current_flags(obs):
 def _time_edges(obs):
     """Start and end of every row's sample, in seconds since ref_mjd.
 
-    For data averaged in time it is the whole averaging bin - the
-    averaged timestamp is a weighted mean and the summed integration
-    time need not reach the samples at the bin's edges - otherwise the
-    integration centred on the timestamp.
+    For data averaged in time it is the whole averaging bin - the averaged timestamp is a weighted mean and the summed integration time need not reach the samples at the bin's edges - otherwise the integration centred on the timestamp.
     """
     core = obs._core
     t = np.asarray(core.rows()[0], dtype=np.float64)
@@ -72,8 +53,7 @@ def _time_edges(obs):
 
 
 def _original_channels(obs):
-    """For each IF: (number of original channels, [nchan, 2] array of
-    the first and last original local channel behind each current one)."""
+    """For each IF: (number of original channels, [nchan, 2] array of the first and last original local channel behind each current one)."""
     nchan = obs.nchan
     origin = getattr(obs, "_chan_origin", None)
     out, coff = [], 0
@@ -100,14 +80,7 @@ def _runs(mask_changes):
 def flag_entries(obs) -> dict:
     """The flags added in this session, as a compact list of entries.
 
-    Returns ``{"rows": [...], "nif": ..., "nsamples": ...}``. Each row
-    is a dict with `ant1` and `ant2` (antenna entry indices; `ant2` is
-    None for "every baseline of `ant1`"), `t0`/`t1` (seconds since
-    `ref_mjd`), `if0`/`if1` (inclusive, 0-based), `chans` (inclusive
-    0-based original channels within each IF, or None for all) and
-    `pols` (one bool per recorded polarization, or None for all).
-    `nsamples` counts the visibility samples the entries were made
-    from.
+    Returns ``{"rows": [...], "nif": ..., "nsamples": ...}``. Each row is a dict with `ant1` and `ant2` (antenna entry indices; `ant2` is None for "every baseline of `ant1`"), `t0`/`t1` (seconds since `ref_mjd`), `if0`/`if1` (inclusive, 0-based), `chans` (inclusive 0-based original channels within each IF, or None for all) and `pols` (one bool per recorded polarization, or None for all). `nsamples` counts the visibility samples the entries were made from.
     """
     core = obs._core
     now = _current_flags(obs)
@@ -259,14 +232,9 @@ def _casa_time(mjd_seconds, up):
 
 
 def save_flagcmds(obs, path, entries, reason="difmapy"):
-    """Write flags as a CASA flag-command list, one command per line,
-    for ``flagdata(vis=..., mode='list', inpfile=path)``.
+    """Write flags as a CASA flag-command list, one command per line, for ``flagdata(vis=..., mode='list', inpfile=path)``.
 
-    `entries` are those of `flag_entries`. Antennas and the field are
-    given by name and spectral windows by the ids the data came from,
-    so the list applies to the Measurement Set that was loaded - or to
-    another one of the same observation, such as the multi-source
-    parent.
+    `entries` are those of `flag_entries`. Antennas and the field are given by name and spectral windows by the ids the data came from, so the list applies to the Measurement Set that was loaded - or to another one of the same observation, such as the multi-source parent.
 
     Returns a summary dict (`path`, `nrows`).
     """

@@ -1,16 +1,11 @@
 """The diagnostic figure of `bayes_gscale`, drawn with matplotlib.
 
-It is a static report figure (saved next to the JSON report), not one
-of the interactive pyqtgraph windows, so it needs neither Qt nor a
-display. Five panels:
+It is a static report figure (saved next to the JSON report), not one of the interactive pyqtgraph windows, so it needs neither Qt nor a display. Five panels:
 
-* the correction per station: the plain full-array `gscale`, the
-  leave-one-out estimate, and the Bayesian value applied with its
-  uncertainty, against the prior band;
+* the correction per station: the plain full-array `gscale`, the leave-one-out estimate, and the Bayesian value applied with its uncertainty, against the prior band;
 * the probability that each station needs a correction;
 * the evidence for each source model (BIC difference, log scale);
-* the leave-one-out influence matrix: how much each station's gain
-  moves when another station is left out of the model;
+* the leave-one-out influence matrix: how much each station's gain moves when another station is left out of the model;
 * each station's fit to the model before and after calibration.
 """
 
@@ -72,9 +67,7 @@ RC = {
 
 
 def plot_bayes_gscale(res, path=None, show=None):
-    """Draw the diagnostics of a `BayesGainResult`; save to `path` if
-    given, show it if `show` (default: when not saving). Returns the
-    figure."""
+    """Draw the diagnostics of a `BayesGainResult`; save to `path` if given, show it if `show` (default: when not saving). Returns the figure."""
     import matplotlib
 
     with matplotlib.rc_context(RC):

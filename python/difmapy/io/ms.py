@@ -1,9 +1,6 @@
 """Measurement Set reader (via casatools).
 
-Loads a single-field MS into the in-memory core observation. All
-spectral windows become IFs (each may have a different number of
-channels); rows of the same (time, array, baseline) are merged into a
-single visibility row covering all IFs, as difmap does for UVFITS.
+Loads a single-field MS into the in-memory core observation. All spectral windows become IFs (each may have a different number of channels); rows of the same (time, array, baseline) are merged into a single visibility row covering all IFs, as difmap does for UVFITS.
 """
 
 from __future__ import annotations
@@ -34,8 +31,7 @@ def load_ms(path, field=None, data_column="DATA", wtscale=1.0):
     path : str
         Path of the MS directory.
     field : str | int | None
-        Field name or FIELD_ID to load. Mandatory if the MS contains
-        several fields (difmapy is single-source, like difmap).
+        Field name or FIELD_ID to load. Mandatory if the MS contains several fields (difmapy is single-source, like difmap).
     data_column : str
         "DATA" or "CORRECTED_DATA".
     wtscale : float
@@ -280,10 +276,7 @@ def load_ms(path, field=None, data_column="DATA", wtscale=1.0):
 def save_flags(core, path=None, flag_row=True):
     """Write difmapy's FLAG column back into a Measurement Set.
 
-    This is the standard MS way of recording flags (as opposed to
-    difmap's practice of writing a new UV file). Only the FLAG (and
-    optionally FLAG_ROW) column is modified; data and weights are left
-    untouched.
+    This is the standard MS way of recording flags (as opposed to difmap's practice of writing a new UV file). Only the FLAG (and optionally FLAG_ROW) column is modified; data and weights are left untouched.
 
     Parameters
     ----------
@@ -292,8 +285,7 @@ def save_flags(core, path=None, flag_row=True):
     path : str | None
         Target MS; defaults to the MS the data were loaded from.
     flag_row : bool
-        Also update FLAG_ROW (set when every correlation of a row is
-        flagged), which many CASA tasks use as a fast path.
+        Also update FLAG_ROW (set when every correlation of a row is flagged), which many CASA tasks use as a fast path.
     """
     try:
         import casatools
@@ -338,13 +330,7 @@ def save_flags(core, path=None, flag_row=True):
 def _save_flags_averaged(core, origin, flag_row):
     """`save_flags` for time- and/or channel-averaged data.
 
-    An averaged sample stands for several samples of the MS, so its flag
-    cannot simply be copied back. What can be said is: a flagged
-    averaged sample means none of the samples behind it should be used,
-    so they are all flagged; an unflagged one says nothing about each of
-    them (some may have been flagged in the file, and were left out of
-    the average), so they are left as they are. Flags are therefore only
-    ever *added* to the MS from averaged data.
+    An averaged sample stands for several samples of the MS, so its flag cannot simply be copied back. What can be said is: a flagged averaged sample means none of the samples behind it should be used, so they are all flagged; an unflagged one says nothing about each of them (some may have been flagged in the file, and were left out of the average), so they are left as they are. Flags are therefore only ever *added* to the MS from averaged data.
     """
     import casatools
 
@@ -395,9 +381,7 @@ def _save_flags_averaged(core, origin, flag_row):
 
 
 def _raw_cube(core):
-    """The observation's visibilities with none of its calibration
-    applied (gains, gain flags and baseline corrections removed on a
-    copy)."""
+    """The observation's visibilities with none of its calibration applied (gains, gain flags and baseline corrections removed on a copy)."""
     raw = core.copy()
     raw.uncalib(True, True, True)
     raw.clroff()
@@ -405,8 +389,7 @@ def _raw_cube(core):
 
 
 def _nearest_metadata(tb, src, field_id, times_mjds, columns):
-    """The value of per-row bookkeeping columns (SCAN_NUMBER, ...) of the
-    source MS at the row nearest in time to each of `times_mjds`."""
+    """The value of per-row bookkeeping columns (SCAN_NUMBER, ...) of the source MS at the row nearest in time to each of `times_mjds`."""
     tb.open(src)
     try:
         sel = tb.query(f"FIELD_ID=={int(field_id)}")
@@ -430,33 +413,15 @@ def save_averaged_ms(core, path, overwrite=False, flag_row=True,
                      by_window=None):
     """Write time- and/or channel-averaged data as a new Measurement Set.
 
-    Averaged rows no longer correspond to rows of the MS they came from,
-    so the copy-and-fill of `save_ms` cannot be used. Instead the new MS
-    takes its *structure* and every subtable (ANTENNA, FIELD,
-    SPECTRAL_WINDOW, SOURCE, ...) from the originating MS, and its main
-    table is built from the observation: one row per integration,
-    baseline and spectral window that has data, carrying
+    Averaged rows no longer correspond to rows of the MS they came from, so the copy-and-fill of `save_ms` cannot be used. Instead the new MS takes its *structure* and every subtable (ANTENNA, FIELD, SPECTRAL_WINDOW, SOURCE, ...) from the originating MS, and its main table is built from the observation: one row per integration, baseline and spectral window that has data, carrying
 
-    * ``DATA`` - the averaged visibilities as loaded (no difmapy
-      calibration), ``CORRECTED_DATA`` - the same with the session's
-      gains and baseline corrections applied;
-    * ``FLAG``/``FLAG_ROW``, ``WEIGHT`` (the mean channel weight, which
-      is what the loader spreads over the channels again), ``SIGMA``,
-      and ``WEIGHT_SPECTRUM`` when the original had one;
-    * ``TIME``/``TIME_CENTROID``, ``INTERVAL``/``EXPOSURE`` (the summed
-      integration time), ``UVW`` in metres, the antenna, array, field
-      and data-description ids, and the scan number, observation, state,
-      processor and feed ids of the original row nearest in time.
+    * ``DATA`` - the averaged visibilities as loaded (no difmapy calibration), ``CORRECTED_DATA`` - the same with the session's gains and baseline corrections applied;
+    * ``FLAG``/``FLAG_ROW``, ``WEIGHT`` (the mean channel weight, which is what the loader spreads over the channels again), ``SIGMA``, and ``WEIGHT_SPECTRUM`` when the original had one;
+    * ``TIME``/``TIME_CENTROID``, ``INTERVAL``/``EXPOSURE`` (the summed integration time), ``UVW`` in metres, the antenna, array, field and data-description ids, and the scan number, observation, state, processor and feed ids of the original row nearest in time.
 
-    If channels were averaged, the SPECTRAL_WINDOW rows are rewritten
-    with the new channel frequencies and widths. Autocorrelations are
-    not carried over (difmapy never loads them), and neither is a
-    MODEL_DATA column, which would be stale.
+    If channels were averaged, the SPECTRAL_WINDOW rows are rewritten with the new channel frequencies and widths. Autocorrelations are not carried over (difmapy never loads them), and neither is a MODEL_DATA column, which would be stale.
 
-    `by_window` forces the cubes to be written one spectral window at a
-    time (True) rather than each column in one piece; that is only
-    needed, and chosen by default, when the windows have different
-    numbers of channels.
+    `by_window` forces the cubes to be written one spectral window at a time (True) rather than each column in one piece; that is only needed, and chosen by default, when the windows have different numbers of channels.
 
     Returns the path written.
     """
@@ -621,8 +586,7 @@ def save_averaged_ms(core, path, overwrite=False, flag_row=True,
 
 
 def _update_spectral_windows(tb, path, spw_ids, ifs):
-    """Make the SPECTRAL_WINDOW rows describe the (possibly averaged)
-    channels of each IF; rows that already do are left untouched."""
+    """Make the SPECTRAL_WINDOW rows describe the (possibly averaged) channels of each IF; rows that already do are left untouched."""
     tb.open(os.path.join(path, "SPECTRAL_WINDOW"), nomodify=False)
     try:
         names = tb.colnames()
@@ -651,13 +615,9 @@ def _update_spectral_windows(tb, path, spw_ids, ifs):
 def _put_cube(tb, column, cube, ms_row, if_nchan, extra=None):
     """Write a difmapy cube `[nrow, nctotal, npol]` into an MS column.
 
-    difmapy merges the MS rows of one (time, baseline) across spectral
-    windows into a single row covering every IF, so writing back means
-    undoing that: each IF's channels go to its own MS row, given by
-    `ms_row[:, if]` (negative where the MS had no such row).
+    difmapy merges the MS rows of one (time, baseline) across spectral windows into a single row covering every IF, so writing back means undoing that: each IF's channels go to its own MS row, given by `ms_row[:, if]` (negative where the MS had no such row).
 
-    `extra` is an optional ``(name, func)`` writing a second, per-row
-    column derived from the same block (FLAG_ROW from FLAG).
+    `extra` is an optional ``(name, func)`` writing a second, per-row column derived from the same block (FLAG_ROW from FLAG).
 
     Returns the number of MS rows written.
     """
@@ -700,18 +660,9 @@ def save_ms(core, path, data_column="CORRECTED_DATA", overwrite=False,
             flag_row=True):
     """Write the observation out as a Measurement Set at `path`.
 
-    difmapy has no MS writer of its own: an MS is a directory of
-    reference-counted CASA tables with subtables (ANTENNA, FIELD,
-    SPECTRAL_WINDOW, SOURCE, ...) that no difmapy session holds enough
-    of to rebuild faithfully. So the MS the data were *loaded from* is
-    copied and the session's own results are written into the copy -
-    the calibrated visibilities into `data_column` and the current
-    flags into FLAG. Everything else (metadata, subtables, the
-    untouched DATA column) is preserved exactly, which is what makes
-    the result usable by CASA.
+    difmapy has no MS writer of its own: an MS is a directory of reference-counted CASA tables with subtables (ANTENNA, FIELD, SPECTRAL_WINDOW, SOURCE, ...) that no difmapy session holds enough of to rebuild faithfully. So the MS the data were *loaded from* is copied and the session's own results are written into the copy - the calibrated visibilities into `data_column` and the current flags into FLAG. Everything else (metadata, subtables, the untouched DATA column) is preserved exactly, which is what makes the result usable by CASA.
 
-    The original MS is never modified; see `save_flags` for writing
-    flags back into it in place.
+    The original MS is never modified; see `save_flags` for writing flags back into it in place.
 
     Parameters
     ----------
@@ -720,8 +671,7 @@ def save_ms(core, path, data_column="CORRECTED_DATA", overwrite=False,
     path : str
         Path of the MS to create.
     data_column : str | None
-        Column the calibrated visibilities go to, created if the MS
-        has none. None writes only the flags.
+        Column the calibrated visibilities go to, created if the MS has none. None writes only the flags.
     overwrite : bool
         Replace `path` if it already exists.
     flag_row : bool

@@ -15,5 +15,27 @@ try:
 except PackageNotFoundError:  # imported from a source tree with no install
     __version__ = "0.0.0+unknown"
 
+
+
+def dashboard(obs=None, block=None):
+    """Open the dashboard: every view of a session in one window, with controls to load a file and calibrate it (see `Observation.dashboard`).
+
+    Parameters
+    ----------
+    obs : Observation | None, default None
+        The observation to show; ``None`` opens the dashboard empty, to load a file from its Main tab.
+    block : bool | None, default None
+        Wait until the window is closed; ``None`` blocks only in a plain script.
+
+    Returns
+    -------
+    Dashboard
+        The dashboard window; its `obs` is the observation shown.
+    """
+    from difmapy.plots import dashboard as _dashboard
+
+    return _dashboard(obs, block=block)
+
+
 __all__ = ["Observation", "CoreObservation", "load", "observe", "uvaver", "chanaver", "MAS",
-           "__version__"]
+           "dashboard", "__version__"]

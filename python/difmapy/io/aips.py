@@ -1,12 +1,6 @@
 """Export difmapy's calibration as an AIPS SN table, in a TASAV file.
 
-AIPS keeps calibration in tables attached to the UV data - SN
-("solution") tables are what CALIB writes. The way to carry tables
-between AIPS catalog entries, or between installations, is TASAV: a
-catalog entry holding a single dummy visibility and the tables, written
-to disk with FITTP. `save_sntable` writes such a file directly, with the
-antenna (AN) and frequency (FQ) tables alongside the SN table, laid out
-as AIPS 31DEC24's own TASAV/FITTP output is (SN revision 11).
+AIPS keeps calibration in tables attached to the UV data - SN ("solution") tables are what CALIB writes. The way to carry tables between AIPS catalog entries, or between installations, is TASAV: a catalog entry holding a single dummy visibility and the tables, written to disk with FITTP. `save_sntable` writes such a file directly, with the antenna (AN) and frequency (FQ) tables alongside the SN table, laid out as AIPS 31DEC24's own TASAV/FITTP output is (SN revision 11).
 
 In AIPS::
 
@@ -18,22 +12,14 @@ In AIPS::
 
 Conventions
 -----------
-AIPS SN gains multiply the data, as difmapy's corrections do - but with
-the opposite phase convention:
+AIPS SN gains multiply the data, as difmapy's corrections do - but with the opposite phase convention:
 
     AIPS:     V_corrected = V_obs * conj(g_p) * g_q
     difmapy:  V_corrected = V_obs * c_p * conj(c_q)
 
-so the table holds ``g = conj(c)``: difmapy's amplitude as it is, and
-its phase negated. (A CASA table instead holds the reciprocal, 1/c.)
-Both were established, and are checked by the test suite, by applying a
-written table in AIPS itself (TACOP, then SPLIT with DOCAL) and
-comparing the result with difmapy's own corrected visibilities.
+so the table holds ``g = conj(c)``: difmapy's amplitude as it is, and its phase negated. (A CASA table instead holds the reciprocal, 1/c.) Both were established, and are checked by the test suite, by applying a written table in AIPS itself (TACOP, then SPLIT with DOCAL) and comparing the result with difmapy's own corrected visibilities.
 
-Antennas in an SN table are AIPS station numbers, not names, so they
-are matched by name against the AN table of the UV data the table is
-meant for: the file the observation was loaded from, or another one
-given as `uvfits=`. Times are days from that file's reference date.
+Antennas in an SN table are AIPS station numbers, not names, so they are matched by name against the AN table of the UV data the table is meant for: the file the observation was loaded from, or another one given as `uvfits=`. Times are days from that file's reference date.
 """
 
 from __future__ import annotations
@@ -52,8 +38,7 @@ SN_REVISION = 11
 
 
 def _target_tables(path):
-    """AN tables, FQ table, reference JD and primary-header axes of an
-    existing UVFITS file, which the SN table must be consistent with."""
+    """AN tables, FQ table, reference JD and primary-header axes of an existing UVFITS file, which the SN table must be consistent with."""
     with fits.open(path, memmap=True) as hdul:
         ghdu = hdul[0]
         hdr = ghdu.header
@@ -76,8 +61,7 @@ def _target_tables(path):
 
 
 def _axes_of(hdr):
-    """(CTYPE, NAXIS, CRVAL, CDELT, CRPIX) of the data axes after
-    COMPLEX (axis 1 is the empty random-groups axis, 2 is COMPLEX)."""
+    """(CTYPE, NAXIS, CRVAL, CDELT, CRPIX) of the data axes after COMPLEX (axis 1 is the empty random-groups axis, 2 is COMPLEX)."""
     out = []
     for i in range(3, hdr["NAXIS"] + 1):
         out.append((
@@ -91,10 +75,7 @@ def _axes_of(hdr):
 
 
 def _reference_jd(ghdu, an_header):
-    """The file's reference date as a JD at 0h: the AN table's RDATE
-    (which is what AIPS counts SN times from), else DATE-OBS, else the
-    0h of the day of the first visibility, which is the loader's
-    reference too."""
+    """The file's reference date as a JD at 0h: the AN table's RDATE (which is what AIPS counts SN times from), else DATE-OBS, else the 0h of the day of the first visibility, which is the loader's reference too."""
     for value in (an_header.get("RDATE"), ghdu.header.get("DATE-OBS")):
         if value:
             day = str(value).strip()[:10]
@@ -108,8 +89,7 @@ def _reference_jd(ghdu, an_header):
 
 
 def _match_antennas(core, an_tables):
-    """(subarray, station number) in the target file of each difmapy
-    antenna entry, by name."""
+    """(subarray, station number) in the target file of each difmapy antenna entry, by name."""
     names = core.antenna_names
     subs = list(core.antenna_subarrays)
     if max(subs) + 1 > len(an_tables):
@@ -137,8 +117,7 @@ def _match_antennas(core, an_tables):
 
 
 def _synthesised_tables(core, numbers):
-    """AN and FQ tables for an observation with no UVFITS file behind it
-    (loaded from a Measurement Set), numbered as `numbers` say."""
+    """AN and FQ tables for an observation with no UVFITS file behind it (loaded from a Measurement Set), numbered as `numbers` say."""
     names = core.antenna_names
     subs = list(core.antenna_subarrays)
     xyz = np.asarray(core.antenna_xyz)
@@ -210,8 +189,7 @@ def _synthesised_axes(core):
 
 
 def _dummy_groups(axes, ref_jd, keep, date_obs):
-    """The single all-zero visibility a TASAV entry carries, with the
-    data axes of the UV data it belongs to (TACOP checks them)."""
+    """The single all-zero visibility a TASAV entry carries, with the data axes of the UV data it belongs to (TACOP checks them)."""
     shape = [1] + [n for (_, n, _, _, _) in reversed(axes)] + [3]
     data = np.zeros(shape, dtype=np.float32)
     parnames = ["UU---SIN", "VV---SIN", "WW---SIN", "DATE", "DATE",
@@ -241,8 +219,7 @@ def _dummy_groups(axes, ref_jd, keep, date_obs):
 
 def _sn_table(sol, ant_ref, nif, npol_sn, ref_jd, flag_uncalibrated,
               source_id, extver):
-    """The SN binary table: one row per (solution time, antenna), with
-    per-IF arrays, and the same gains for both polarizations."""
+    """The SN binary table: one row per (solution time, antenna), with per-IF arrays, and the same gains for both polarizations."""
     ntime, _, nant = sol.shape
     # AIPS applies conj(g_p) g_q, difmapy c_p conj(c_q): g = conj(c).
     corr = np.conj(sol.correction())               # [nt, nif, nant]
@@ -314,15 +291,9 @@ def _sn_table(sol, ant_ref, nif, npol_sn, ref_jd, flag_uncalibrated,
 
 
 def _tasav_frame(core, uvfits, nif, what):
-    """The part of a TASAV file every table shares: the dummy
-    visibility and the FQ and AN tables of the UV data it is for (the
-    file the observation was loaded from, `uvfits`, or - for data with
-    no UVFITS file behind them - tables synthesised from the
-    observation).
+    """The part of a TASAV file every table shares: the dummy visibility and the FQ and AN tables of the UV data it is for (the file the observation was loaded from, `uvfits`, or - for data with no UVFITS file behind them - tables synthesised from the observation).
 
-    Returns ``(hdus, ant_ref, ref_jd, target)``: the HDUs so far, the
-    (subarray, AIPS station number) of each difmapy antenna entry, the
-    JD that AIPS times are counted from, and the target file used.
+    Returns ``(hdus, ant_ref, ref_jd, target)``: the HDUs so far, the (subarray, AIPS station number) of each difmapy antenna entry, the JD that AIPS times are counted from, and the target file used.
     """
     origin = getattr(core, "_cal_origin", None) or {}
     nant = len(core.antenna_names)
@@ -368,13 +339,7 @@ def save_fgtable(obs, path, entries, uvfits=None, overwrite=True,
                  reason="difmapy", fgver=1):
     """Write flags as an AIPS FG table in a TASAV FITS file.
 
-    `entries` are the flag entries of `difmapy.io.flags.flag_entries`.
-    The file is laid out like the SN one (`save_sntable`), and used the
-    same way: FITLD it, TACOP ``INEXT 'FG'`` onto the UV data, and the
-    flags apply wherever ``FLAGVER`` selects that table. The FG columns
-    are those AIPS 31DEC24's UVFLG writes; antennas are AIPS station
-    numbers and times days from the reference date of the target UV
-    file, exactly as for the SN table.
+    `entries` are the flag entries of `difmapy.io.flags.flag_entries`. The file is laid out like the SN one (`save_sntable`), and used the same way: FITLD it, TACOP ``INEXT 'FG'`` onto the UV data, and the flags apply wherever ``FLAGVER`` selects that table. The FG columns are those AIPS 31DEC24's UVFLG writes; antennas are AIPS station numbers and times days from the reference date of the target UV file, exactly as for the SN table.
 
     Returns a summary dict (`path`, `nrows`, `target`).
     """
@@ -444,30 +409,19 @@ def save_sntable(obs, path, uvfits=None, flag_uncalibrated=False,
     Parameters
     ----------
     obs : difmapy.Observation
-        The observation whose gains are exported (the accumulated gain
-        table, or `solutions`).
+        The observation whose gains are exported (the accumulated gain table, or `solutions`).
     path : str
         Output FITS file (conventionally ``*.TASAV.FITS``).
     uvfits : str | None
-        The UVFITS file the table is for. Its AN tables give the AIPS
-        antenna numbers (matched by name), its reference date the time
-        origin, and its data axes the dummy visibility's. Defaults to
-        the file the data were loaded from; for data loaded from a
-        Measurement Set, antennas are numbered in ANTENNA-table order
-        from 1, as CASA's exportuvfits does.
+        The UVFITS file the table is for. Its AN tables give the AIPS antenna numbers (matched by name), its reference date the time origin, and its data axes the dummy visibility's. Defaults to the file the data were loaded from; for data loaded from a Measurement Set, antennas are numbered in ANTENNA-table order from 1, as CASA's exportuvfits does.
     flag_uncalibrated : bool
-        Write solutions that were never solved for as flagged, which
-        makes AIPS flag that data, instead of as unity.
+        Write solutions that were never solved for as flagged, which makes AIPS flag that data, instead of as unity.
     since : gain snapshot | None
-        Export only the calibration accumulated since
-        `Observation.gain_snapshot()` was taken.
+        Export only the calibration accumulated since `Observation.gain_snapshot()` was taken.
     solutions : difmapy.io.solutions.GainSolutions | None
         Write these instead of the observation's gain table.
     source_id : int
-        SOURCE ID of every row. 0 (the default) does not tie the table
-        to a source, so it is used for every source when copied onto a
-        multi-source file; give the source's SU-table number to restrict
-        it.
+        SOURCE ID of every row. 0 (the default) does not tie the table to a source, so it is used for every source when copied onto a multi-source file; give the source's SU-table number to restrict it.
     snver : int
         SN table version (EXTVER) in the file.
     """

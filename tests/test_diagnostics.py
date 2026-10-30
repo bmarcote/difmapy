@@ -112,7 +112,7 @@ def test_spectrum_follows_the_calibration(corrupted_uvfits_file):
     o.select("I")
     raw = np.asarray(o.spectrum(baseline=("AN0", "AN1"))["amp"]).copy()
     o.addcmp(FLUX, X0_MAS, Y0_MAS)
-    o.selfcal(amp=True, phase=True, quiet=True)
+    o.selfcal(amp=True, phase=True, quiet=False, verbose=False)
 
     after = np.asarray(o.spectrum(baseline=("AN0", "AN1"))["amp"])
     assert not np.allclose(raw, after)
@@ -146,7 +146,7 @@ def test_corplot_shows_amplitude_and_phase_by_default(obs):
 
     obs.mapsize(256, 0.25)
     obs.addcmp(FLUX, X0_MAS, Y0_MAS)
-    obs.selfcal(amp=True, phase=True, quiet=True)
+    obs.selfcal(amp=True, phase=True, quiet=False, verbose=False)
 
     p = CorPlot(obs, nplot=2)
     assert p.quantity == "both"
@@ -199,7 +199,7 @@ def test_corplot_leaves_out_integrations_without_a_solution(
     t = np.asarray(o._core.times())
     o.flag(station="AN0", tmin=float(t[20]), tmax=float(t[39]))
     o.addcmp(FLUX, X0_MAS, Y0_MAS)
-    o.selfcal(phase=True, amp=True, solint="5min", quiet=True)
+    o.selfcal(phase=True, amp=True, solint="5min", quiet=False, verbose=False)
 
     nt, nif, nant = o._core.ntimes, o.nif, len(o.antennas)
     used = np.asarray(o._core.gains_used()).reshape(nt, nif, nant)
@@ -378,3 +378,87 @@ def test_real_data_closure_and_spectrum():
     assert len(s["chan"]) == 4  # 4 IFs x 1 channel
     assert (np.asarray(s["wt"]) > 0).all()
     assert (np.asarray(s["amp"]) > 0).all()
+
+
+def test_possm_grids_vector_averaged_spectra(obs):
+    """possm: a 3x3 grid of baselines by default, each an amplitude panel
+    above a phase panel, framed together; amplitude and phase come from
+    the vector average over time, and n/p page in vplot's order."""
+    from conftest import FLUX, NCHAN, NIF
+    from difmapy.plots.base import FRAME_WIDTH
+    from difmapy.plots.diagnostics import PossmPlot
+    from difmapy.plots.points import VPlot
+
+    p = PossmPlot(obs)
+    nant = len(obs.antennas)
+    assert len(p._items) == nant * (nant - 1) // 2
+    v = VPlot(obs)
+    assert p._items == v._all_baselines()      # same order as vplot
+    v.close()
+    page = p._items[:9]
+    assert len(p._plots) == 2 * len(page)
+    # The grid: baseline k at row 2*(k // 3) (amplitude) and the row
+    # below it (phase), column k % 3.
+    layout = p.glw.ci.layout
+    for k, (amp, phase) in enumerate(zip(p._plots[0::2], p._plots[1::2])):
+        r, c = divmod(k, 3)
+        assert layout.itemAt(2 * r, c) is amp[0]
+        assert layout.itemAt(2 * r + 1, c) is phase[0]
+        assert amp[0].getAxis("top").pen().widthF() == FRAME_WIDTH
+        assert phase[0].getAxis("bottom").pen().widthF() == FRAME_WIDTH
+    # One curve per IF, at every channel: the modulus of the vector
+    # average, which can only be below the scalar average.
+    d = p.averaged(page[0])
+    good = d["wt"] > 0
+    assert good.sum() == NIF * NCHAN
+    s = obs.spectrum(baseline=tuple(obs.antennas[i] for i in page[0]))
+    vec = np.hypot(np.asarray(s["re"]), np.asarray(s["im"]))
+    np.testing.assert_allclose(d["amp"], vec)
+    assert (d["amp"][good] <= np.asarray(s["amp"])[good] * (1 + 1e-6)).all()
+    curves = [it for it in p._plots[0][0].items if isinstance(it, pg.PlotDataItem)]
+    assert len(curves) == NIF
+    assert np.allclose(curves[0].getData()[1], d["amp"][d["if_index"] == 0])
+    # Every panel on one frequency axis.
+    for q, _ in p._plots[1:]:
+        assert q.vb.linkedView(q.vb.XAxis) is p._plots[0][0].vb
+
+    p.keyPressEvent(_key("n"))
+    assert p.page == 1
+    assert p._plots[0][0].titleLabel.text.startswith(
+        "-".join(obs.antennas[i] for i in p._items[9]))
+    p.close()
+
+    one = PossmPlot(obs, reftel="an0", nplot=0)   # case-insensitive, all on a page
+    assert all(0 in bl for bl in one._items)
+    assert one.npages == 1 and len(one._plots) == 2 * len(one._items)
+    one.close()
+
+
+def test_tplot_marks_partially_flagged_integrations(obs):
+    """tplot draws an integration in C0 when every baseline of the
+    antenna is unflagged, in C1 when some are flagged and others not,
+    and not at all when all are; a station that is out altogether does
+    not make the others partial."""
+    from difmapy.plots.diagnostics import TPlot
+
+    t = np.asarray(obs._core.times())
+    obs.flag(baseline=("AN0", "AN1"), tmin=t[0], tmax=t[4])
+    obs.flag(station="AN3")
+    p = TPlot(obs)
+    good, flagged = p.sampling()
+    partial = (good > 0) & (flagged > 0)
+    ia0, ia1, ia3 = (obs.antennas.index(n) for n in ("AN0", "AN1", "AN3"))
+    assert partial[:5, ia0].all() and partial[:5, ia1].all()
+    assert not partial[5:, ia0].any()
+    assert (good[:, ia3] == 0).all()                 # not drawn
+    others = [i for i in range(len(obs.antennas)) if i not in (ia0, ia1, ia3)]
+    assert not partial[:, others].any()               # AN3 being out is not partial
+    colours = {}
+    for item in p.plot.items:
+        if type(item).__name__ == "FastScatter":
+            c = item._brush.color()
+            key = (c.red(), c.green(), c.blue())
+            colours[key] = colours.get(key, 0) + len(item.getData()[0])
+    assert colours[TPlot.PARTIAL_COLOR] == int(partial.sum())
+    assert colours[TPlot.GOOD_COLOR] == int(((good > 0) & ~partial).sum())
+    p.close()

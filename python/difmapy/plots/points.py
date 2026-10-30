@@ -9,6 +9,7 @@ from difmapy.plots.base import (
     FastScatter,
     FlagPlotBase,
     TimeGaps,
+    frame_panels,
     install_time_axis,
     run_if_needed,
 )
@@ -38,8 +39,7 @@ def _quantities(spec):
 
 
 def _stream_arrays(obs, with_model=True):
-    """Common per-(row, IF) arrays: complex vis, signed wt, u, v in
-    wavelengths, row and IF indices, times, antennas and the model."""
+    """Common per-(row, IF) arrays: complex vis, signed wt, u, v in wavelengths, row and IF indices, times, antennas and the model."""
     core = obs._core
     vis, wt = core.stream_vis()
     time, a1, a2, us, vs, _ = core.rows()
@@ -83,8 +83,7 @@ def _place_corner(vb, item, pad=6):
 
 
 class _VisPlot(FlagPlotBase):
-    """Shared behaviour of the visibility scatter plots: amplitude and
-    phase panels, and the model overplotted where one is defined."""
+    """Shared behaviour of the visibility scatter plots: amplitude and phase panels, and the model overplotted where one is defined."""
 
     def __init__(self, obs, title, quantity="ap", colorby="spw", legend=False):
         self.quantities = _quantities(quantity)
@@ -112,13 +111,9 @@ class _VisPlot(FlagPlotBase):
 class RadPlot(_VisPlot):
     """Amplitude and phase vs UV radius; difmap radplot/projplot.
 
-    Points are coloured by spectral window on a gradient scale by
-    default; ``n``/``p`` walk through the antennas, highlighting every
-    baseline of one at a time, and the model (CLEAN components or
-    Gaussians) is drawn in red where one is defined.
+    Points are coloured by spectral window on a gradient scale by default; ``n``/``p`` walk through the antennas, highlighting every baseline of one at a time, and the model (CLEAN components or Gaussians) is drawn in red where one is defined.
 
-    As projplot (`projection_deg` given), ``<``/``>`` turn the projection
-    angle by `angle_step` degrees.
+    As projplot (`projection_deg` given), ``<``/``>`` turn the projection angle by `angle_step` degrees.
     """
 
     def __init__(self, obs, quantity="ap", colorby="spw", projection_deg=None,
@@ -161,9 +156,7 @@ class RadPlot(_VisPlot):
     def rotate_projection(self, step_deg):
         """Turn the projection angle by `step_deg` degrees and redraw.
 
-        The x axis is rescaled to the new projected distances; the y
-        ranges are left alone, since the projection does not change
-        amplitudes or phases. Returns the new angle, in [-90, 90).
+        The x axis is rescaled to the new projected distances; the y ranges are left alone, since the projection does not change amplitudes or phases. Returns the new angle, in [-90, 90).
         """
         if self.projection is None:
             raise ValueError("radplot has no projection angle; use projplot")
@@ -279,13 +272,9 @@ class UVPlot(FlagPlotBase):
 
 
 class VPlot(_VisPlot):
-    """Visibility amplitude and phase vs time, a few baselines to a page
-    (difmap vplot).
+    """Visibility amplitude and phase vs time, a few baselines to a page (difmap vplot).
 
-    Every spectral window is drawn at once and can be switched on and
-    off from the legend on the right. Flagging acts either on the
-    displayed baseline only or on every baseline of its first antenna;
-    the space bar switches between the two.
+    Every spectral window is drawn at once and can be switched on and off from the legend on the right. Flagging acts either on the displayed baseline only or on every baseline of its first antenna; the space bar switches between the two.
     """
 
     #: Tall: a page is several baselines of stacked amp/phase panels.
@@ -298,7 +287,7 @@ class VPlot(_VisPlot):
             nplot, reftel = 3, nplot
         self.reftel = None
         if reftel is not None:
-            self.reftel = (names.index(str(reftel)) if not isinstance(reftel, int)
+            self.reftel = (obs._ant_index(reftel) if not isinstance(reftel, int)
                            else int(reftel))
         # difmap's 0: every baseline of a station on one page.
         self.nplot = int(nplot) if int(nplot) > 0 else max(len(names) - 1, 1)
@@ -343,6 +332,10 @@ class VPlot(_VisPlot):
                 )
                 install_time_axis(panel.plot, self.gaps)
         self._share_x_axis()
+        # A heavy frame round each baseline's panels, so that a page of
+        # several baselines does not read as one long stack.
+        for i in range(len(page)):
+            frame_panels([p.plot for p in self._panels if p.group == i])
         if self._panels:
             self._panels[-1].plot.setLabel("bottom", "Time (hours)")
 
@@ -351,6 +344,17 @@ class VPlot(_VisPlot):
         self.page = int(page) % self.npages
         self._relayout()
         return self.page
+
+    def default_x_range(self, vb):
+        """The whole observation, as difmap's vplot shows it: every page on the same time axis, whichever baselines happen to have data."""
+        times = np.asarray(self.obs._core.times()) / 3600.0
+        if times.size == 0:
+            return None
+        lo, hi = self.gaps.compress([times.min(), times.max()])
+        if hi <= lo:
+            return None
+        pad = 0.02 * (hi - lo)
+        return (float(lo - pad), float(hi + pad))
 
     def _relayout(self):
         self.glw.clear()
@@ -362,9 +366,7 @@ class VPlot(_VisPlot):
         self.refresh()
 
     def reload(self):
-        """Re-read the baselines as well as the data: ignoring or
-        flagging a station from the prompt can change which baselines
-        there are to page through."""
+        """Re-read the baselines as well as the data: ignoring or flagging a station from the prompt can change which baselines there are to page through."""
         self._baselines = []
         page = self.page
         self._relayout()
@@ -444,6 +446,24 @@ class VPlot(_VisPlot):
 
 
 def radplot(obs, quantity="ap", colorby="spw", block=None):
+    """Amplitude and phase against UV radius (difmap `radplot`), with the model overplotted and interactive flagging. In the window, ``n``/``p`` highlight one antenna's baselines at a time and ``h`` lists every key.
+
+    Parameters
+    ----------
+    obs : Observation
+        The observation to plot.
+    quantity : str, default "ap"
+        "amp", "phase", or "ap" (also "anp", "a&p") for an amplitude panel above a phase panel.
+    colorby : str, default "spw"
+        Point colouring: "spw" (a gradient over the IFs), "time", "baseline", "amp", or "none".
+    block : bool | None, default None
+        Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+    Returns
+    -------
+    PlotWindow
+        The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+    """
     p = RadPlot(obs, quantity=quantity, colorby=colorby)
     run_if_needed(p, block)
     return p
@@ -451,6 +471,28 @@ def radplot(obs, quantity="ap", colorby="spw", block=None):
 
 def projplot(obs, angle_deg=0.0, quantity="ap", colorby="spw", block=None,
              step=10.0):
+    """Amplitude and phase against the UV distance projected on a direction (difmap `projplot`), with interactive flagging. In the window ``<`` and ``>`` turn the projection by `step` degrees and redraw.
+
+    Parameters
+    ----------
+    obs : Observation
+        The observation to plot.
+    angle_deg : float, default 0.0
+        Position angle of the projection direction, in degrees north through east.
+    quantity : str, default "ap"
+        "amp", "phase", or "ap" (also "anp", "a&p") for an amplitude panel above a phase panel.
+    colorby : str, default "spw"
+        Point colouring: "spw" (a gradient over the IFs), "time", "baseline", "amp", or "none".
+    block : bool | None, default None
+        Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+    step : float, default 10.0
+        The angle, in degrees, that ``<``/``>`` turn the projection by.
+
+    Returns
+    -------
+    PlotWindow
+        The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+    """
     p = RadPlot(obs, quantity=quantity, colorby=colorby,
                 projection_deg=angle_deg, angle_step=step)
     run_if_needed(p, block)
@@ -458,12 +500,50 @@ def projplot(obs, angle_deg=0.0, quantity="ap", colorby="spw", block=None,
 
 
 def uvplot(obs, colorby="spw", block=None):
+    """The UV coverage (difmap `uvplot`), conjugate points included, with interactive flagging.
+
+    Parameters
+    ----------
+    obs : Observation
+        The observation to plot.
+    colorby : str, default "spw"
+        Point colouring: "spw" (a gradient over the IFs), "time", "baseline", "amp", or "none".
+    block : bool | None, default None
+        Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+    Returns
+    -------
+    PlotWindow
+        The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+    """
     p = UVPlot(obs, colorby=colorby)
     run_if_needed(p, block)
     return p
 
 
 def vplot(obs, nplot=3, reftel=None, quantity="ap", block=None):
+    """Visibility amplitude and phase against time (difmap `vplot`), `nplot` baselines to a page, each framed as one, with a per-IF legend and interactive flagging. ``n``/``p`` page through the baselines, the space bar switches between flagging per baseline and per antenna, ``z``/``u`` restore the y/x ranges (the time axis spans the whole observation).
+
+    The arguments come in difmap's order: ``vplot(3)`` is three baselines to a page, ``vplot(3, "EF")`` only EF's baselines, and ``vplot("EF")`` the same with the default page size.
+
+    Parameters
+    ----------
+    obs : Observation
+        The observation to plot.
+    nplot : int | str, default 3
+        Baselines per page; 0 puts all of a station's baselines on one page. A station name here is taken as `reftel`.
+    reftel : str | int | None, default None
+        Show only this station's baselines (a name, case-insensitive, or an antenna index).
+    quantity : str, default "ap"
+        "amp", "phase", or "ap" (also "anp", "a&p") for an amplitude panel above a phase panel.
+    block : bool | None, default None
+        Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+    Returns
+    -------
+    PlotWindow
+        The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+    """
     p = VPlot(obs, nplot=nplot, reftel=reftel, quantity=quantity)
     run_if_needed(p, block)
     return p

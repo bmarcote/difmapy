@@ -1,44 +1,26 @@
-"""Interactive map display with CLEAN windows and model editing;
-difmap mapplot (also spelled ``maplot``).
+"""Interactive map display with CLEAN windows and model editing; difmap mapplot (also spelled ``maplot``).
 
 Interaction:
 
-* double-click: add a CLEAN window centered on the cursor (drag its
-  corner handles to resize; drag its body to move)
+* double-click: add a CLEAN window centered on the cursor (drag its corner handles to resize; drag its body to move)
 * ``d`` with the cursor over a window: delete it
 * ``c``: run one CLEAN batch; ``i``: re-invert and redisplay
-* ``1`` / ``2`` / ``3`` / ``4``: residual map / dirty beam / restored
-  map / model
-* ``m``: place a model component - click its centre, then any two
-  points on the component. The two points need be neither the major and
-  minor axes nor 90 degrees apart: the longer one sets the major axis
-  and the other is solved for the axial ratio. (``d`` at either step
-  gives a point source or a circular Gaussian.)
-* ``f``: fit the placed components, with the rest of the model, to the
-  UV data (modelfit)
+* ``1`` / ``2`` / ``3`` / ``4``: residual map / dirty beam / restored map / model
+* ``m``: place a model component - click its centre, then any two points on the component. The two points need be neither the major and minor axes nor 90 degrees apart: the longer one sets the major axis and the other is solved for the axial ratio. (``d`` at either step gives a point source or a circular Gaussian.)
+* ``f``: fit the placed components, with the rest of the model, to the UV data (modelfit)
 * ``C``: clear the model
 * ``l``: switch the colours between a linear and a logarithmic scale
-* ``g``: switch between difmap's pseudo-colour table and its grey scale
-  (black and white)
-* ``k``: show or hide the contours of the restored map. They start at
-  three times the residual noise and go up by factors of sqrt(2);
-  negative ones, from -3 sigma down, are dashed
-* the "Weighting" box at the top: difmap's own ``uvweight`` scheme or
-  Briggs robust -2 (uniform) ... +2 (natural); picking one re-inverts
+* ``g``: switch between difmap's pseudo-colour table and its grey scale (black and white)
+* ``k``: show or hide the contours of the restored map. They start at three times the residual noise and go up by factors of sqrt(2); negative ones, from -3 sigma down, are dashed
+* the "Weighting" box at the top: difmap's own ``uvweight`` scheme or Briggs robust -2 (uniform) ... +2 (natural); picking one re-inverts
 * ``h``: the key legend; ``x``: close, reporting the image properties
 * ``q``: close
 
-The two handles on the colour bar set the displayed range; the log
-scale is a redistribution of the colours only, so the levels and the
-bar's axis stay in Jy/beam and negative residuals keep their place.
+The two handles on the colour bar set the displayed range; the log scale is a redistribution of the colours only, so the levels and the bar's axis stay in Jy/beam and negative residuals keep their place.
 
-A component placed with ``m`` is only *drawn*: its guessed flux is held
-out of the image until ``f`` fits it, so
-placing one never changes the map underneath it.
+A component placed with ``m`` is only *drawn*: its guessed flux is held out of the image until ``f`` fits it, so placing one never changes the map underneath it.
 
-Windows are kept in sync with ``obs.windows`` (mas units), and the
-panel to the right of the colour bar shows the distribution of pixel
-values over the displayed range, with a Gaussian fitted to the noise.
+Windows are kept in sync with ``obs.windows`` (mas units), and the panel to the right of the colour bar shows the distribution of pixel values over the displayed range, with a Gaussian fitted to the noise.
 """
 
 from __future__ import annotations
@@ -51,6 +33,7 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 from difmapy.observation import ROBUST_CHOICES
 from difmapy.plots.base import MODEL_COLOR, PlotWindow, run_if_needed
 from difmapy.plots.contours import contour_levels, contour_segments
+from difmapy.units import format_uvdist
 
 __all__ = ["mapplot", "maplot", "MapPlot"]
 
@@ -82,12 +65,7 @@ LOG_STRETCH = 1000.0
 
 
 def _difmap_rainbow():
-    """Difmap's pseudo-colour table (``rainbow`` in its color.c, the
-    one its mapplot installs for "color"): near-black blue for the
-    faintest level, through blue, cyan, green, yellow and orange to red
-    at the brightest. The stops are difmap's own; its table also runs
-    past both ends (to black below, white above) for use with a changed
-    contrast, which a display from minimum to maximum never reaches."""
+    """Difmap's pseudo-colour table (``rainbow`` in its color.c, the one its mapplot installs for "color"): near-black blue for the faintest level, through blue, cyan, green, yellow and orange to red at the brightest. The stops are difmap's own; its table also runs past both ends (to black below, white above) for use with a changed contrast, which a display from minimum to maximum never reaches."""
     pos = [0.0, 0.17, 0.33, 0.50, 0.67, 0.83, 1.0]
     rgb = [(0.0, 0.0, 0.3), (0.0, 0.0, 0.8), (0.0, 1.0, 1.0),
            (0.6, 1.0, 0.3), (1.0, 1.0, 0.0), (1.0, 0.6, 0.0),
@@ -97,8 +75,7 @@ def _difmap_rainbow():
 
 
 def _difmap_grey():
-    """Difmap's grey scale: black at the faintest level, white at the
-    brightest."""
+    """Difmap's grey scale: black at the faintest level, white at the brightest."""
     return pg.ColorMap([0.0, 1.0], [(0, 0, 0, 255), (255, 255, 255, 255)])
 
 
@@ -126,12 +103,7 @@ def _cmap_name(name):
 def log_stretch(cmap, a=LOG_STRETCH):
     """`cmap` with its colours redistributed logarithmically.
 
-    The stretch goes into the colour map's stop positions, not into the
-    pixel values: the image and the colour-bar axis stay in Jy/beam and
-    negative residuals keep their place, while a pixel at fraction `p`
-    of the displayed range takes the colour a linear map would give
-    log(1 + a*p) / log(1 + a). Faint emission therefore gets most of
-    the colour range, which is the point of a log display.
+    The stretch goes into the colour map's stop positions, not into the pixel values: the image and the colour-bar axis stay in Jy/beam and negative residuals keep their place, while a pixel at fraction `p` of the displayed range takes the colour a linear map would give log(1 + a*p) / log(1 + a). Faint emission therefore gets most of the colour range, which is the point of a log display.
     """
     lut = cmap.getLookupTable(0.0, 1.0, 256, alpha=True)
     y = np.linspace(0.0, 1.0, lut.shape[0])
@@ -149,15 +121,17 @@ class MapPlot(PlotWindow):
     DEFAULT_SIZE = (1250, 820)
 
     def __init__(self, obs, what="map", mapsize=None, cellsize=None,
-                 uvweight=None, clean_args=None, quiet=False, scale="linear",
-                 cmap="color"):
-        super().__init__("difmapy mapplot")
+                 uvweight=None, clean_args=None, verbose=True, scale="linear",
+                 cmap="color", uvrange=None, uvtaper=None):
+        super().__init__("difmapy mapplot"
+                         + (f" ({obs.filename})" if obs.filename else ""))
         self.obs = obs
         self.what = what
         self.cmap = _cmap_name(cmap)
         self.scale = "log" if str(scale).lower().startswith("log") else "linear"
         self.clean_args = clean_args or {}
-        self.quiet = quiet
+        #: Print the reports of what the window runs (beam, clean, fit).
+        self.verbose = bool(verbose)
         self.result = None
         self._rois = []
         self._mouse_pos = None
@@ -175,7 +149,7 @@ class MapPlot(PlotWindow):
         #: "f" fits them or the window closes, since their flux is only
         #: a guess and in the model it would be imaged at once.
         self._placed = []
-        self._apply_imaging(mapsize, cellsize, uvweight)
+        self._apply_imaging(mapsize, cellsize, uvweight, uvrange, uvtaper)
 
         central = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(central)
@@ -228,16 +202,15 @@ class MapPlot(PlotWindow):
         self.plot.scene().sigMouseMoved.connect(self._mouse_moved)
         self.plot.scene().sigMouseClicked.connect(self._mouse_clicked)
         self.refresh()
-        if not self.quiet:
+        if self.verbose:
             self.report_beam()
 
     # ------------------------------------------------------------------
     # imaging setup
     # ------------------------------------------------------------------
 
-    def _apply_imaging(self, mapsize, cellsize, uvweight):
-        """Apply the mapsize/cellsize/uvweight overrides, falling back
-        to `auto_mapsize()` when the map size was never set by hand."""
+    def _apply_imaging(self, mapsize, cellsize, uvweight, uvrange=None, uvtaper=None):
+        """Apply the mapsize/cellsize/uvweight/uvrange/uvtaper overrides, falling back to `auto_mapsize()` when the map size was never set by hand."""
         obs = self.obs
         if mapsize is not None or cellsize is not None:
             npix = int(mapsize) if mapsize is not None else obs._nx
@@ -248,6 +221,10 @@ class MapPlot(PlotWindow):
             obs._ensure_mapsize()
         if uvweight is not None:
             obs.uvweight(robust=float(uvweight))
+        if uvrange is not None:
+            obs.uvrange(*uvrange)
+        if uvtaper is not None:
+            obs.uvtaper(*uvtaper)
 
     #: The robustness values offered in the weighting box.
     ROBUST_CHOICES = ROBUST_CHOICES
@@ -276,12 +253,90 @@ class MapPlot(PlotWindow):
         self._sync_weighting()
         self.weighting.currentIndexChanged.connect(self._weighting_chosen)
         row.addWidget(self.weighting)
+        # UV range and taper, typed in M-lambda (or with a unit, "500k");
+        # Enter applies them and re-images.
+        self.uv_edits = {}
+
+        def field(key, width, tip, placeholder=""):
+            e = QtWidgets.QLineEdit()
+            e.setFixedWidth(width)
+            e.setToolTip(tip)
+            e.setPlaceholderText(placeholder)
+            e.returnPressed.connect(self._uv_entered)
+            self.uv_edits[key] = e
+            return e
+
+        row.addSpacing(14)
+        row.addWidget(QtWidgets.QLabel("UV range:"))
+        row.addWidget(field("uvmin", 56, "shortest UV radius imaged (M-lambda, or with a unit: 500k)", "0"))
+        row.addWidget(QtWidgets.QLabel("to"))
+        row.addWidget(field("uvmax", 56, "longest UV radius imaged; empty for no limit", "no limit"))
+        row.addWidget(QtWidgets.QLabel("M\u03bb"))
+        row.addSpacing(14)
+        row.addWidget(QtWidgets.QLabel("Taper:"))
+        row.addWidget(field("value", 44, "taper value at the radius, 0-1; empty for no taper", "none"))
+        row.addWidget(QtWidgets.QLabel("at"))
+        row.addWidget(field("radius", 56, "UV radius where the taper falls to the value (M-lambda, or with a unit)"))
+        row.addWidget(QtWidgets.QLabel("M\u03bb"))
+        self._sync_uv()
         row.addStretch(1)
         return bar
 
+    def _sync_uv(self):
+        """Show the UV range and taper the observation is using, including one set at the prompt (a field being typed in is left alone)."""
+        obs = self.obs
+        taper = 0.0 < obs._gauval < 1.0 and obs._gaurad > 0.0
+        values = {
+            "uvmin": format_uvdist(obs._uvmin) if obs._uvmin else "",
+            "uvmax": format_uvdist(obs._uvmax) if obs._uvmax else "",
+            "value": f"{obs._gauval:g}" if taper else "",
+            "radius": format_uvdist(obs._gaurad) if taper else "",
+        }
+        for key, edit in self.uv_edits.items():
+            if not edit.hasFocus():
+                edit.setText(values[key])
+
+    def _uv_entered(self):
+        text = {k: e.text().strip() for k, e in self.uv_edits.items()}
+        try:
+            self.set_uvrange(text["uvmin"] or 0.0, text["uvmax"] or 0.0, refresh=False)
+            self.set_uvtaper(text["value"] or 0.0, text["radius"] or 0.0)
+        except (ValueError, RuntimeError) as exc:
+            self._message(str(exc))
+            if self.verbose:
+                print(f"mapplot: {exc}")
+        # Back to the plot, so the single-key shortcuts work again.
+        self.glw.setFocus()
+
+    def set_uvrange(self, uvmin=0.0, uvmax=0.0, refresh=True):
+        """Image only the visibilities between UV radii `uvmin` and `uvmax` (`Observation.uvrange`: M-lambda, or strings with a unit; a `uvmax` of 0 is no limit) and re-image."""
+        self.obs.uvrange(uvmin, uvmax)
+        if refresh:
+            self._reimage()
+
+    def set_uvtaper(self, value=0.0, radius=0.0):
+        """Taper the gridding weights to `value` at UV radius `radius` (`Observation.uvtaper`: M-lambda, or a string with a unit; 0 turns it off) and re-image. Returns the estimated beam."""
+        value = float(value or 0.0)
+        self.obs.uvtaper(value, radius if value else 0.0)
+        return self._reimage()
+
+    def _reimage(self):
+        """Invert with the current setup, redraw, and say what the beam became."""
+        obs = self.obs
+        obs.invert(verbose=False)
+        self.refresh()
+        bmaj, bmin, bpa = obs.estimated_beam
+        lo = format_uvdist(obs._uvmin)
+        hi = format_uvdist(obs._uvmax) if obs._uvmax else "inf"
+        taper = (f"taper {obs._gauval:g} at {format_uvdist(obs._gaurad)} M\u03bb"
+                 if 0.0 < obs._gauval < 1.0 and obs._gaurad > 0.0 else "no taper")
+        self._message(f"uv range {lo}-{hi} M\u03bb, {taper}: beam {bmaj:.4g} x {bmin:.4g} mas at {bpa:.4g} deg")
+        if self.verbose:
+            self.report_beam()
+        return (bmaj, bmin, bpa)
+
     def _sync_weighting(self):
-        """Show the weighting the observation is using, including one
-        set at the prompt (a robustness not on the list is added)."""
+        """Show the weighting the observation is using, including one set at the prompt (a robustness not on the list is added)."""
         box = self.weighting
         r = self.obs.robust
         if r is None:
@@ -302,9 +357,7 @@ class MapPlot(PlotWindow):
         box.blockSignals(False)
 
     def set_weighting(self, robust):
-        """Re-image with Briggs `robust` (-2 ... 2), or with difmap's own
-        uvweight scheme for None (the binwid/errpow in use before a
-        robustness was picked here). Returns the estimated beam."""
+        """Re-image with Briggs `robust` (-2 ... 2), or with difmap's own uvweight scheme for None (the binwid/errpow in use before a robustness was picked here). Returns the estimated beam."""
         obs = self.obs
         if robust is None:
             b, e, rad = self._difmap_weighting
@@ -312,14 +365,14 @@ class MapPlot(PlotWindow):
         else:
             obs.uvweight(obs._binwid, obs._errpow, radial=obs._dorad,
                          robust=float(robust))
-        obs.invert()
+        obs.invert(verbose=False)
         self.refresh()
         bmaj, bmin, bpa = obs.estimated_beam
         name = ("difmap uvweight" if robust is None
                 else self._robust_name(float(robust)))
         self._message(f"{name}: beam {bmaj:.4g} x {bmin:.4g} mas at "
                       f"{bpa:.4g} deg")
-        if not self.quiet:
+        if self.verbose:
             self.report_beam()
         return (bmaj, bmin, bpa)
 
@@ -344,8 +397,8 @@ class MapPlot(PlotWindow):
             return obs.dbeam
         if self.what == "clean":
             if obs._restored is None:
-                obs.restore()
-                if not self.quiet:
+                obs.restore(verbose=False)
+                if self.verbose:
                     self.report_beam()
             return obs.restored_map
         if self.what == "model":
@@ -363,13 +416,7 @@ class MapPlot(PlotWindow):
     def _tune_rounding(self):
         """Match the colour-bar handles' step size to the image.
 
-        `ColorBarItem` rounds every level it computes to a multiple of
-        `rounding` and refuses a span narrower than it. Its default of
-        1 is meaningless for a map in Jy/beam: the first drag snaps the
-        levels to whole Janskys - typically (0, 1) - which flattens the
-        image to a single colour and leaves the handles with no step
-        small enough to do anything. A thousandth of the displayed span
-        gives handles that move smoothly instead.
+        `ColorBarItem` rounds every level it computes to a multiple of `rounding` and refuses a span narrower than it. Its default of 1 is meaningless for a map in Jy/beam: the first drag snaps the levels to whole Janskys - typically (0, 1) - which flattens the image to a single colour and leaves the handles with no step small enough to do anything. A thousandth of the displayed span gives handles that move smoothly instead.
         """
         lo, hi = (float(v) for v in self._cbar.levels())
         span = abs(hi - lo)
@@ -380,9 +427,7 @@ class MapPlot(PlotWindow):
     def set_scale(self, scale):
         """Show the colours on a "linear" or "log" scale.
 
-        Only the colour map changes: the levels, the image and the
-        colour-bar axis stay in Jy/beam, so a log display of a residual
-        map keeps its negatives.
+        Only the colour map changes: the levels, the image and the colour-bar axis stay in Jy/beam, so a log display of a residual map keeps its negatives.
         """
         scale = "log" if str(scale).lower().startswith("log") else "linear"
         if scale != self.scale:
@@ -398,9 +443,7 @@ class MapPlot(PlotWindow):
         return scale
 
     def set_cmap(self, name):
-        """Show the image in the colour map `name`: "color" (difmap's
-        pseudo-colour table), "grey" (black and white) or "viridis".
-        The linear/log choice and the displayed range are kept."""
+        """Show the image in the colour map `name`: "color" (difmap's pseudo-colour table), "grey" (black and white) or "viridis". The linear/log choice and the displayed range are kept."""
         self.cmap = _cmap_name(name)
         self._base_cmap = COLOR_MAPS[self.cmap]()
         self._cbar.setColorMap(log_stretch(self._base_cmap)
@@ -410,9 +453,12 @@ class MapPlot(PlotWindow):
         return self.cmap
 
     def _title(self, data):
-        """The heading over the image: which image this is, and the one
-        number that characterises it."""
+        """The heading over the image: which image this is, and the one number that characterises it."""
         title = VIEW_TITLES[self.what]
+        # The file first, so that two windows on different data (or a
+        # saved screenshot) say which is which.
+        if self.obs.filename:
+            title = f"{self.obs.filename} \u2014 {title}"
         if self.scale == "log":
             title += " (log colours)"
         if self.what == "beam":
@@ -429,6 +475,7 @@ class MapPlot(PlotWindow):
 
     def refresh(self):
         self._sync_weighting()
+        self._sync_uv()
         data = np.asarray(self._image_data())
         self.plot.setTitle(self._title(data), size="11pt", color="#222")
         ex = abs(self.obs.extent[0])
@@ -526,13 +573,7 @@ class MapPlot(PlotWindow):
     def _sync_rois_from_obs(self):
         """Make the ROIs on screen match `obs.windows`.
 
-        Existing ROIs are moved and resized rather than replaced: this
-        runs on every refresh, and a discarded ROI is cyclic garbage
-        that owns child items (its handles). If Python's collector
-        happens to run while pyqtgraph is building the replacement, it
-        destroys those in an order Qt does not survive - a segmentation
-        fault that comes and goes with the interpreter's allocation
-        counts. So nothing is discarded unless a window really went.
+        Existing ROIs are moved and resized rather than replaced: this runs on every refresh, and a discarded ROI is cyclic garbage that owns child items (its handles). If Python's collector happens to run while pyqtgraph is building the replacement, it destroys those in an order Qt does not survive - a segmentation fault that comes and goes with the interpreter's allocation counts. So nothing is discarded unless a window really went.
         """
         wins = list(self.obs.windows)
         for roi, (x0, x1, y0, y1) in zip(self._rois, wins):
@@ -550,11 +591,7 @@ class MapPlot(PlotWindow):
             self._add_roi(x0, x1, y0, y1)
 
     def _retire_roi(self, roi):
-        """Take an ROI off the display for good, in an order that is safe
-        whenever its wrapper is eventually collected: its handles are
-        detached first (so that no child is destroyed along with it
-        behind Python's back), then the signal that ties it to this
-        window, then the item itself."""
+        """Take an ROI off the display for good, in an order that is safe whenever its wrapper is eventually collected: its handles are detached first (so that no child is destroyed along with it behind Python's back), then the signal that ties it to this window, then the item itself."""
         try:
             roi.sigRegionChangeFinished.disconnect(self._rois_to_obs)
         except (TypeError, RuntimeError):  # pragma: no cover
@@ -597,10 +634,7 @@ class MapPlot(PlotWindow):
     CONTOUR_FACTOR = float(np.sqrt(2.0))
 
     def _draw_contours(self, data):
-        """Contour the restored map: solid from +3 sigma up in factors
-        of sqrt(2), dashed from -3 sigma down, sigma being the noise of
-        the residual map. Only the valid inner quarter is traced, like
-        everything else measured on a map."""
+        """Contour the restored map: solid from +3 sigma up in factors of sqrt(2), dashed from -3 sigma down, sigma being the noise of the residual map. Only the valid inner quarter is traced, like everything else measured on a map."""
         for item, _ in self._contour_items:
             self.plot.vb.removeItem(item)
         self._contour_items = []
@@ -638,12 +672,7 @@ class MapPlot(PlotWindow):
     def _style_contours(self):
         """Pen every contour for contrast against the colour scale.
 
-        A contour in the colour of its own level would vanish: the
-        pixels it runs through have exactly that colour. So each takes
-        whichever of light and dark stands out from the colour the scale
-        gives its level - which follows the colour bar when its handles
-        are dragged or the scale switches to log. Negative levels are
-        dashed.
+        A contour in the colour of its own level would vanish: the pixels it runs through have exactly that colour. So each takes whichever of light and dark stands out from the colour the scale gives its level - which follows the colour bar when its handles are dragged or the scale switches to log. Negative levels are dashed.
         """
         if not self._contour_items:
             return
@@ -733,18 +762,11 @@ class MapPlot(PlotWindow):
     def _ellipse_from(self, p1, p2):
         """The FWHM ellipse through two points clicked around a centre.
 
-        The two clicks are just two points *on* the ellipse, at whatever
-        position angles the user picked: neither is required to be the
-        major axis, nor are they required to be 90 degrees apart. The
-        longer of the two fixes the major axis (semi-axis `a` and its
-        position angle), and the shorter must then satisfy the ellipse
-        equation in that frame,
+        The two clicks are just two points *on* the ellipse, at whatever position angles the user picked: neither is required to be the major axis, nor are they required to be 90 degrees apart. The longer of the two fixes the major axis (semi-axis `a` and its position angle), and the shorter must then satisfy the ellipse equation in that frame,
 
             (x'/a)^2 + (y'/b)^2 = 1,
 
-        which gives the semi-minor axis `b` directly. Because the
-        shorter radius is never longer than `a`, this always yields
-        `b <= a`, i.e. a valid axial ratio.
+        which gives the semi-minor axis `b` directly. Because the shorter radius is never longer than `a`, this always yields `b <= a`, i.e. a valid axial ratio.
 
         Returns the `major` (FWHM), `ratio` and `phi` of the component.
         """
@@ -796,7 +818,7 @@ class MapPlot(PlotWindow):
              "phi": float(phi), "freq0": 0.0, "spcind": 0.0,
              "freepar": _free_mask(free)}
         self._placed.append(c)
-        if not self.quiet:
+        if self.verbose:
             if type == "delta":
                 print(f"placed point component: {c['flux']:.5g} Jy at "
                       f"({c['x']:.4g}, {c['y']:.4g}) mas")
@@ -827,10 +849,7 @@ class MapPlot(PlotWindow):
     def _flux_guess(self, x, y, major, ratio):
         """A starting flux for a component of this size at (x, y).
 
-        The map is in Jy/beam, so an extended Gaussian shows a peak
-        lower than its flux by the ratio of the beam area to the
-        convolved source area; undoing that gives a much better starting
-        point for `modelfit` than the peak alone.
+        The map is in Jy/beam, so an extended Gaussian shows a peak lower than its flux by the ratio of the beam area to the convolved source area; undoing that gives a much better starting point for `modelfit` than the peak alone.
         """
         peak = self._map_value(x, y, radius=0.5 * major)
         if major <= 0.0 or peak == 0.0:
@@ -907,13 +926,14 @@ class MapPlot(PlotWindow):
         elif key == "C":
             self.obs.clearmodel()
             self._placed = []
-            if not self.quiet:
+            if self.verbose:
                 print("cleared all model components")
             self.refresh()
+            self._changed()
         elif low == "c":
             self.run_clean()
         elif low == "i":
-            self.obs.invert()
+            self.obs.invert(verbose=False)
             self.refresh()
         elif low == "k":
             on = self.set_contours(not self.contours)
@@ -937,8 +957,9 @@ class MapPlot(PlotWindow):
             self.what = VIEWS[key]
             self.refresh()
         elif low == "x":
-            self.result = self.obs.print_mapinfo()
-            self.close()
+            self.result = self.obs.print_mapinfo(quiet=False)
+            if not self.embedded:
+                self.close()
         elif low == "\x1b":  # pragma: no cover - Escape
             self.cancel_gaussian()
         else:
@@ -957,8 +978,9 @@ class MapPlot(PlotWindow):
         return False
 
     def run_clean(self):
-        res = self.obs.clean(quiet=self.quiet, **self.clean_args)
+        res = self.obs.clean(quiet=False, verbose=self.verbose, **self.clean_args)
         self.refresh()
+        self._changed()
         self._message(
             f"clean: {res['niter']} iterations, {res['cleaned_flux']:.4g} Jy "
             f"cleaned, residual rms {res['residual_rms']:.4g}"
@@ -966,13 +988,9 @@ class MapPlot(PlotWindow):
         return res
 
     def run_modelfit(self, **kwargs):
-        """Fit the placed components, together with every other component
-        that has free parameters, and show the result (difmap modelfit).
+        """Fit the placed components, together with every other component that has free parameters, and show the result (difmap modelfit).
 
-        The placed components join the model here. Unlike
-        `Observation.modelfit`, nothing is seeded: with no component to
-        fit there is no telling where the user wanted one, so the plot
-        asks for one instead of inventing it.
+        The placed components join the model here. Unlike `Observation.modelfit`, nothing is seeded: with no component to fit there is no telling where the user wanted one, so the plot asks for one instead of inventing it.
         """
         if not self._placed and not self.obs.nvariable:
             self._message("nothing to fit: press m to place a component")
@@ -980,7 +998,7 @@ class MapPlot(PlotWindow):
         before, placed = self.obs.model, list(self._placed)
         self._commit_placed()
         try:
-            res = self.obs.modelfit(quiet=self.quiet, **kwargs)
+            res = self.obs.modelfit(quiet=False, verbose=self.verbose, **kwargs)
         except (ValueError, RuntimeError) as exc:
             # Leave the model as it was, and the placed components placed.
             self.obs._replace_model(before)
@@ -988,6 +1006,7 @@ class MapPlot(PlotWindow):
             self._message(f"modelfit: {exc}")
             return None
         self.refresh()
+        self._changed()
         self._message(
             f"modelfit: reduced chi-squared {res['rchisq']:.4g}, "
             f"{res['ncomp']} components, {res['total_flux']:.4g} Jy"
@@ -1008,7 +1027,7 @@ class MapPlot(PlotWindow):
             # built, so they are added rather than thrown away.
             n = len(self._placed)
             self._commit_placed()
-            if not self.quiet:
+            if self.verbose:
                 print(f"added {n} placed, unfitted component(s) to the model; "
                       "obs.modelfit() fits them")
         if self.result is None:
@@ -1022,8 +1041,7 @@ class MapPlot(PlotWindow):
 def _ellipse(x, y, major, ratio, phi_deg, n=64):
     """Points of a component's FWHM ellipse, in mas.
 
-    `phi` is the major-axis position angle measured north through east,
-    matching the model convention.
+    `phi` is the major-axis position angle measured north through east, matching the model convention.
     """
     t = np.linspace(0.0, 2.0 * np.pi, n)
     a, b = 0.5 * major, 0.5 * major * ratio
@@ -1035,11 +1053,47 @@ def _ellipse(x, y, major, ratio, phi_deg, n=64):
 
 
 def mapplot(obs, what="map", mapsize=None, cellsize=None, uvweight=None,
-            block=None, quiet=False, scale="linear", cmap="color",
-            **clean_args):
+            block=None, verbose=True, scale="linear", cmap="color",
+            uvrange=None, uvtaper=None, **clean_args):
+    """The interactive map display (difmap `mapplot`), with CLEAN windows, model editing and model fitting. The title names the file the data came from; ``h`` lists every key.
+
+    The "Weighting" box at the top of the window switches between difmap's own `uvweight` scheme and robust -2, -1, 0, +1, +2, and re-images at once; like `uvweight()`, the choice stays in effect after the window closes. As in difmap, the colours span the displayed map from its minimum to its peak.
+
+    Parameters
+    ----------
+    obs : Observation
+        The observation to plot.
+    what : str, default "map"
+        The image shown first: "map" (the residual map), "beam" (the dirty beam), "clean" (the restored map) or "model" (the model restored without residuals).
+    mapsize : int | None, default None
+        Map size in pixels for this and later images; with none of `mapsize`, `cellsize`, `uvweight` given and `mapsize()` never called, `auto_mapsize()` picks one.
+    cellsize : float | None, default None
+        Pixel size in mas for this and later images.
+    uvweight : float | None, default None
+        A Briggs robustness, -2 to +2, for this and later images.
+    uvrange : tuple | None, default None
+        ``(uvmin, uvmax)`` for this and later images, as `uvrange` takes them: M-lambda, or strings with a unit; the "UV range" fields of the window set it too.
+    uvtaper : tuple | None, default None
+        ``(value, radius)`` for this and later images, as `uvtaper` takes them; the "Taper" fields of the window set it too.
+    block : bool | None, default None
+        Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+    scale : str, default "linear"
+        The colour scale, "linear" or "log"; the ``l`` key toggles it.
+    cmap : str, default "color"
+        "color" (difmap's pseudo-colour table), "grey" (the ``g`` key switches between the two) or "viridis".
+    **clean_args
+        Arguments for the `clean` that the ``c`` key runs (`niter`, `gain`, `cutoff`).
+    verbose : bool, default True
+        Print the reports of what the window runs: the beam, CLEAN and modelfit.
+
+    Returns
+    -------
+    PlotWindow
+        The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+    """
     p = MapPlot(obs, what=what, mapsize=mapsize, cellsize=cellsize,
-                uvweight=uvweight, clean_args=clean_args, quiet=quiet,
-                scale=scale, cmap=cmap)
+                uvweight=uvweight, clean_args=clean_args, verbose=verbose,
+                scale=scale, cmap=cmap, uvrange=uvrange, uvtaper=uvtaper)
     run_if_needed(p, block)
     return p
 

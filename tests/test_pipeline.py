@@ -27,7 +27,7 @@ def test_load_header(uvfits_file):
     assert o.nchan == [NCHAN] * NIF
     assert o.npol == 2
     assert len(o.antennas) == 5
-    txt = o.header()
+    txt = o.header(quiet=False, verbose=False)
     assert "SYNTH" in txt and "IF 2" in txt
 
 
@@ -41,7 +41,7 @@ def test_select_channels(uvfits_file):
 
 
 def test_invert_peak(obs):
-    res = obs.invert()
+    res = obs.invert(quiet=False)
     assert res["nused"] == obs._core.nrow * NIF
     beam = obs.dbeam
     assert abs(beam[NX // 2, NX // 2] - 1.0) < 0.01
@@ -55,7 +55,7 @@ def test_invert_peak(obs):
 
 def test_clean_restore_wmap(obs, tmp_path):
     obs.add_window(X0_MAS - 2, X0_MAS + 2, Y0_MAS - 2, Y0_MAS + 2)
-    res = obs.clean(300, 0.1)
+    res = obs.clean(300, 0.1, quiet=False)
     assert abs(res["cleaned_flux"] - FLUX) / FLUX < 0.02
     assert abs(obs.model_flux - FLUX) / FLUX < 0.02
 
@@ -63,7 +63,7 @@ def test_clean_restore_wmap(obs, tmp_path):
     stats = obs.imstat()
     assert max(abs(stats["min"]), abs(stats["max"])) < 0.05 * FLUX
 
-    cln = obs.restore()
+    cln = obs.restore(quiet=False)
     (x, y), peak = obs.peak_offset(cln)
     assert (x, y) == pytest.approx((X0_MAS, Y0_MAS), abs=CELL)
     assert abs(peak - FLUX) / FLUX < 0.05
@@ -110,7 +110,7 @@ def test_selfcal(corrupted_uvfits_file):
     # True model: point source at the phase center offset.
     o.addcmp(FLUX, X0_MAS, Y0_MAS)
 
-    res = o.selfcal(amp=True, phase=True, float_scale=True)
+    res = o.selfcal(amp=True, phase=True, float_scale=True, quiet=False)
     assert res["nbadsol"] == 0
 
     vis, wt = o._core.stream_vis()
@@ -135,8 +135,8 @@ def test_selfcal(corrupted_uvfits_file):
 
 def test_uniform_vs_natural(obs):
     obs.uvweight(binwid=2.0, errpow=0.0)
-    r_uni = dict(obs.invert())
+    r_uni = dict(obs.invert(quiet=False))
     obs.uvweight(binwid=0.0, errpow=-1.0)
-    r_nat = dict(obs.invert())
+    r_nat = dict(obs.invert(quiet=False))
     # Uniform weighting must not broaden the beam.
     assert r_uni["e_bmaj"] <= r_nat["e_bmaj"] * 1.05

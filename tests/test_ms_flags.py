@@ -75,10 +75,10 @@ def test_save_flags_roundtrip(ms_copy):
     o.select("I")
     frac0 = o.flagged_fraction
 
-    nrows = o.flag(station="EF")
+    nrows = o.flag(station="EF", quiet=False)
     assert nrows > 0
     assert o.flagged_fraction > frac0
-    written = o.save_flags()
+    written = o.save_flags(quiet=False)
     assert written > 0
 
     after = ms_columns(ms_copy)
@@ -121,7 +121,7 @@ def test_flags_setter_and_imaging(ms_copy):
     o = difmapy.load(ms_copy)
     o.select("I")
     o.mapsize(512, 1.0)
-    n0 = o.invert()["nused"]
+    n0 = o.invert(quiet=False)["nused"]
 
     flags = np.asarray(o.flags).copy()
     o.flags = np.ones_like(flags)  # flag everything
@@ -130,7 +130,7 @@ def test_flags_setter_and_imaging(ms_copy):
         o.invert()
 
     o.flags = np.zeros_like(flags)  # unflag everything
-    n1 = o.invert()["nused"]
+    n1 = o.invert(quiet=False)["nused"]
     assert n1 > n0
     # Deleted (zero weight) data must remain flagged regardless.
     _, wt = o._core.calibrated_cube()

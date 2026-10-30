@@ -40,15 +40,43 @@ while set; `uvweight(robust=None)` goes back to Difmap's scheme. The two
 ends reproduce Difmap's own uniform and natural weighting. The
 "Weighting" box in the [map window](mapplot.md) is the same control.
 
-`uvtaper`, `uvrange` and `uvzero` work as in Difmap.
+### Taper and UV range
+
+```python
+obs.uvtaper(0.5, 20)            # weight falls to 0.5 at 20 M-lambda
+obs.uvtaper(0.3, "500k")        # ... to 0.3 at 500 k-lambda
+obs.uvtaper()                   # no taper
+obs.uvrange(5, 100)             # image only 5 - 100 M-lambda
+obs.uvrange("500k")             # from 500 k-lambda, no upper limit
+obs.uvrange()                   # everything
+```
+
+`uvtaper(value, radius)` weights down the long baselines: every
+visibility's gridding weight is multiplied by a Gaussian in UV radius,
+`value ** ((r / radius) ** 2)`, which is 1 at the centre of the UV plane
+and falls to `value` at `radius`. The beam broadens and extended emission
+comes up. `uvrange(uvmin, uvmax)` leaves the visibilities outside the
+range out of the map and beam (without flagging them); a `uvmax` of 0
+is no upper limit.
+
+Both take UV distances in **mega-wavelengths** as bare numbers, or as a
+number with its unit: `"500k"` (k-lambda), `"20M"`, `"2e7 lambda"`. Both
+stay in effect for every later image until changed, and are saved by
+`save()`. They are also fields in the [map window](mapplot.md) and in the
+[dashboard](dashboard.md). Since bare numbers used to be wavelengths, a
+taper radius beyond 100 G-lambda - no baseline is that long - is refused
+with a hint rather than silently tapering nothing.
+
+`uvzero` works as in Difmap.
 
 ## Invert, CLEAN, restore
 
 ```python
 obs.invert()                              # dirty map and beam
 obs.add_window(-5, 5, -5, 5)              # a CLEAN window, in mas
-res = obs.clean(200, 0.03)                # iterations, loop gain
-m = obs.restore()                         # the restored map, a numpy array
+obs.clean(200, 0.03)                      # iterations, loop gain
+obs.restore()                             # restore, with the estimated beam
+m = obs.restored_map                      # the restored map, a numpy array
 ```
 
 `clean` inverts first if it has to. A negative number of iterations
@@ -75,11 +103,26 @@ obs.wmodel("clean.mod")         # the model, as a Difmap .mod file
 
 ## The numbers each command returns
 
-`clean`, `modelfit`, `selfcal` and `gscale` print a short report and
-return it as a dict, so a scripted run can keep the numbers:
+Every command follows one convention, so that the prompt shows the
+reports and nothing else:
+
+- `quiet=True`, the default, returns None, so nothing is echoed as
+  `Out[n]: {...}` under the report. `quiet=False` hands the result
+  back: a dict, a count, or the observation itself, so that
+  `obs.select("I", quiet=False).mapsize(512, 0.2)` still chains.
+- `verbose=True`, the default, prints the report of the commands that
+  have one (`invert`, `clean`, `restore`, `modelfit`, `selfcal`,
+  `gscale`, `bayes_gscale`, `selfant`, `startmod`, `header`,
+  `savecaltable`, `wflags`, `save`); `verbose=False` prints nothing.
+
+Queries whose whole point is their value - `imstat`, `mapinfo`,
+`noise_stats`, `moddif`, `scans`, `station_gains`, `spectrum`,
+`closure_phases` - always return it, and the plot commands always
+return their window. A scripted run that keeps the numbers asks for
+them:
 
 ```python
-res = obs.clean(200, 0.03)
+res = obs.clean(200, 0.03, quiet=False)
 res["ncomp"], res["cleaned_flux"], res["total_flux"], res["residual_rms"]
 ```
 
@@ -95,8 +138,8 @@ obs.mapinfo(outfile="image.json")
 `noise_stats`, `moddif`, `mapinfo`, `station_gains`,
 `baseline_corrections`, `spectrum`, `closure_phases` and `scans` all
 accept it. Arrays become lists, and NaN - which JSON cannot write, and
-which means "no solution" here - becomes `null`. `quiet=True` prints
-nothing.
+which means "no solution" here - becomes `null`. The file is written
+whatever `quiet` says.
 
 ## Shifting the phase centre
 

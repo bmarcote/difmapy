@@ -20,7 +20,7 @@ def _good_fraction(o):
 
 def test_flag_station_roundtrip(obs):
     assert _good_fraction(obs) == 1.0
-    n = obs.flag(station="AN2")
+    n = obs.flag(station="AN2", quiet=False)
     # AN2 appears on 4 of the 10 baselines.
     assert n == obs._core.nrow * 4 // 10
     assert abs(_good_fraction(obs) - 0.6) < 1e-9
@@ -33,7 +33,7 @@ def test_flag_station_roundtrip(obs):
 def test_flag_baseline_time_range(obs):
     t = obs._core.rows()[0]
     tmid = np.median(t)
-    n = obs.flag(baseline=("AN0", "AN1"), tmax=tmid)
+    n = obs.flag(baseline=("AN0", "AN1"), tmax=tmid, quiet=False)
     assert 0 < n < obs._core.nrow
     _, wt = obs._core.stream_vis()
     _, a1, a2, *_ = obs._core.rows()
@@ -53,13 +53,13 @@ def test_flag_single_if(obs):
 
 def test_flagging_affects_imaging(obs):
     obs.mapsize(256, 0.25)
-    r0 = obs.invert()
+    r0 = obs.invert(quiet=False)
     obs.flag(station="AN3")
-    r1 = obs.invert()
+    r1 = obs.invert(quiet=False)
     assert r1["nused"] < r0["nused"]
     # Unflag restores the original gridding count.
     obs.unflag(station="AN3")
-    r2 = obs.invert()
+    r2 = obs.invert(quiet=False)
     assert r2["nused"] == r0["nused"]
 
 
@@ -84,7 +84,7 @@ def test_ignore_sets_a_station_aside_and_puts_it_back(obs):
     an1, an2, an3 = (_rows(obs, n) for n in ("AN1", "AN2", "AN3"))
 
     assert obs.ignored == []
-    assert obs.ignore("an1") == ["AN1"]             # case-insensitive
+    assert obs.ignore("an1", quiet=False) == ["AN1"]             # case-insensitive
     assert obs.flags[an1].all()                     # all of it, all channels
     assert _good_fraction(obs) == pytest.approx(0.6, abs=1e-9)
 
@@ -95,7 +95,7 @@ def test_ignore_sets_a_station_aside_and_puts_it_back(obs):
     assert obs.ignored == ["AN1"]
     assert obs.flags[an1].all()
 
-    assert obs.unignore() == []
+    assert obs.unignore(quiet=False) == []
     after = np.array(obs.flags, copy=True)
     assert (after[an1] == before[an1]).all()        # exactly as it was
     # AN3's flagging is kept, except where the AN2 unflag legitimately
@@ -112,11 +112,11 @@ def test_ignored_data_is_out_of_imaging_and_calibration(obs):
     obs.mapsize(256, 0.25)
     obs.ignore("AN0")
     # 4 of the 10 baselines involve AN0.
-    assert obs.invert()["nused"] == obs._core.nrow * 6 // 10 * obs.nif
+    assert obs.invert(quiet=False)["nused"] == obs._core.nrow * 6 // 10 * obs.nif
     assert obs.moddif()["nvis"] == obs._core.nrow * 6 // 10 * obs.nif
 
     obs.addcmp(FLUX, X0_MAS, Y0_MAS)
-    obs.selfcal(phase=True, quiet=True)
+    obs.selfcal(phase=True, quiet=False, verbose=False)
     nt, nif, nant = obs._core.ntimes, obs.nif, len(obs.antennas)
     phs = np.asarray(obs._core.gains()[1]).reshape(nt, nif, nant)
     assert np.all(phs[:, :, 0] == 0.0)   # no solution for the ignored one
@@ -148,7 +148,7 @@ def test_ignore_needs_a_name_and_rejects_unknown_ones(obs):
         obs.ignore("NOPE")
     assert obs.ignored == []
     # Unignoring something that is not ignored is a no-op, not an error.
-    assert obs.unignore("AN0") == []
+    assert obs.unignore("AN0", quiet=False) == []
 
 
 def test_ignore_survives_interactive_flag_edits(obs):

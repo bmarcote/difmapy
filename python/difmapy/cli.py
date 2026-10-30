@@ -1,5 +1,4 @@
-"""The ``difmapy`` command: an interactive IPython session for VLBI
-imaging, in the spirit of difmap's own prompt.
+"""The ``difmapy`` command: an interactive IPython session for VLBI imaging, in the spirit of difmap's own prompt.
 
     difmapy                                   # empty session
     difmapy myfile.uvfits                     # load and select Stokes I
@@ -8,9 +7,7 @@ imaging, in the spirit of difmap's own prompt.
     difmapy data.ms -c "clean(200, 0.03)"     # run commands on startup
     difmapy data.ms --batch -c "wmap('m.fits')"   # no prompt, just run
 
-Inside the session the loaded observation is ``obs``, and the commands
-you would type in difmap (``select``, ``invert``, ``clean``, ``selfcal``,
-``mapplot``, ...) are available as bare functions bound to it.
+Inside the session the loaded observation is ``obs``, and the commands you would type in difmap (``select``, ``invert``, ``clean``, ``selfcal``, ``mapplot``, ...) are available as bare functions bound to it.
 """
 
 from __future__ import annotations
@@ -43,7 +40,7 @@ COMMANDS = (
     "shift", "unshift",
     # plots
     "mapplot", "maplot", "radplot", "projplot", "uvplot", "vplot",
-    "cpplot", "tplot", "corplot", "specplot", "fplot",
+    "cpplot", "tplot", "corplot", "specplot", "fplot", "possm",
     # output
     "wobs", "wmap", "wdmap", "wbeam", "wwins", "rwins", "save",
     # data access
@@ -108,6 +105,8 @@ def build_parser():
                    help="Python to run after loading (repeatable)")
     p.add_argument("--batch", action="store_true",
                    help="run the --command code and exit, without a prompt")
+    p.add_argument("--dashboard", action="store_true",
+                   help="open the dashboard (every plot and the calibration controls in one window) at startup")
     p.add_argument("--no-gui", action="store_true",
                    help="do not enable the Qt event loop (plots would block)")
     p.add_argument("--version", action="store_true", help="print the version and exit")
@@ -142,7 +141,7 @@ def _load(path, stokes, channels, mapsize, cell, uvweight, robust=None,
     if robust is not None:
         obs.uvweight(robust=robust)
     # Printed after the selection so the summary reflects it.
-    print(obs.header())
+    obs.header()
     return obs
 
 
@@ -154,20 +153,31 @@ def make_namespace(obs=None):
 
     ns = {"difmapy": difmapy, "np": np, "numpy": np, "obs": obs}
 
+    def rebind(new):
+        """Make `new` the session's observation, and the commands its."""
+        ns["obs"] = new
+        ns.update(bind_commands(new))
+
     @functools.wraps(difmapy.load)
     def load(path, **kwargs):
         # difmapy.load's signature and docstring (every parameter it
         # takes), plus: the commands are rebound to the new observation.
         new = difmapy.load(path, **kwargs)
-        ns["obs"] = new
-        ns.update(bind_commands(new))
-        print(new.header())
+        rebind(new)
+        new.header()
         return new
+
+    def dashboard(block=None):
+        """Open the dashboard on the session's observation (or empty, with no data loaded): every plot in one window, kept in step, with controls to load and calibrate. A file loaded from the dashboard becomes the session's `obs`, and the commands act on it."""
+        from difmapy.plots import dashboard as open_dashboard
+
+        return open_dashboard(ns["obs"], block=block, on_load=rebind)
 
     ns["load"] = load
     ns["observe"] = load  # difmap's own name for it
+    ns["dashboard"] = dashboard
     if obs is not None:
-        ns.update(bind_commands(obs))
+        rebind(obs)
     return ns
 
 
@@ -195,6 +205,7 @@ def banner(obs) -> str:
                      f"{obs.nif} IFs{sel}. The observation is 'obs'.")
     lines.append("Commands: " + ", ".join(COMMANDS[:14]) + ", ...")
     lines.append("Values live on obs (obs.model_flux, obs.dmap, obs.windows, ...)")
+    lines.append("Everything in one window: dashboard()")
     lines.append("Help: obs? / clean? / difmapy.Observation?   Quit: exit")
     return "\n".join(lines)
 
@@ -243,10 +254,11 @@ def main(argv=None) -> int:
 
     if args.batch:
         return 0
-    return _start_shell(ns, obs, use_gui=not args.no_gui)
+    return _start_shell(ns, obs, use_gui=not args.no_gui,
+                        dashboard=args.dashboard)
 
 
-def _start_shell(ns, obs, use_gui=True) -> int:
+def _start_shell(ns, obs, use_gui=True, dashboard=False) -> int:
     text = banner(obs)
     try:
         from IPython import start_ipython
@@ -269,6 +281,11 @@ def _start_shell(ns, obs, use_gui=True) -> int:
         # Drive the Qt loop from IPython so plot windows stay live and
         # the prompt keeps working (difmapy's plots detect this).
         cfg.InteractiveShellApp.gui = "qt"
+        if dashboard:
+            # Run once the Qt loop is hooked in, which IPython does
+            # before its exec_lines; the ";" keeps the window's repr off
+            # the screen.
+            cfg.InteractiveShellApp.exec_lines = ["dashboard();"]
     start_ipython(argv=[], user_ns=ns, config=cfg)
     return 0
 

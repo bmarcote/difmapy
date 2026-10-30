@@ -1,11 +1,6 @@
 """Export difmapy's accumulated calibration as a CASA calibration table.
 
-difmapy keeps calibration out of the data: the antenna gains built up by
-`selfcal`, `gscale` and friends live in a separate table in memory and
-are applied on the fly. That maps directly onto CASA's model, where a
-calibration table is applied with `applycal` to produce
-CORRECTED_DATA - so the gains can be exported and reused, for instance
-on the full-resolution Measurement Set that the imaging was not done on.
+difmapy keeps calibration out of the data: the antenna gains built up by `selfcal`, `gscale` and friends live in a separate table in memory and are applied on the fly. That maps directly onto CASA's model, where a calibration table is applied with `applycal` to produce CORRECTED_DATA - so the gains can be exported and reused, for instance on the full-resolution Measurement Set that the imaging was not done on.
 
 Conventions
 -----------
@@ -17,17 +12,11 @@ CASA's `applycal` instead divides by the antenna *gains*:
 
     CORRECTED_DATA = DATA / (G_p * conj(G_q))
 
-so the exported table holds the reciprocal, ``G_a = 1 / c_a``. This is
-verified against CASA itself in the test suite: applying the exported
-table with `applycal` reproduces difmapy's corrected visibilities.
+so the exported table holds the reciprocal, ``G_a = 1 / c_a``. This is verified against CASA itself in the test suite: applying the exported table with `applycal` reproduces difmapy's corrected visibilities.
 
 What can and cannot be exported
 -------------------------------
-Antenna-based amplitude and phase corrections become a standard
-"G Jones" table. Baseline-based corrections (`resoff`) have no
-antenna-based equivalent, and a phase-centre `shift` is a coordinate
-change rather than a calibration; both are reported rather than
-silently dropped. Use `wobs()` to write data with everything applied.
+Antenna-based amplitude and phase corrections become a standard "G Jones" table. Baseline-based corrections (`resoff`) have no antenna-based equivalent, and a phase-centre `shift` is a coordinate change rather than a calibration; both are reported rather than silently dropped. Use `wobs()` to write data with everything applied.
 """
 
 from __future__ import annotations
@@ -89,8 +78,7 @@ def _table_description():
 def _antenna_index_by_name(tb, ms_path, names):
     """Map difmapy antenna names onto ANTENNA table rows of `ms_path`.
 
-    Matching by name (not position) is what lets a table exported from
-    one Measurement Set be applied to another with the same stations.
+    Matching by name (not position) is what lets a table exported from one Measurement Set be applied to another with the same stations.
     """
     tb.open(os.path.join(ms_path, "ANTENNA"))
     try:
@@ -113,10 +101,7 @@ def _antenna_index_by_name(tb, ms_path, names):
 def _field_index_by_name(tb, ms_path, source, default):
     """FIELD_ID of `source` in `ms_path`, matched by name.
 
-    A table written for a *different* Measurement Set than the data came
-    from (another source of the observation, or the multi-source parent
-    of a split) must carry that file's field number, not the split's.
-    Falls back to `default` when the name is not found there.
+    A table written for a *different* Measurement Set than the data came from (another source of the observation, or the multi-source parent of a split) must carry that file's field number, not the split's. Falls back to `default` when the name is not found there.
     """
     tb.open(os.path.join(ms_path, "FIELD"))
     try:
@@ -132,8 +117,7 @@ def _field_index_by_name(tb, ms_path, source, default):
 def _scan_and_observation(tb, ms_path, times_mjds, field_id):
     """The SCAN_NUMBER and OBSERVATION_ID in force at each solution time.
 
-    Taken from the Measurement Set so that scan-aware interpolation in
-    `applycal` behaves as it would for a table CASA wrote itself.
+    Taken from the Measurement Set so that scan-aware interpolation in `applycal` behaves as it would for a table CASA wrote itself.
     """
     tb.open(ms_path)
     try:
@@ -158,8 +142,7 @@ def _scan_and_observation(tb, ms_path, times_mjds, field_id):
 
 
 def _ms_path(obs, ms):
-    """The Measurement Set a table refers to: `ms`, or the one the data
-    came from (also after averaging, which keeps the provenance)."""
+    """The Measurement Set a table refers to: `ms`, or the one the data came from (also after averaging, which keeps the provenance)."""
     core = obs._core
     if ms:
         return ms
@@ -177,35 +160,19 @@ def save_caltable(obs, path, ms=None, spw_ids=None, flag_uncalibrated=False,
     Parameters
     ----------
     obs : difmapy.Observation
-        The observation whose gains are exported. The table is a
-        snapshot of everything applied so far (the gains accumulate as
-        `selfcal`/`gscale` are run), so exporting again later gives a
-        table that supersedes, rather than complements, this one.
+        The observation whose gains are exported. The table is a snapshot of everything applied so far (the gains accumulate as `selfcal`/`gscale` are run), so exporting again later gives a table that supersedes, rather than complements, this one.
     path : str
         Output table (a directory, as CASA tables are).
     ms : str | None
-        Measurement Set whose ANTENNA/FIELD/SPECTRAL_WINDOW/OBSERVATION
-        metadata the table refers to; defaults to the MS the data were
-        loaded from. Required for UVFITS-loaded data. Antennas are
-        matched by *name*, so a compatible MS other than the original
-        can be used.
+        Measurement Set whose ANTENNA/FIELD/SPECTRAL_WINDOW/OBSERVATION metadata the table refers to; defaults to the MS the data were loaded from. Required for UVFITS-loaded data. Antennas are matched by *name*, so a compatible MS other than the original can be used.
     spw_ids : list[int] | None
-        SPECTRAL_WINDOW_ID for each difmapy IF, in order. Defaults to
-        the ids the data came from, or 0..nif-1 for UVFITS input.
+        SPECTRAL_WINDOW_ID for each difmapy IF, in order. Defaults to the ids the data came from, or 0..nif-1 for UVFITS input.
     flag_uncalibrated : bool
-        If true, mark solutions that were never actually solved for as
-        flagged, so `applycal` flags the corresponding data. By default
-        they are written as unity and left unflagged, which leaves such
-        data untouched rather than discarding it.
+        If true, mark solutions that were never actually solved for as flagged, so `applycal` flags the corresponding data. By default they are written as unity and left unflagged, which leaves such data untouched rather than discarding it.
     since : gain snapshot | None
-        If given (from `Observation.gain_snapshot()`), export only the
-        calibration accumulated *since* that point. Applying the
-        resulting chain of tables together, as CASA does with
-        ``gaintable=[t1, t2, ...]``, is equivalent to applying one
-        cumulative table.
+        If given (from `Observation.gain_snapshot()`), export only the calibration accumulated *since* that point. Applying the resulting chain of tables together, as CASA does with ``gaintable=[t1, t2, ...]``, is equivalent to applying one cumulative table.
     solutions : difmapy.io.solutions.GainSolutions | None
-        Write these instead of the observation's gain table (for
-        instance the constant gains of `bayes_gscale`).
+        Write these instead of the observation's gain table (for instance the constant gains of `bayes_gscale`).
     """
     try:
         import casatools
@@ -340,11 +307,7 @@ def save_caltable(obs, path, ms=None, spw_ids=None, flag_uncalibrated=False,
 def _collapse_spectral_window(tb, path):
     """Reduce every spectral window of a caltable to a single channel.
 
-    A G Jones solution has one value per IF, and CASA's own gaincal tables
-    describe their windows that way (NUM_CHAN 1, CHAN_FREQ the band centre,
-    CHAN_WIDTH the whole band). Copying the multi-channel window of the parent
-    Measurement Set instead makes applycal validate a (npol, 1) solution
-    against an (npol, nchan) window and abort with an ArrayShapeError.
+    A G Jones solution has one value per IF, and CASA's own gaincal tables describe their windows that way (NUM_CHAN 1, CHAN_FREQ the band centre, CHAN_WIDTH the whole band). Copying the multi-channel window of the parent Measurement Set instead makes applycal validate a (npol, 1) solution against an (npol, nchan) window and abort with an ArrayShapeError.
     """
     tb.open(path, nomodify=False)
     try:

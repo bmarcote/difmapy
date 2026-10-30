@@ -1,19 +1,12 @@
 """Antenna gain solutions, in the form the calibration-table writers take.
 
-Both the CASA ("G Jones") and the AIPS (SN) writers export the same
-thing: a set of antenna-based amplitude and phase corrections on a grid
-of solution times. `GainSolutions` holds it in difmapy's own convention -
-the *correction* that multiplies the data,
+Both the CASA ("G Jones") and the AIPS (SN) writers export the same thing: a set of antenna-based amplitude and phase corrections on a grid of solution times. `GainSolutions` holds it in difmapy's own convention - the *correction* that multiplies the data,
 
     V_corrected = V_raw * c_p * conj(c_q),    c_a = amp_a * exp(i phs_a)
 
 - and each writer converts to its package's convention on the way out.
 
-`from_gain_table` takes the solutions from the observation's accumulated
-gain table (what `selfcal`/`gscale` built up); `constant` builds a
-time-independent set, which is what a whole-observation amplitude
-calibration such as `bayes_gscale` produces and what can be carried over
-to other sources of the same observation.
+`from_gain_table` takes the solutions from the observation's accumulated gain table (what `selfcal`/`gscale` built up); `constant` builds a time-independent set, which is what a whole-observation amplitude calibration such as `bayes_gscale` produces and what can be carried over to other sources of the same observation.
 """
 
 from __future__ import annotations
@@ -29,9 +22,7 @@ __all__ = ["GainSolutions", "from_gain_table", "constant", "export_warnings"]
 class GainSolutions:
     """Antenna gain corrections on a grid of solution times.
 
-    Arrays are ``[ntime, nif, nant]`` over the observation's IFs and
-    antenna entries; `times` are the solution centres in seconds since
-    `ref_mjd` and `interval` their durations in seconds.
+    Arrays are ``[ntime, nif, nant]`` over the observation's IFs and antenna entries; `times` are the solution centres in seconds since `ref_mjd` and `interval` their durations in seconds.
     """
 
     times: np.ndarray
@@ -60,8 +51,7 @@ class GainSolutions:
 
 
 def export_warnings(obs) -> list[str]:
-    """What an antenna-based table cannot carry, said out loud rather
-    than silently dropped."""
+    """What an antenna-based table cannot carry, said out loud rather than silently dropped."""
     core = obs._core
     warnings = []
     if any(abs(v) > 0 for v in core.shift_total):
@@ -85,9 +75,7 @@ def export_warnings(obs) -> list[str]:
 def from_gain_table(obs, since=None) -> GainSolutions:
     """The accumulated gain table, one solution per integration.
 
-    `since` (from `Observation.gain_snapshot()`) exports only what has
-    been accumulated after that snapshot, by dividing out the
-    corrections that were already in place.
+    `since` (from `Observation.gain_snapshot()`) exports only what has been accumulated after that snapshot, by dividing out the corrections that were already in place.
     """
     core = obs._core
     nant = len(core.antenna_names)
@@ -129,15 +117,9 @@ def from_gain_table(obs, since=None) -> GainSolutions:
 
 
 def constant(obs, amp, phs=None, bad=None, used=None) -> GainSolutions:
-    """Time-independent corrections: `amp`/`phs` (radians) are
-    ``[nif, nant]``; `bad` optionally marks entries whose data should be
-    flagged, and `used` those actually solved for (default: all that
-    are not bad), which is what `flag_uncalibrated` goes by.
+    """Time-independent corrections: `amp`/`phs` (radians) are ``[nif, nant]``; `bad` optionally marks entries whose data should be flagged, and `used` those actually solved for (default: all that are not bad), which is what `flag_uncalibrated` goes by.
 
-    The table gets two identical solutions per antenna, at the first and
-    the last integration, each valid over the whole observation, so
-    that any interpolation mode - nearest, linear, AIPS 2PT - gives the
-    same constant value throughout, and the nearest one beyond it.
+    The table gets two identical solutions per antenna, at the first and the last integration, each valid over the whole observation, so that any interpolation mode - nearest, linear, AIPS 2PT - gives the same constant value throughout, and the nearest one beyond it.
     """
     core = obs._core
     nif, nant = core.nif, len(core.antenna_names)

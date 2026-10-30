@@ -44,7 +44,7 @@ def calibrated(corrupted_uvfits_file):
     o = difmapy.load(path)
     o.mapsize(256, 0.25)
     o.addcmp(2.5, 4.0, -2.5)
-    o.selfcal(amp=True, phase=True, quiet=True)
+    o.selfcal(amp=True, phase=True, quiet=False, verbose=False)
     return o
 
 
@@ -57,7 +57,7 @@ def _sn(path):
 def test_default_format_follows_the_data(calibrated, tmp_path):
     assert calibrated.caltable_formats() == ("aips",)
     out = str(tmp_path / "cal.TASAV.FITS")
-    info = calibrated.savecaltable(out, quiet=True)
+    info = calibrated.savecaltable(out, quiet=False, verbose=False)
     assert info["format"] == "aips" and os.path.isfile(out)
     assert info["nrows"] == calibrated._core.ntimes * NANT
 
@@ -80,7 +80,7 @@ def test_outformat_names(calibrated):
 
 def test_tasav_layout_matches_aips(calibrated, tmp_path):
     out = str(tmp_path / "cal.TASAV.FITS")
-    calibrated.savecaltable(out, outformat="AIPS", quiet=True)
+    calibrated.savecaltable(out, outformat="AIPS", quiet=False, verbose=False)
     hdr, sn, names = _sn(out)
     assert names == ["PRIMARY", "AIPS FQ", "AIPS AN", "AIPS SN"]
     assert list(sn.columns.names) == AIPS_SN_COLUMNS
@@ -98,7 +98,7 @@ def test_sn_values_are_conjugate_corrections(calibrated, tmp_path):
     """SN = conj(difmapy correction), same amplitude, at the right times
     and antenna numbers."""
     out = str(tmp_path / "cal.TASAV.FITS")
-    calibrated.savecaltable(out, outformat="aips", quiet=True)
+    calibrated.savecaltable(out, outformat="aips", quiet=False, verbose=False)
     _, sn, _ = _sn(out)
     core = calibrated._core
     amp, phs, _ = (np.asarray(x) for x in core.gains())
@@ -124,7 +124,7 @@ def test_antennas_are_matched_by_name(calibrated, tmp_path):
         an = h["AIPS AN"]
         an.data["NOSTA"] = an.data["NOSTA"][::-1] + 10
     out = str(tmp_path / "cal.TASAV.FITS")
-    calibrated.savecaltable(out, outformat="aips", uvfits=other, quiet=True)
+    calibrated.savecaltable(out, outformat="aips", uvfits=other, quiet=False, verbose=False)
     hdr, sn, _ = _sn(out)
     nosta = np.arange(1, NANT + 1)[::-1] + 10
     np.testing.assert_array_equal(sn["ANTENNA NO."][:NANT], nosta)
@@ -135,7 +135,7 @@ def test_if_mismatch_is_refused(calibrated, tmp_path):
     avg = str(tmp_path / "avg.uvf")
     calibrated.chanaver("all").wobs(avg)  # same IFs: accepted
     calibrated.savecaltable(str(tmp_path / "a.FITS"), outformat="aips",
-                            uvfits=avg, quiet=True)
+                            uvfits=avg, quiet=False, verbose=False)
     one_if = str(tmp_path / "oneif.uvf")
     with fits.open(avg) as h:
         fq = h["AIPS FQ"]
@@ -143,14 +143,14 @@ def test_if_mismatch_is_refused(calibrated, tmp_path):
         h.writeto(one_if)
     with pytest.raises(ValueError, match="IFs"):
         calibrated.savecaltable(str(tmp_path / "b.FITS"), outformat="aips",
-                                uvfits=one_if, quiet=True)
+                                uvfits=one_if, quiet=False, verbose=False)
 
 
 def test_flag_uncalibrated_blanks_solutions(calibrated, tmp_path):
     calibrated._core.uncalib(True, True, False)
     out = str(tmp_path / "cal.TASAV.FITS")
     calibrated.savecaltable(out, outformat="aips", flag_uncalibrated=True,
-                            quiet=True)
+                            quiet=False, verbose=False)
     _, sn, _ = _sn(out)
     assert np.isnan(sn["REAL1"]).all() and (sn["WEIGHT 1"] == 0).all()
 
@@ -163,7 +163,7 @@ def test_ms_data_default_to_casa_and_number_like_exportuvfits(tmp_path):
     o.mapsize(512, 1.0)
     o.startmod(flux=1.0)
     out = str(tmp_path / "cal")
-    info = o.savecaltable(out, outformat="both", quiet=True)
+    info = o.savecaltable(out, outformat="both", quiet=False, verbose=False)
     assert os.path.isdir(info["casa"]["path"])
     hdr, sn, names = _sn(info["aips"]["path"])
     assert "AIPS AN" in names
@@ -172,7 +172,7 @@ def test_ms_data_default_to_casa_and_number_like_exportuvfits(tmp_path):
     assert list(sn["ANTENNA NO."][: len(o.antennas)]) == list(
         range(1, len(o.antennas) + 1))
     # Averaged data keep the provenance.
-    info = o.uvaver(120).savecaltable(str(tmp_path / "avg.G"), quiet=True)
+    info = o.uvaver(120).savecaltable(str(tmp_path / "avg.G"), quiet=False, verbose=False)
     assert info["format"] == "casa"
 
 
@@ -208,11 +208,11 @@ def test_aips_applies_the_table_like_difmapy(tmp_path):
     o = difmapy.load(str(tmp_path / "IN.UVFITS"))
     o.mapsize(1024, 1.0)
     o.startmod(flux=1.0)
-    o.clean(200, 0.03, quiet=True)
-    o.selfcal(phase=True, quiet=True)
-    o.clean(200, 0.03, quiet=True)
-    o.selfcal(amp=True, phase=True, solint=30, quiet=True)
-    o.savecaltable(str(tmp_path / "CAL.TASAV.FITS"), quiet=True)
+    o.clean(200, 0.03, quiet=False, verbose=False)
+    o.selfcal(phase=True, quiet=False, verbose=False)
+    o.clean(200, 0.03, quiet=False, verbose=False)
+    o.selfcal(amp=True, phase=True, solint=30, quiet=False, verbose=False)
+    o.savecaltable(str(tmp_path / "CAL.TASAV.FITS"), quiet=False, verbose=False)
 
     log = _run_aips(tmp_path, ZAP_ALL + [
         "default fitld",
@@ -273,7 +273,7 @@ def test_aips_applies_the_flag_table_like_difmapy(tmp_path):
     o.flag(station="EF", tmin=t[40], tmax=t[90])
     o.flag(baseline=("JB", "WB"), tmin=t[200], tmax=t[260], if_index=2)
     o.flag(station="T6", if_index=0)
-    info = o.wflags(str(tmp_path / "FLG.FG.TASAV.FITS"), quiet=True)
+    info = o.wflags(str(tmp_path / "FLG.FG.TASAV.FITS"), quiet=False, verbose=False)
     assert info["nrows"] == 3   # one entry per flag command above
 
     log = _run_aips(tmp_path, ZAP_ALL + [

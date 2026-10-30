@@ -12,10 +12,7 @@ Interaction conventions (all point-based plots):
 * ``h``: the key legend of the active plot
 * ``q``: close the window
 
-Flag edits are applied to the underlying data immediately (difmap
-behaviour) and the plot refreshes in place; every edit is recorded
-exactly, as a snapshot of the affected rows of the FLAG column, so that
-undo restores precisely what was there before.
+Flag edits are applied to the underlying data immediately (difmap behaviour) and the plot refreshes in place; every edit is recorded exactly, as a snapshot of the affected rows of the FLAG column, so that undo restores precisely what was there before.
 """
 
 from __future__ import annotations
@@ -41,6 +38,13 @@ FLAG_COLOR = (220, 40, 40)
 UNFLAG_COLOR = (40, 160, 40)
 HIGHLIGHT_COLOR = (255, 140, 0)
 MODEL_COLOR = (214, 30, 30)
+#: The frame drawn round the panels of one baseline (vplot, possm).
+FRAME_COLOR = (30, 30, 30)
+FRAME_WIDTH = 2.5
+#: Width of the (label-less) right axis that carries a frame's right
+#: side. Every panel of a page gets one, framed or not, so their plot
+#: areas keep the same width.
+RIGHT_AXIS_WIDTH = 6
 
 
 # ----------------------------------------------------------------------
@@ -87,15 +91,9 @@ def _register_window(win):
 def close_all_windows():
     """Close every open plot window and destroy it, now.
 
-    Left to itself, the interpreter garbage-collects a live plot window
-    during shutdown: Python frees the wrappers of the items inside the
-    scene, then the QMainWindow's destructor tears the scene down and
-    Qt walks into ~QGraphicsItem on objects whose Python halves are
-    already gone. On macOS that aborts the process with SIGTRAP - "zsh:
-    trace trap" after an otherwise clean session.
+    Left to itself, the interpreter garbage-collects a live plot window during shutdown: Python frees the wrappers of the items inside the scene, then the QMainWindow's destructor tears the scene down and Qt walks into ~QGraphicsItem on objects whose Python halves are already gone. On macOS that aborts the process with SIGTRAP - "zsh: trace trap" after an otherwise clean session.
 
-    Deleting the C++ objects here, while the interpreter is still
-    healthy, leaves nothing for the shutdown to destroy.
+    Deleting the C++ objects here, while the interpreter is still healthy, leaves nothing for the shutdown to destroy.
     """
     windows, _OPEN_WINDOWS[:] = list(_OPEN_WINDOWS), []
     app = QtWidgets.QApplication.instance()
@@ -148,8 +146,7 @@ def ensure_app():
 def gradient_colors(n, name="viridis", lo=0.0, hi=0.88):
     """`n` colours sampled evenly from a perceptual colour map.
 
-    Used to colour points by spectral window, where the ordering of the
-    IFs is meaningful and a gradient reads better than arbitrary hues.
+    Used to colour points by spectral window, where the ordering of the IFs is meaningful and a gradient reads better than arbitrary hues.
     """
     n = max(int(n), 1)
     try:
@@ -167,13 +164,7 @@ def gradient_colors(n, name="viridis", lo=0.0, hi=0.88):
 class FastScatter(pg.GraphicsObject):
     """Many identical markers, drawn in one call.
 
-    pyqtgraph's ScatterPlotItem builds a per-point record of style and
-    geometry, which takes seconds for the million-point panels of a long
-    VLBI observation - and every refresh (a flag edit, a highlighted
-    antenna, a new page) pays it again. Every marker here shares one
-    symbol, so the points are kept as two plain arrays and painted as
-    fragments of a single pre-rendered pixmap. Non-finite points are
-    dropped.
+    pyqtgraph's ScatterPlotItem builds a per-point record of style and geometry, which takes seconds for the million-point panels of a long VLBI observation - and every refresh (a flag edit, a highlighted antenna, a new page) pays it again. Every marker here shares one symbol, so the points are kept as two plain arrays and painted as fragments of a single pre-rendered pixmap. Non-finite points are dropped.
     """
 
     def __init__(self, x, y, size=4, symbol="o", pen=None, brush=None):
@@ -294,11 +285,7 @@ class FastScatter(pg.GraphicsObject):
 class FluxAxis(pg.AxisItem):
     """An axis in Jy whose ticks read in Jy, mJy or µJy.
 
-    The unit follows the displayed range - the largest |value| shown
-    lands between 1 and 1000 of it - and changes as the panel is zoomed.
-    Only the tick labels and the unit in the label are rescaled; the
-    data and the view coordinates (which flag boxes are drawn in) stay
-    in Jy. Pass the label text without a unit.
+    The unit follows the displayed range - the largest |value| shown lands between 1 and 1000 of it - and changes as the panel is zoomed. Only the tick labels and the unit in the label are rescaled; the data and the view coordinates (which flag boxes are drawn in) stay in Jy. Pass the label text without a unit.
     """
 
     def __init__(self, orientation="left", **kwargs):
@@ -322,9 +309,7 @@ class FluxAxis(pg.AxisItem):
 class SelectViewBox(pg.ViewBox):
     """A ViewBox that reports Shift/Ctrl rubber-band drags.
 
-    Plain drags keep pyqtgraph's usual pan/zoom behaviour; holding
-    Shift (flag) or Ctrl (unflag) instead sweeps out a selection box
-    and emits `sigSelected(x0, x1, y0, y1, flag)` on release.
+    Plain drags keep pyqtgraph's usual pan/zoom behaviour; holding Shift (flag) or Ctrl (unflag) instead sweeps out a selection box and emits `sigSelected(x0, x1, y0, y1, flag)` on release.
     """
 
     sigSelected = QtCore.Signal(float, float, float, float, bool)
@@ -383,15 +368,9 @@ class SelectViewBox(pg.ViewBox):
 def run_if_needed(widget, block):
     """Present a plot the way the current mode says (see `set_mode`).
 
-    "window": show it, and enter the Qt event loop only if nothing else
-    will pump it. Under IPython or Jupyter the loop is hooked into the
-    session instead (what ``%gui qt`` does), so the prompt stays usable;
-    a plain script blocks until the window is closed. `block` overrides
-    that choice.
+    "window": show it, and enter the Qt event loop only if nothing else will pump it. Under IPython or Jupyter the loop is hooked into the session instead (what ``%gui qt`` does), so the prompt stays usable; a plain script blocks until the window is closed. `block` overrides that choice.
 
-    "inline": draw it off-screen and never block; under Jupyter the image
-    goes into the cell's output. The plot is returned either way, for
-    `savefig` and further calls.
+    "inline": draw it off-screen and never block; under Jupyter the image goes into the cell's output. The plot is returned either way, for `savefig` and further calls.
     """
     if get_mode() == "inline":
         _present_inline(widget)
@@ -431,14 +410,9 @@ if _MODE not in MODES:
 def set_mode(mode="auto") -> str:
     """Choose how plot commands present their plots.
 
-    - "window": an interactive Qt window, with flagging and the keys.
-      Under IPython or Jupyter the Qt event loop is hooked in
-      automatically, so the prompt or notebook stays usable.
-    - "inline": no window. The plot is drawn off-screen, shown in the
-      cell output under Jupyter, and returned for `savefig()` /
-      `to_png()` - what pipelines and headless kernels need.
-    - "auto" (the default, or $DIFMAPY_PLOT_MODE): "inline" in a Jupyter
-      kernel or where there is no display, "window" otherwise.
+    - "window": an interactive Qt window, with flagging and the keys. Under IPython or Jupyter the Qt event loop is hooked in automatically, so the prompt or notebook stays usable.
+    - "inline": no window. The plot is drawn off-screen, shown in the cell output under Jupyter, and returned for `savefig()` / `to_png()` - what pipelines and headless kernels need.
+    - "auto" (the default, or $DIFMAPY_PLOT_MODE): "inline" in a Jupyter kernel or where there is no display, "window" otherwise.
 
     Returns the previous setting.
     """
@@ -483,8 +457,7 @@ def has_display() -> bool:
 
 
 def _hook_qt_loop() -> bool:
-    """Have an IPython or Jupyter session pump Qt events, as ``%gui qt``
-    does; False if there is no session to do it."""
+    """Have an IPython or Jupyter session pump Qt events, as ``%gui qt`` does; False if there is no session to do it."""
     if _qt_loop_hooked():
         return True
     try:
@@ -527,15 +500,35 @@ def _present_inline(widget):
 # ----------------------------------------------------------------------
 
 
+def _x_extent(boxes):
+    """The x range covering the data drawn in all of `boxes`, or None if none of them holds any."""
+    lo, hi = np.inf, -np.inf
+    for vb in boxes:
+        xr = vb.childrenBounds()[0]
+        if xr is not None and np.all(np.isfinite(xr)):
+            lo, hi = min(lo, xr[0]), max(hi, xr[1])
+    if not np.isfinite(lo):
+        return None
+    if hi <= lo:
+        # A single integration: give it some width to sit in.
+        pad = max(abs(lo) * 1e-3, 1e-6)
+        lo, hi = lo - pad, hi + pad
+    return lo, hi
+
+
 class PlotWindow(QtWidgets.QMainWindow):
     """Base window: a key legend on ``h`` and closing on ``q``.
 
-    Also the home of the axis and reload keys every plot shares: ``z``
-    and ``u`` put the y and x ranges back to their defaults, as
-    difmap's ``Z`` and ``U`` do, and ``r`` rebuilds the plot from the
-    data, for when it has been changed from the prompt behind the
-    window's back.
+    Also the home of the axis and reload keys every plot shares: ``z`` and ``u`` put the y and x ranges back to their defaults, as difmap's ``Z`` and ``U`` do, and ``r`` rebuilds the plot from the data, for when it has been changed from the prompt behind the window's back.
     """
+
+    #: Called with the window after something done in it changed the
+    #: data or the model (a flag edit, a CLEAN, a fit); `dashboard` sets
+    #: it to bring its other panels up to date.
+    on_change = None
+    #: True while the window is a panel of another window (`dashboard`):
+    #: then ``q`` does not close it.
+    embedded = False
 
     #: Default window size, clipped to the screen. These plots are read
     #: in detail - a page of stacked panels, or a map beside its colour
@@ -543,9 +536,7 @@ class PlotWindow(QtWidgets.QMainWindow):
     DEFAULT_SIZE = (1150, 800)
 
     def __init_subclass__(cls, **kwargs):
-        """Count redraws: every `refresh()` a plot class defines bumps
-        `_revision`, which is how the notebook display knows whether a
-        plot has changed since it was shown."""
+        """Count redraws: every `refresh()` a plot class defines bumps `_revision`, which is how the notebook display knows whether a plot has changed since it was shown."""
         super().__init_subclass__(**kwargs)
         fn = cls.__dict__.get("refresh")
         if fn is None or getattr(fn, "_counts_revisions", False):
@@ -580,9 +571,7 @@ class PlotWindow(QtWidgets.QMainWindow):
     def render(self, width=None, height=None):
         """The plot drawn off-screen, as a QImage.
 
-        Works whether or not the window is shown, and never puts one on
-        the screen: an unshown plot is laid out and painted as a window
-        would be, then hidden again. `width`/`height` resize it first.
+        Works whether or not the window is shown, and never puts one on the screen: an unshown plot is laid out and painted as a window would be, then hidden again. `width`/`height` resize it first.
         """
         if width or height:
             self.resize(int(width or self.width()), int(height or self.height()))
@@ -608,13 +597,9 @@ class PlotWindow(QtWidgets.QMainWindow):
         return bytes(buf.data())
 
     def savefig(self, path, width=None, height=None):
-        """Write the plot to an image file, its format taken from the
-        extension (.png, .jpg, ...).
+        """Write the plot to an image file, its format taken from the extension (.png, .jpg, ...).
 
-        On a paged plot (vplot, cpplot, corplot, fplot) a `path`
-        containing ``{page}`` writes every page, numbered from 1, and
-        returns the list of files; otherwise the file written is
-        returned.
+        On a paged plot (vplot, cpplot, corplot, fplot) a `path` containing ``{page}`` writes every page, numbered from 1, and returns the list of files; otherwise the file written is returned.
         """
         path = os.fspath(path)
         if "{page}" in path and hasattr(self, "set_page"):
@@ -640,11 +625,7 @@ class PlotWindow(QtWidgets.QMainWindow):
     def _repr_png_(self):
         """Jupyter's rich display of the plot.
 
-        Only in a Jupyter kernel: recent IPython (9.x, IPython.core.kitty)
-        also renders image/png in a terminal that speaks the kitty
-        graphics protocol (iTerm2, kitty, WezTerm...), which put a picture
-        of every plot a command returned under the prompt, beside the
-        window itself.
+        Only in a Jupyter kernel: recent IPython (9.x, IPython.core.kitty) also renders image/png in a terminal that speaks the kitty graphics protocol (iTerm2, kitty, WezTerm...), which put a picture of every plot a command returned under the prompt, beside the window itself.
         """
         if not in_jupyter():
             return None
@@ -665,9 +646,12 @@ class PlotWindow(QtWidgets.QMainWindow):
     def default_y_range(self, vb):
         """The y range ``z`` restores for `vb`; None to autoscale.
 
-        Phase panels come back to +-180 rather than to the spread of
-        whatever is displayed, which is their default view.
+        Phase panels come back to +-180 rather than to the spread of whatever is displayed, which is their default view.
         """
+        return None
+
+    def default_x_range(self, vb):
+        """The x range ``u`` restores on view box `vb` (one that owns its x axis), or None for the extent of the data on that axis."""
         return None
 
     def reset_ranges(self, axis="both") -> int:
@@ -677,37 +661,49 @@ class PlotWindow(QtWidgets.QMainWindow):
         """
         boxes = self.view_boxes()
         for vb in boxes:
-            auto = False
             if axis in ("y", "both"):
                 r = self.default_y_range(vb)
                 if r is None:
                     vb.enableAutoRange(axis=vb.YAxis)
-                    auto = True
+                    # pyqtgraph only works out what "auto" means at the
+                    # next paint. Do it now, so that the range a plot
+                    # opens with is decided here rather than by paint
+                    # timing.
+                    vb.updateAutoRange()
                 else:
                     vb.setYRange(*r, padding=0)
-            # Stacked panels share one x axis: auto-ranging the panel
-            # that owns it is what moves the page, and re-enabling it on
-            # a follower only fights the link.
-            if axis in ("x", "both") and vb.linkedView(vb.XAxis) is None:
-                vb.enableAutoRange(axis=vb.XAxis)
-                auto = True
-            if auto:
-                # pyqtgraph only works out what "auto" means at the next
-                # paint. Do it now, so that the range a plot opens with
-                # is decided here rather than by paint timing.
-                vb.updateAutoRange()
+        if axis in ("x", "both"):
+            # Stacked panels share one x axis, owned by the panel the
+            # others are linked to; setting a follower only fights the
+            # link. The owner is ranged over the data of *every* panel
+            # on the axis: auto-ranging it on its own data alone left a
+            # page whose first baseline was all flagged at pyqtgraph's
+            # empty 0..1 view, with every other panel's data off-screen.
+            for vb in boxes:
+                if vb.linkedView(vb.XAxis) is not None:
+                    continue
+                group = [vb] + [o for o in boxes if o.linkedView(o.XAxis) is vb]
+                span = self.default_x_range(vb) or _x_extent(group)
+                if span is None:
+                    vb.enableAutoRange(axis=vb.XAxis)
+                    vb.updateAutoRange()
+                else:
+                    vb.setXRange(*span)
         return len(boxes)
 
     def reload(self):
         """Rebuild the plot from the data (difmap's ``L``).
 
-        The data can be edited from the prompt while a window is open -
-        flagged, calibrated, re-imaged - and nothing tells the window
-        about it; ``r`` is how you catch up.
+        The data can be edited from the prompt while a window is open - flagged, calibrated, re-imaged - and nothing tells the window about it; ``r`` is how you catch up.
         """
         refresh = getattr(self, "refresh", None)
         if callable(refresh):
             refresh()
+
+    def _changed(self):
+        """Tell whoever is listening (`on_change`) that the data or the model changed here."""
+        if self.on_change is not None:
+            self.on_change(self)
 
     def key_help(self) -> list[tuple[str, str]]:  # pragma: no cover - trivial
         """The keys this plot understands, as (key, description) pairs."""
@@ -755,10 +751,7 @@ class PlotWindow(QtWidgets.QMainWindow):
     def closeEvent(self, ev):
         """Ask Qt to destroy the window once it is out of the way.
 
-        The C++ object goes when the event loop next runs, rather than
-        whenever Python happens to collect the wrapper - which, at
-        interpreter shutdown, is too late to be safe. See
-        `close_all_windows`.
+        The C++ object goes when the event loop next runs, rather than whenever Python happens to collect the wrapper - which, at interpreter shutdown, is too late to be safe. See `close_all_windows`.
         """
         super().closeEvent(ev)
         self.deleteLater()
@@ -768,7 +761,8 @@ class PlotWindow(QtWidgets.QMainWindow):
         if key == "h":
             self.toggle_help()
         elif key == "q":
-            self.close()
+            if not self.embedded:
+                self.close()
         elif key == "z":
             self.reset_ranges("y")
         elif key == "u":
@@ -787,10 +781,7 @@ class PlotWindow(QtWidgets.QMainWindow):
 class EditHistory:
     """Exact undo/redo for interactive flag editing.
 
-    Each edit is stored as before/after snapshots of the FLAG column
-    rows it touched, so undo restores the previous state even where an
-    edit hit data that was already partly flagged. Deleted samples
-    (weight 0) stay flagged whatever happens, as everywhere else.
+    Each edit is stored as before/after snapshots of the FLAG column rows it touched, so undo restores the previous state even where an edit hit data that was already partly flagged. Deleted samples (weight 0) stay flagged whatever happens, as everywhere else.
     """
 
     def __init__(self, obs, limit=100):
@@ -811,8 +802,7 @@ class EditHistory:
         return bool(self._redo)
 
     def apply(self, ops) -> int:
-        """Apply `ops`, a sequence of (rows, if_index, flag) triples, as
-        one undoable step. Returns the number of samples changed."""
+        """Apply `ops`, a sequence of (rows, if_index, flag) triples, as one undoable step. Returns the number of samples changed."""
         core = self.obs._core
         ops = [(np.unique(np.asarray(r, dtype=int)), c, bool(f)) for r, c, f in ops]
         rows = sorted({int(r) for rr, _, _ in ops for r in rr})
@@ -868,9 +858,7 @@ class EditHistory:
 class ColorScheme:
     """How the points of a flag plot are split into coloured groups.
 
-    `of(obs, name)` builds one from a user-facing name; calling it with
-    a collected data dict returns ``(labels, keys, colors)`` where
-    `keys` is an integer group per point.
+    `of(obs, name)` builds one from a user-facing name; calling it with a collected data dict returns ``(labels, keys, colors)`` where `keys` is an integer group per point.
     """
 
     def __init__(self, name, labels, keyfunc, colors):
@@ -939,8 +927,7 @@ def _baseline_arrays(obs):
 
 
 class Panel:
-    """One plot panel: which quantity it draws and, for paged plots,
-    which subset of the points belongs to it."""
+    """One plot panel: which quantity it draws and, for paged plots, which subset of the points belongs to it."""
 
     __slots__ = ("key", "plot", "vb", "group", "label")
 
@@ -955,11 +942,7 @@ class Panel:
 class FlagPlotBase(PlotWindow):
     """Stacked scatter panels with interactive flagging.
 
-    Subclasses provide `_collect()`, returning a dict of parallel 1-D
-    arrays: the per-point ``wt`` (signed weights), ``row`` and ``cif``
-    indices, an ``x``, and one array per panel quantity; plus optional
-    ``time``/``a1``/``a2`` used by the colour schemes. `_build_panels()`
-    lays the panels out and returns them.
+    Subclasses provide `_collect()`, returning a dict of parallel 1-D arrays: the per-point ``wt`` (signed weights), ``row`` and ``cif`` indices, an ``x``, and one array per panel quantity; plus optional ``time``/``a1``/``a2`` used by the colour schemes. `_build_panels()` lays the panels out and returns them.
     """
 
     #: (data key, axis label) pairs of the quantities this plot can draw
@@ -1054,15 +1037,9 @@ class FlagPlotBase(PlotWindow):
     def _share_x_axis(self):
         """Stack the panels on one common x axis.
 
-        Every panel *but the first* is tied to it, and only the bottom
-        one keeps its tick labels, so the panels of a page read as one
-        plot with a single time (or UV radius) axis rather than as
-        separate ones.
+        Every panel *but the first* is tied to it, and only the bottom one keeps its tick labels, so the panels of a page read as one plot with a single time (or UV radius) axis rather than as separate ones.
 
-        The first panel must never be linked to itself: pyqtgraph
-        answers a link by taking its range from the other view and
-        switching auto-ranging off, so a self-link freezes the whole
-        page at the empty default view and no data is ever shown.
+        The first panel must never be linked to itself: pyqtgraph answers a link by taking its range from the other view and switching auto-ranging off, so a self-link freezes the whole page at the empty default view and no data is ever shown.
         """
         for panel in self._panels[:-1]:
             panel.plot.getAxis("bottom").setStyle(showValues=False)
@@ -1191,12 +1168,7 @@ class FlagPlotBase(PlotWindow):
     def _flat_amp_range(self, panel):
         """A fixed range for an amplitude panel too flat to autoscale.
 
-        A point source, or data scaled by one gain, can be constant to
-        the last bit of float32; autoscaling that zooms onto rounding
-        noise and pyqtgraph drops the tick labels altogether. Such a
-        panel is ranged to a thousandth of its level instead (the floor
-        corplot uses). Anything with real spread gets None, i.e. normal
-        autoscaling.
+        A point source, or data scaled by one gain, can be constant to the last bit of float32; autoscaling that zooms onto rounding noise and pyqtgraph drops the tick labels altogether. Such a panel is ranged to a thousandth of its level instead (the floor corplot uses). Anything with real spread gets None, i.e. normal autoscaling.
         """
         d = self._data
         if d is None or panel.key not in d:
@@ -1231,6 +1203,8 @@ class FlagPlotBase(PlotWindow):
         n = self.history.redo() if redo else self.history.undo()
         what = "redo" if redo else "undo"
         self.refresh()
+        if n is not None:
+            self._changed()
         self._message(f"nothing to {what}" if n is None
                       else f"{'redid' if redo else 'undid'} an edit of "
                            f"{n} samples")
@@ -1299,6 +1273,7 @@ class FlagPlotBase(PlotWindow):
     def _edit_points(self, idx, flag) -> int:
         n = self.history.apply(self._edit_ops(idx, flag))
         self.refresh()
+        self._changed()
         return n
 
     # ---- status -------------------------------------------------------
@@ -1321,16 +1296,9 @@ class FlagPlotBase(PlotWindow):
 class TimeGaps:
     """Maps observing time onto an x axis with the long gaps cut out.
 
-    VLBI scans are often separated by far more time than they last, and
-    a continuous time axis then spends most of its width on nothing.
-    Any gap between consecutive integrations longer than `min_frac` of
-    the whole time range is cut down to `gap_frac` of the time that is
-    kept, so the scans sit side by side on one axis.
+    VLBI scans are often separated by far more time than they last, and a continuous time axis then spends most of its width on nothing. Any gap between consecutive integrations longer than `min_frac` of the whole time range is cut down to `gap_frac` of the time that is kept, so the scans sit side by side on one axis.
 
-    Inside a segment the mapping is a plain shift - an hour of data is
-    still an hour wide - and the first segment is not shifted at all,
-    so with nothing to cut plot coordinates are simply the times.
-    Times are in whatever unit they are given in (the plots use hours).
+    Inside a segment the mapping is a plain shift - an hour of data is still an hour wide - and the first segment is not shifted at all, so with nothing to cut plot coordinates are simply the times. Times are in whatever unit they are given in (the plots use hours).
     """
 
     def __init__(self, times, min_frac=0.10, gap_frac=0.02):
@@ -1408,17 +1376,14 @@ class TimeGaps:
 
 
 class TimeGapAxis(pg.AxisItem):
-    """A bottom axis over `TimeGaps` coordinates, labelled with the
-    real times; ticks that land in a cut are left unlabelled."""
+    """A bottom axis over `TimeGaps` coordinates, labelled with the real times; ticks that land in a cut are left unlabelled."""
 
     def __init__(self, gaps, **kwargs):
         super().__init__(orientation="bottom", **kwargs)
         self.gaps = gaps
 
     def tickValues(self, minVal, maxVal, size):
-        """Round-number times within each scan, rather than ticks spaced
-        evenly over the cut axis - which would label every scan at some
-        arbitrary offset from its start."""
+        """Round-number times within each scan, rather than ticks spaced evenly over the cut axis - which would label every scan at some arbitrary offset from its start."""
         levels = super().tickValues(minVal, maxVal, size)
         if not self.gaps:
             return levels
@@ -1447,12 +1412,40 @@ class TimeGapAxis(pg.AxisItem):
 BREAK_BRUSH = (120, 120, 120, 45)
 
 
-def install_time_axis(plot, gaps):
-    """Give a PlotItem a time axis with `gaps` cut out, and shade the
-    cuts so that they read as breaks rather than as missing data.
+def frame_panels(plots, color=FRAME_COLOR, width=FRAME_WIDTH):
+    """Draw a heavy frame round a stack of panels that belong together - the amplitude and phase panels of one baseline - so that a page of several reads as distinct baselines at a glance.
 
-    Returns the shading items added (none when nothing was cut). The
-    axis is installed either way, so tick labels are always real times.
+    `plots` are the PlotItems of the group, top to bottom. The frame is made of their axis lines: both y axes of every panel, the top axis of the first and the bottom axis of the last; the line between two panels of the group stays thin. Ticks, grid lines and tick labels keep their normal pens.
+    """
+    if not plots:
+        return
+    pen = pg.mkPen(*color, width=width)
+
+    def heavy(axis):
+        thin, text = axis.tickPen(), axis.textPen()
+        axis.setPen(pen)
+        axis.setTickPen(thin)
+        axis.setTextPen(text)
+
+    for plot in plots:
+        plot.showAxis("right")
+        right = plot.getAxis("right")
+        right.setStyle(showValues=False, tickLength=0)
+        right.setWidth(RIGHT_AXIS_WIDTH)
+        heavy(right)
+        heavy(plot.getAxis("left"))
+    plots[0].showAxis("top")
+    top = plots[0].getAxis("top")
+    top.setStyle(showValues=False, tickLength=0)
+    top.setHeight(RIGHT_AXIS_WIDTH)
+    heavy(top)
+    heavy(plots[-1].getAxis("bottom"))
+
+
+def install_time_axis(plot, gaps):
+    """Give a PlotItem a time axis with `gaps` cut out, and shade the cuts so that they read as breaks rather than as missing data.
+
+    Returns the shading items added (none when nothing was cut). The axis is installed either way, so tick labels are always real times.
     """
     old = plot.getAxis("bottom")
     label, grid = old.labelText, old.grid

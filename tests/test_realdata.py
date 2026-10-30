@@ -108,7 +108,7 @@ def test_imaging_loop(path):
     # Natural weighting, so the beam size below is well defined (the
     # default uniform weighting sharpens it to ~8 mas).
     o.uvweight(0, -1)
-    r = o.invert()
+    r = o.invert(quiet=False)
     bmaj, bmin, _ = o.estimated_beam
     assert 10 < bmaj < 30 and 3 < bmin < 12  # EVN L-band beam (mas)
     assert r["nused"] == 14548  # unflagged Stokes-I visibilities
@@ -125,7 +125,7 @@ def test_imaging_loop(path):
     stats = o.imstat()
     assert stats["rms"] < 0.02  # residual rms below 20 mJy/beam
     # Restored peak is a sane fraction of the model flux.
-    cln = o.restore()
+    cln = o.restore(quiet=False)
     assert 1.0 < cln.max() < 5.0
 
 

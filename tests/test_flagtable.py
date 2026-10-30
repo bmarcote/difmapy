@@ -22,10 +22,10 @@ def _times(o):
 
 def test_no_new_flags_no_entries(obs, tmp_path):
     assert obs.flag_commands() == {"rows": [], "nif": NIF, "nsamples": 0}
-    files = obs.save(str(tmp_path / "s"), quiet=True)
+    files = obs.save(str(tmp_path / "s"), quiet=False, verbose=False)
     assert "flags" not in files
     with pytest.raises(ValueError, match="flags=True"):
-        obs.save(str(tmp_path / "s"), quiet=True, flags=True)
+        obs.save(str(tmp_path / "s"), quiet=False, verbose=False, flags=True)
 
 
 def test_flags_compact_into_station_and_baseline_entries(obs):
@@ -82,7 +82,7 @@ def test_fg_table_layout_and_values(obs, tmp_path):
     obs.flag(station="AN1", tmin=t[3], tmax=t[9])
     obs.flag(baseline=("AN2", "AN0"), tmin=t[20], tmax=t[22], if_index=1)
     out = str(tmp_path / "f.FG.TASAV.FITS")
-    info = obs.wflags(out, quiet=True)
+    info = obs.wflags(out, quiet=False, verbose=False)
     assert info["format"] == "aips" and info["nrows"] == 2
     with fits.open(out) as h:
         assert [x.name for x in h] == ["PRIMARY", "AIPS FQ", "AIPS AN",
@@ -107,11 +107,11 @@ def test_save_writes_the_flags_in_the_native_format(obs, tmp_path):
     t = _times(obs)
     obs.flag(station="AN4", tmin=t[1], tmax=t[2])
     prefix = str(tmp_path / "sess")
-    files = obs.save(prefix, quiet=True)
+    files = obs.save(prefix, quiet=False, verbose=False)
     assert files["flags"] == f"{prefix}.FG.TASAV.FITS"
     assert os.path.isfile(files["flags"])
-    assert "flags" not in obs.save(prefix, quiet=True, flags=False)
-    both = obs.wflags(str(tmp_path / "x.flagcmd"), outformat="both", quiet=True)
+    assert "flags" not in obs.save(prefix, quiet=False, verbose=False, flags=False)
+    both = obs.wflags(str(tmp_path / "x.flagcmd"), outformat="both", quiet=False, verbose=False)
     text = open(both["casa"]["path"]).read()
     assert "antenna='AN4'" in text and "mode='manual'" in text
     assert both["aips"]["path"].endswith("x.flagcmd.FG.TASAV.FITS")

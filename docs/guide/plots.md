@@ -8,15 +8,29 @@
 | `uvplot()` | the uv coverage |
 | `vplot(nplot, reftel)` | amplitude and phase against time, per baseline |
 | `fplot()` | amplitude and phase against frequency, per baseline |
+| `possm()` | vector-averaged amplitude and phase against frequency, a 3 x 3 grid of baselines (AIPS POSSM) |
 | `specplot()` | the same, averaged over all baselines |
 | `cpplot()` | closure phases against the model |
 | `tplot()` | time sampling per station |
 | `corplot()` | the self-calibration corrections per station |
+| [`dashboard()`](dashboard.md) | all of the above in one window, kept in step, with controls to load and calibrate |
 
 ![vplot: amplitude and phase against time](../images/vplot.png){ loading=lazy }
 
 `vplot` takes Difmap's argument order: `vplot(3)` shows three baselines
-a page, and `vplot(3, "EF")` only those of EF.
+a page, and `vplot(3, "EF")` only those of EF (station names are not
+case-sensitive). Each baseline's amplitude and phase panels are framed
+together by a heavy border, so the baselines of a page stand apart, and
+the time axis always spans the whole observation, whichever baselines
+happen to have data.
+
+`tplot()` draws one row per station, with a mark at every integration
+where it has unflagged data: blue (matplotlib's "C0") when all of its
+baselines are unflagged, orange ("C1") when some are flagged and others
+are not, as in Difmap. An integration with all of them flagged is left
+blank. A flagged baseline counts against a station only when the
+station at its other end has data at that time, so a station that is
+out altogether does not turn every other row orange.
 
 ![radplot: amplitude and phase against uv radius](../images/radplot.png){ loading=lazy }
 
@@ -25,7 +39,7 @@ a page, and `vplot(3, "EF")` only those of EF.
 | key | action |
 | --- | --- |
 | ++z++ | restore the y axis range (phase panels return to ±180°) |
-| ++u++ | restore the x axis range |
+| ++u++ | restore the x axis range: always the full extent of the data, on every panel of the page |
 | ++r++ | reload the plot from the data |
 | ++h++ | the key legend of the plot in front |
 | ++n++ / ++p++ | next / previous page, in paged plots |
@@ -52,7 +66,15 @@ baseline, every channel of every IF averaged over the whole observation
 decorrelate as the fringe turns; phases come from the vector average,
 which is what makes a slope across the band visible.
 
-Both `fplot` and `specplot` draw on `obs.spectrum()`, which averages
+`possm()` is the AIPS POSSM view of the same averages: a grid of
+baselines - nine to a page, three across (`nplot=`, `ncols=`) - each an
+amplitude panel above a phase panel, both from the *vector* average over
+time. A phase slope or ripple across the band shows in the phases, and
+decorrelates the amplitudes too. ++n++ / ++p++ page through the
+baselines in the same order as `vplot`, and `reftel=` keeps one
+station's.
+
+`fplot`, `possm` and `specplot` all draw on `obs.spectrum()`, which averages
 *all* channels - the unselected ones too, so it can be used to choose
 them - with the accumulated calibration applied. `calibrated=False`
 averages the data as loaded.

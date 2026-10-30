@@ -29,7 +29,7 @@ In a script or notebook:
 import difmapy
 
 obs = difmapy.load("mysource.uvfits")
-print(obs.header())
+obs.header()
 ```
 
 Loading selects total intensity straight away, which is the equivalent to "PI" in Difmap.
@@ -67,13 +67,15 @@ obs.selfcal(amp=True, phase=True, solint="scan")
 obs.clean(400, 0.02)
 ```
 
-Each command prints a short report and returns it as a dict:
+Each command prints a short report and returns nothing, so the prompt
+shows only the report. Ask for the numbers with `quiet=False`, and
+silence the report with `verbose=False`:
 
 ```python
-res = obs.clean(200, 0.03)
+res = obs.clean(200, 0.03, quiet=False)
 res["cleaned_flux"], res["residual_rms"]
 
-sc = obs.selfcal(phase=True)
+sc = obs.selfcal(phase=True, quiet=False, verbose=False)
 sc["fit_before"]["rms"], sc["fit_after"]["rms"]
 ```
 

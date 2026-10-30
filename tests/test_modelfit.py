@@ -103,7 +103,7 @@ def test_chisq_zero_at_truth(template):
     o.addcmp(TRUTH["flux"], TRUTH["x"], TRUTH["y"], type="gauss",
              major=TRUTH["major"], ratio=TRUTH["ratio"], phi=TRUTH["phi"],
              free=["flux", "pos", "shape"])
-    res = o.modelfit(niter=0)
+    res = o.modelfit(niter=0, quiet=False)
     assert res["rchisq"] < 1e-8
     assert res["nfree"] == 6  # flux, x, y, X, Y, Z
     assert res["ndfree"] == 2 * res["nvis"] - 6
@@ -117,7 +117,7 @@ def test_recovers_elliptical_gaussian(template):
     o = make_obs(template, gauss=TRUTH)
     o.addcmp(1.5, 2.0, -1.0, type="gauss", major=3.5, ratio=0.65, phi=30.0,
              free=["flux", "pos", "shape"])
-    res = o.modelfit(niter=50)
+    res = o.modelfit(niter=50, quiet=False)
     assert res["rchisq"] < 1e-8, f"rchisq={res['rchisq']}"
     m = o.model[0]
     assert m["flux"] == pytest.approx(TRUTH["flux"], rel=1e-3)
@@ -151,7 +151,7 @@ def test_partial_parameter_fits(template, free, keys):
     o.addcmp(start["flux"], start["x"], start["y"], type="gauss",
              major=start["major"], ratio=start["ratio"], phi=start["phi"],
              free=free)
-    res = o.modelfit(niter=50)
+    res = o.modelfit(niter=50, quiet=False)
     assert res["rchisq"] < 1e-8
     m = o.model[0]
     for k in keys:
@@ -165,7 +165,7 @@ def test_two_components(template):
     o.addcmp(1.6, 2.2, -1.0, type="gauss", major=3.8, ratio=0.62, phi=33.0,
              free=["flux", "pos", "shape"])
     o.addcmp(0.5, -7.5, 2.7, free=["flux", "pos"])
-    res = o.modelfit(niter=100)
+    res = o.modelfit(niter=100, quiet=False)
     assert res["nfree"] == 9
     assert res["rchisq"] < 1e-6, f"rchisq={res['rchisq']}"
     g, p = o.model[0], o.model[1]
@@ -189,8 +189,8 @@ def test_fit_reduces_residuals_on_real_data():
     o.invert()
     (x, y), peak = o.peak_offset()
     o.addcmp(peak, x, y, free=["flux", "pos"])
-    start = o.modelfit(niter=0)
-    res = o.modelfit(niter=30)
+    start = o.modelfit(niter=0, quiet=False)
+    res = o.modelfit(niter=30, quiet=False)
     assert res["nvis"] > 10000
     assert res["rchisq"] < start["rchisq"]
     # The fitted component stays in the neighbourhood of the peak.
@@ -207,9 +207,9 @@ def test_modelfit_errors(template):
     with pytest.raises(ValueError, match="unknown free parameter"):
         o.modelfit(free=["nonsense"])
     # uvrange restricts the data used.
-    all_vis = o.modelfit(niter=1, free=["flux"], quiet=True)["nvis"]
+    all_vis = o.modelfit(niter=1, free=["flux"], quiet=False, verbose=False)["nvis"]
     cut = o.modelfit(niter=1, free=["flux"], uvmin=2e7, uvmax=1e9,
-                     quiet=True)["nvis"]
+                     quiet=False, verbose=False)["nvis"]
     assert 0 < cut < all_vis
 
 
@@ -219,7 +219,7 @@ def test_modelfit_seeds_itself_from_the_map(template, capsys):
     o = make_obs(template, point=POINT)
     o.mapsize(512, 0.5)
     (x, y), peak = o.peak_offset()
-    res = o.modelfit()
+    res = o.modelfit(quiet=False)
     assert res["ncomp"] == 1
     c = res["components"][0]
     assert c["type"] == "gauss"
@@ -240,7 +240,7 @@ def test_modelfit_default_runs_to_convergence(template):
         o = make_obs(template, gauss=TRUTH)
         o.addcmp(1.0, 0.0, 0.0, type="gauss", major=1.0,
                  free=["flux", "pos", "major"])
-        return o.modelfit(niter=niter, quiet=True)
+        return o.modelfit(niter=niter, quiet=False, verbose=False)
 
     auto = fit(-1)
     assert auto["converged"] is True
@@ -257,7 +257,7 @@ def test_clearmodel_returns_to_the_dirty_map(template):
     o.mapsize(256, 0.5)
     o.invert()
     dirty_peak = o.imstat()["max"]
-    o.clean(100, 0.1, quiet=True)
+    o.clean(100, 0.1, quiet=False, verbose=False)
     assert o.model_flux > 0
     assert o.imstat()["max"] < dirty_peak  # emission was subtracted
 

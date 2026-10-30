@@ -97,7 +97,7 @@ def test_selfcal_interpolates_binned_solutions_onto_integrations(tmp_path):
     o = difmapy.load(path)
     o.select("I")
     o.addcmp(FLUX, X0_MAS, Y0_MAS)
-    o.selfcal(phase=True, amp=True, solint=solint, float_scale=True, quiet=True)
+    o.selfcal(phase=True, amp=True, solint=solint, float_scale=True, quiet=False, verbose=False)
 
     t = np.asarray(o._core.times())
     nt, nif, nant = o._core.ntimes, o.nif, len(o.antennas)
@@ -128,7 +128,7 @@ def test_selfcal_interpolates_binned_solutions_onto_integrations(tmp_path):
     o2 = difmapy.load(path)
     o2.select("I")
     o2.addcmp(FLUX, X0_MAS, Y0_MAS)
-    o2.gscale(float_scale=True, quiet=True)
+    o2.gscale(float_scale=True, quiet=False, verbose=False)
     g = np.asarray(o2._core.gains()[0]).reshape(nt, nif, nant)[:, 0, 0]
     assert len(np.unique(np.round(g, 7))) == 1
 
@@ -141,8 +141,8 @@ def test_selfcal_reports_the_fit_before_and_after(corrupted_uvfits_file, capsys)
     o.select("I")
     o.mapsize(256, 0.25)
     o.invert()
-    o.clean(200, 0.05, quiet=True)
-    res = o.selfcal(phase=True)
+    o.clean(200, 0.05, quiet=False, verbose=False)
+    res = o.selfcal(phase=True, quiet=False)
 
     out = capsys.readouterr().out
     assert "fit before" in out and "fit after" in out and "map after" in out
@@ -150,8 +150,8 @@ def test_selfcal_reports_the_fit_before_and_after(corrupted_uvfits_file, capsys)
     assert res["fit_before"]["ndata"] == 2 * res["fit_before"]["nvis"]
     assert res["map_after"]["rms"] < res["map_before"]["rms"]
 
-    o.clean(100, 0.05, quiet=True)
-    res = o.selfcal(phase=True, quiet=True, mapstats=False)
+    o.clean(100, 0.05, quiet=False, verbose=False)
+    res = o.selfcal(phase=True, quiet=False, verbose=False, mapstats=False)
     assert capsys.readouterr().out == ""
     assert "map_after" not in res and "fit_after" in res
 
@@ -165,7 +165,7 @@ def test_selfcal_converge_alternates_with_modelfit(corrupted_uvfits_file, capsys
     o = difmapy.load(path)
     o.select("I")
     o.addcmp(0.8 * FLUX, X0_MAS + 0.3, Y0_MAS - 0.2, free=["flux", "pos"])
-    res = o.selfcal(amp=True, phase=True, converge=True)
+    res = o.selfcal(amp=True, phase=True, converge=True, quiet=False)
 
     out = capsys.readouterr().out
     assert "iteration 2" in out and "converged after" in out
@@ -186,7 +186,7 @@ def test_selfcal_converge_alternates_with_modelfit(corrupted_uvfits_file, capsys
     o2.addcmp(0.8 * FLUX, X0_MAS + 0.3, Y0_MAS - 0.2, free=["flux", "pos"])
     capped = o2.selfcal(amp=True, phase=True, converge=True,
                         converge_threshold=1e-12, converge_maxiter=2,
-                        quiet=True)
+                        quiet=False, verbose=False)
     assert not capped["converged"] and capped["niter"] == 2
     assert capsys.readouterr().out == ""
     with pytest.raises(ValueError, match="converge_maxiter"):
@@ -327,7 +327,7 @@ def test_modelfit_free_mask_binds_to_right_component(uvfits_file):
     assert masks[n_clean] == 3  # flux | pos
 
     before = [dict(c) for c in o.model]
-    res = o.modelfit(niter=30)
+    res = o.modelfit(niter=30, quiet=False)
     assert res["nfree"] == 3
     after = [dict(c) for c in o.model]
     assert len(after) == len(before)
@@ -354,13 +354,13 @@ def test_modelfit_does_not_count_fixed_components_twice(uvfits_file):
     o.select("I")
     o.mapsize(256, 0.25)
     o.invert()
-    o.clean(100, 0.05, quiet=True)  # CLEAN deltas, all fixed
+    o.clean(100, 0.05, quiet=False, verbose=False)  # CLEAN deltas, all fixed
     cleaned = o.model_flux
     assert 0.5 * FLUX < cleaned < FLUX
 
     o.addcmp(0.5 * FLUX, X0_MAS, Y0_MAS, type="gauss", major=1.0,
              free=["flux", "pos", "major"])
-    o.modelfit(quiet=True)
+    o.modelfit(quiet=False, verbose=False)
 
     # The whole model accounts for the source once, not twice.
     assert o.model_flux == pytest.approx(FLUX, rel=0.02)
@@ -380,7 +380,7 @@ def test_modelfit_refits_established_variable_components(uvfits_file):
     o.addcmp(0.5 * FLUX, X0_MAS + 1.0, Y0_MAS, free=["flux", "pos"])
     assert o.nvariable == 1
 
-    res = o.modelfit(niter=50, quiet=True)
+    res = o.modelfit(niter=50, quiet=False, verbose=False)
     assert res["ncomp"] == 1  # the existing one, not a fresh seed
     assert len(o.model) == 1
     c = o.model[0]
@@ -430,15 +430,15 @@ def test_the_model_needs_no_keep(uvfits_file):
     model_vis = np.abs(np.asarray(o._core.stream_model()))
     assert model_vis.max() == pytest.approx(0.5 * FLUX, rel=1e-5)
 
-    o.modelfit(quiet=True)
+    o.modelfit(quiet=False, verbose=False)
     assert list(o._core.get_models()[1]) == []
     assert o.model[0]["flux"] == pytest.approx(FLUX, rel=1e-3)
     assert o.moddif()["rms"] < 1e-3 * FLUX  # against the fitted model
-    o.selfcal(phase=True, quiet=True)
+    o.selfcal(phase=True, quiet=False, verbose=False)
     assert o.moddif()["rms"] < 1e-3 * FLUX
 
     o.clearmodel()
     o.invert()
-    o.clean(50, 0.1, quiet=True)
+    o.clean(50, 0.1, quiet=False, verbose=False)
     assert list(o._core.get_models()[1]) == [] and len(o.model) > 0
     assert np.abs(np.asarray(o._core.stream_model())).max() > 0

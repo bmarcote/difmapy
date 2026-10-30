@@ -40,6 +40,7 @@ These are the parameters of [`difmapy.load`](loading.md).
 |---|---|
 | `-c`, `--command CODE` | Python to run after loading (repeatable) |
 | `--batch` | run the `--command` code and exit, without a prompt; plots are drawn off-screen |
+| `--dashboard` | open the [dashboard](../guide/dashboard.md) at startup |
 | `--no-gui` | do not enable the Qt event loop |
 | `--version` | print the version and exit |
 
@@ -81,7 +82,8 @@ Geometry
 
 Plots
 :   `mapplot` (`maplot`), `radplot`, `projplot`, `uvplot`, `vplot`,
-    `cpplot`, `tplot`, `corplot`, `specplot`, `fplot`
+    `cpplot`, `tplot`, `corplot`, `specplot`, `fplot`, `possm`,
+    `dashboard` (a file loaded from the dashboard becomes `obs`)
 
 Output
 :   `wobs`, `wmap`, `wdmap`, `wbeam`, `wwins`, `rwins`, `save`

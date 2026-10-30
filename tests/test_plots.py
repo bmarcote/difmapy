@@ -246,7 +246,7 @@ def test_radplot_shows_a_fitted_model(obs):
     out of the plotted model visibilities until it was kept."""
     (x, y), _ = obs.peak_offset()
     obs.addcmp(1.0, x, y, free=["flux", "pos"])
-    obs.modelfit(niter=10, quiet=True)
+    obs.modelfit(niter=10, quiet=False, verbose=False)
 
     p = RadPlot(obs)
     assert p.has_model()
@@ -275,7 +275,7 @@ def test_radplot_shows_the_model(obs):
     assert not p.has_model()
     p.close()
     obs.invert()
-    obs.clean(50, 0.1, quiet=True)
+    obs.clean(50, 0.1, quiet=False, verbose=False)
     q = RadPlot(obs)
     assert q.has_model()
     assert np.isfinite(q._data["model_amp"]).any()
@@ -338,7 +338,7 @@ def test_vplot_pages_and_flag_modes(obs):
 
 
 def test_mapplot_windows_and_clean(obs):
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     assert p.img.image is not None
     # Add a window programmatically like a double-click would.
     p._add_roi(2.0, 6.0, -4.5, -0.5)
@@ -346,7 +346,7 @@ def test_mapplot_windows_and_clean(obs):
     assert len(obs.windows) == 1
     assert obs.windows[0] == (2.0, 6.0, -4.5, -0.5)
     # Clean uses the window; the peak lies inside it.
-    res = obs.clean(300, 0.1, quiet=True)
+    res = obs.clean(300, 0.1, quiet=False, verbose=False)
     assert res["cleaned_flux"] > 0
     p.refresh()
     assert len(p._rois) == 1
@@ -361,7 +361,7 @@ def test_mapplot_weighting_box(obs):
     """The box at the top re-images with robust -2 ... 2, and goes back
     to difmap's own weighting."""
     obs.uvweight(0, -1)          # natural, difmap style
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     box = p.weighting
     assert box.focusPolicy() == QtCore.Qt.FocusPolicy.NoFocus
     assert [box.itemData(i) for i in range(box.count())] == \
@@ -413,8 +413,8 @@ def test_contour_levels_and_tracing():
 def test_mapplot_contours_on_the_clean_map(obs):
     from pyqtgraph.Qt import QtGui
 
-    obs.clean(200, 0.1, quiet=True)
-    p = MapPlot(obs, what="clean", quiet=True)
+    obs.clean(200, 0.1, quiet=False, verbose=False)
+    p = MapPlot(obs, what="clean", verbose=False)
     pos, neg, rms = p.contour_levels
     assert rms == pytest.approx(obs.noise_stats()["rms"])
     assert pos[0] == pytest.approx(3.0 * rms) and len(pos) > 3
@@ -451,15 +451,25 @@ def test_mapplot_contours_on_the_clean_map(obs):
 
 
 def test_vplot_panels_have_identical_axes(obs):
-    """Amplitude and phase panels: the same axes, no extra one on the
-    right, and plot areas that start and end at the same x."""
+    """Amplitude and phase panels: the same axes - a label-less right
+    axis on every one, which carries the baseline's frame - and plot
+    areas that start and end at the same x."""
+    from difmapy.plots.base import FRAME_WIDTH
+
     v = VPlot(obs, nplot=2)
     v.resize(900, 700)
     v.render(900, 700)
     assert {p.key for p in v._panels} == {"amp", "phase"}
     for panel in v._panels:
-        assert not panel.plot.getAxis("right").isVisible()
-        assert not panel.plot.getAxis("top").isVisible()
+        assert panel.plot.getAxis("right").isVisible()
+        # The frame: both y axes heavy, the top only over the amplitude
+        # panel and the bottom only under the phase panel.
+        for side in ("left", "right"):
+            assert panel.plot.getAxis(side).pen().widthF() == FRAME_WIDTH
+        top = panel.plot.getAxis("top")
+        assert top.isVisible() == (panel.key == "amp")
+        bottom = panel.plot.getAxis("bottom").pen().widthF()
+        assert (bottom == FRAME_WIDTH) == (panel.key == "phase")
     left = {round(p.plot.vb.sceneBoundingRect().left(), 1) for p in v._panels}
     right = {round(p.plot.vb.sceneBoundingRect().right(), 1) for p in v._panels}
     assert len(left) == 1 and len(right) == 1
@@ -473,8 +483,8 @@ def test_mapplot_difmap_colour_maps(obs):
 
     from difmapy.plots.mapplot import COLOR_MAPS
 
-    obs.clean(100, 0.1, quiet=True)
-    p = MapPlot(obs, what="clean", quiet=True)
+    obs.clean(100, 0.1, quiet=False, verbose=False)
+    p = MapPlot(obs, what="clean", verbose=False)
     assert p.cmap == "color"
     valid = obs.valid(np.asarray(obs.restored_map))
     lo, hi = p._cbar.levels()
@@ -503,17 +513,17 @@ def test_mapplot_difmap_colour_maps(obs):
     key("g")
     assert p.cmap == "grey" and p.scale == "log"
     p.close()
-    q = MapPlot(obs, quiet=True, cmap="B&W")
+    q = MapPlot(obs, verbose=False, cmap="B&W")
     assert q.cmap == "grey"
     q.close()
     with pytest.raises(ValueError, match="colour map"):
-        MapPlot(obs, quiet=True, cmap="jet")
+        MapPlot(obs, verbose=False, cmap="jet")
 
 
 def test_mapplot_number_keys_select_the_display(obs):
     from pyqtgraph.Qt import QtCore, QtGui
 
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     for key, what in (("2", "beam"), ("3", "clean"), ("4", "model"), ("1", "map")):
         p.keyPressEvent(
             QtGui.QKeyEvent(QtCore.QEvent.Type.KeyPress, 0,
@@ -526,7 +536,7 @@ def test_mapplot_number_keys_select_the_display(obs):
 def test_mapplot_histogram_tracks_the_colorbar(obs):
     """The panel beside the colour bar holds the pixel histogram and
     the Gaussian fitted to the noise, over the displayed range."""
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     assert len(p._hist_items) == 2  # histogram + noise Gaussian
     lo, hi = (float(v) for v in p._cbar.levels())
     assert p.hist.vb.viewRange()[1] == pytest.approx([lo, hi], rel=1e-6)
@@ -540,7 +550,7 @@ def test_mapplot_gaussian_placement(obs):
     """m, then clicks for the centre and two points on the component,
     adds a Gaussian; d short-circuits to a point source or a circular
     Gaussian."""
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     p.start_gaussian()
     assert p._gauss_stage == "center"
     p._gauss_click(1.0, 2.0)
@@ -571,7 +581,7 @@ def test_mapplot_gaussian_clicks_are_two_points_on_the_ellipse(obs):
     component: either may be the longer, and they need not be 90 degrees
     apart. Clicking the short axis first used to clip the axial ratio to
     1 and silently produce a circular Gaussian."""
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
 
     def place(c, p1, p2):
         p.start_gaussian()
@@ -609,7 +619,7 @@ def test_mapplot_gaussian_clicks_are_two_points_on_the_ellipse(obs):
 
 
 def test_mapplot_modelfit_and_report(obs):
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     p.start_gaussian()
     p._gauss_click(*obs.peak_offset()[0])
     p._add_gaussian(type="delta")
@@ -639,7 +649,7 @@ def _press(plot, text):
 def test_mapplot_m_waits_for_the_clicks_and_f_fits(obs):
     """m starts the interactive placement rather than dropping a
     component; f fits what has been placed, and refuses to invent one."""
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     _press(p, "f")
     assert obs.model == []  # nothing placed: no model is seeded
 
@@ -664,7 +674,7 @@ def test_mapplot_placed_component_is_drawn_not_imaged(obs):
     """A component that has only been placed carries a guessed flux, so
     it must not be subtracted from the map - not even by a re-invert -
     until modelfit has fitted it."""
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     before = np.array(p.img.image, copy=True)
     (x, y), peak = obs.peak_offset()
 
@@ -690,7 +700,7 @@ def test_mapplot_placed_component_is_drawn_not_imaged(obs):
 def test_mapplot_close_adds_placed_components_to_the_model(obs):
     """A placed component that was never fitted is not thrown away when
     the window closes: it joins the model, ready for obs.modelfit()."""
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     (x, y), peak = obs.peak_offset()
     p.start_gaussian()
     p._gauss_click(x, y)
@@ -703,7 +713,7 @@ def test_mapplot_close_adds_placed_components_to_the_model(obs):
 
 
 def test_mapplot_failed_fit_leaves_the_model_and_placement_alone(obs, monkeypatch):
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     (x, y), _ = obs.peak_offset()
     p.start_gaussian()
     p._gauss_click(x, y)
@@ -721,7 +731,7 @@ def test_mapplot_failed_fit_leaves_the_model_and_placement_alone(obs, monkeypatc
 def test_mapplot_names_the_image_and_shows_the_shortcuts(obs):
     """A heading over the image says which image it is, and a footnote
     under it lists the main keys."""
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     assert "Residual map" in p.plot.titleLabel.text
     assert "peak" in p.plot.titleLabel.text
     for what, name in (("beam", "Dirty beam"), ("clean", "Restored CLEAN map"),
@@ -740,7 +750,7 @@ def test_mapplot_colorbar_handles_track_the_data_range(obs):
     map in Jy/beam snapped every level to (0, 1) on the first drag and
     then refused to move."""
     obs.invert()
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     cb = p._cbar
     lo0, hi0 = (float(v) for v in cb.levels())
     assert cb.rounding == pytest.approx((hi0 - lo0) / 1000.0)
@@ -765,7 +775,7 @@ def test_mapplot_log_colour_scale(obs):
     from difmapy.plots.mapplot import log_stretch
 
     obs.invert()
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     assert p.scale == "linear"
     levels = p._cbar.levels()
 
@@ -786,7 +796,7 @@ def test_mapplot_log_colour_scale(obs):
 
 
 def test_mapplot_opens_on_a_log_scale_when_asked(obs):
-    p = MapPlot(obs, quiet=True, scale="log")
+    p = MapPlot(obs, verbose=False, scale="log")
     assert p.scale == "log"
     assert "log colours" in p.plot.titleLabel.text
     p.close()
@@ -815,7 +825,7 @@ def test_vplot_panels_share_one_x_axis(obs):
 
 def test_mapplot_overrides_the_imaging_setup(uvfits_file):
     o = difmapy.load(uvfits_file)
-    p = MapPlot(o, mapsize=128, cellsize=0.4, uvweight=-1.0, quiet=True)
+    p = MapPlot(o, mapsize=128, cellsize=0.4, uvweight=-1.0, verbose=False)
     assert (o._nx, o._ny) == (128, 128)
     assert o._xinc / difmapy.MAS == pytest.approx(0.4)
     assert o.robust == -1.0
@@ -827,7 +837,7 @@ def test_mapplot_auto_sizes_when_mapsize_was_never_set(uvfits_file):
     the estimated resolution."""
     o = difmapy.load(uvfits_file)
     assert not o._mapsize_set
-    p = MapPlot(o, quiet=True)
+    p = MapPlot(o, verbose=False)
     assert o._nx == difmapy.observation.DEFAULT_NPIX
     assert o._xinc / difmapy.MAS == pytest.approx(o.estimated_resolution() / 10.0)
     p.close()
@@ -838,7 +848,7 @@ def test_plots_open_large_but_within_the_screen(obs):
     the screen can show (offscreen, that is the virtual screen)."""
     from difmapy.plots.base import fit_to_screen
 
-    for cls, kw in ((MapPlot, dict(quiet=True)), (VPlot, dict(nplot=2))):
+    for cls, kw in ((MapPlot, dict(verbose=False)), (VPlot, dict(nplot=2))):
         p = cls(obs, **kw)
         assert (p.width(), p.height()) == fit_to_screen(*cls.DEFAULT_SIZE)
         p.close()
@@ -869,7 +879,30 @@ def test_z_and_u_restore_the_axis_ranges(obs):
     assert list(phase.vb.viewRange()[1]) == pytest.approx([-180, 180], abs=1e-6)
 
     _press(v, "u")                                   # then x
-    assert amp.vb.autoRangeEnabled()[0]
+    # The whole observation, as in difmap's vplot.
+    x = v.gaps.compress(np.asarray(obs._core.times()) / 3600.0)
+    lo, hi = amp.vb.viewRange()[0]
+    assert lo < x.min() and hi > x.max()
+    v.close()
+
+
+def test_u_shows_data_hidden_behind_an_empty_first_panel(obs):
+    """A page whose first baseline is all flagged used to open (and stay,
+    after u) at pyqtgraph's empty 0..1 view, because the panels share
+    the first panel's x axis and it auto-ranged on its own data only."""
+    obs.flag(baseline=("AN0", "AN1"))
+    v = VPlot(obs, nplot=3)
+    first = v._panels[0]
+    assert first.label == "AN0-AN1"
+    assert not (v._panel_mask(first, v._data) & (v._data["wt"] > 0)).any()
+    for key in ("", "u"):
+        if key:
+            first.vb.setRange(xRange=(0.0, 1.0), padding=0)
+            _press(v, key)
+        d = v._data
+        lo, hi = first.vb.viewRange()[0]
+        shown = d["x"][d["wt"] > 0]
+        assert lo <= shown.min() and hi >= shown.max()
     v.close()
 
 
@@ -884,7 +917,7 @@ def test_r_reloads_the_plot_from_the_data(obs):
     assert int((v._data["wt"] > 0).sum()) < good
     v.close()
 
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     before = np.array(p.img.image, copy=True)
     obs.unflag(station="AN0")
     obs.invert()
@@ -938,7 +971,7 @@ def test_windows_are_destroyed_before_the_interpreter_exits(obs):
     therefore kept alive deliberately and destroyed on the way out."""
     from difmapy.plots import base
 
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     v = VPlot(obs, nplot=1)
     # Tracked, so that nothing relies on the user keeping a reference,
     # and the exit handler is in place.
@@ -956,7 +989,7 @@ def test_windows_are_destroyed_before_the_interpreter_exits(obs):
     assert not base._alive(p) and not base._alive(v)
 
     # And a new window afterwards works, with the dead ones forgotten.
-    q = MapPlot(obs, quiet=True)
+    q = MapPlot(obs, verbose=False)
     assert base.open_windows() == [q]
     base.close_all_windows()
 
@@ -982,7 +1015,7 @@ def test_a_session_that_opened_a_plot_exits_cleanly(uvfits_file, run):
 
 
 def test_help_overlay_lists_the_keys(obs):
-    p = MapPlot(obs, quiet=True)
+    p = MapPlot(obs, verbose=False)
     assert p._help is None
     assert p.toggle_help() is True
     assert p._help is not None
@@ -1069,7 +1102,7 @@ def test_diagnostic_time_plots_share_the_cut_axis(scanned_obs):
     from difmapy.plots.diagnostics import CorPlot, CpPlot, TPlot
 
     scanned_obs.addcmp(2.5, 0.0, 0.0)
-    scanned_obs.selfcal(phase=True, quiet=True)
+    scanned_obs.selfcal(phase=True, quiet=False, verbose=False)
     t = TPlot(scanned_obs)
     c = CorPlot(scanned_obs, nplot=1)
     k = CpPlot(scanned_obs, nplot=1)

@@ -27,7 +27,7 @@ data before and after the solution - and the residual-map statistics
 too, when a map already exists:
 
 ```python
-sc = obs.selfcal(phase=True)
+sc = obs.selfcal(phase=True, quiet=False)
 sc["fit_before"]["rms"], sc["fit_after"]["rms"], sc["fit_after"]["sigma"]
 sc["map_before"]["max"], sc["map_after"]["rms"]
 ```
@@ -40,7 +40,8 @@ invalidates the map and the next `clean` would re-invert anyway;
 ### Iterating with modelfit until the fit settles
 
 ```python
-sc = obs.selfcal(amp=True, phase=True, solint="scan", converge=True)
+sc = obs.selfcal(amp=True, phase=True, solint="scan", converge=True,
+                 quiet=False)
 sc["converged"], sc["niter"], sc["fit_change"]
 ```
 
@@ -129,7 +130,7 @@ reach, those integrations get no solution and are left out of the plot.
 ## Amplitude scale per station
 
 ```python
-g = obs.gscale()
+g = obs.gscale(quiet=False)
 g["gains"]["EF"], g["gains_per_if"]["EF"]
 obs.station_gains()             # everything accumulated so far
 ```

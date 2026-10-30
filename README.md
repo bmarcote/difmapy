@@ -115,7 +115,7 @@ obs = difmapy.load("mysource.uvfits")  # or a .ms directory; difmapy.observe
 obs = difmapy.load("big.uvfits", timeavg="10s") # time-average on load (also difmapy.uvaver)
 obs = difmapy.load("big.ms", freqavg=4)        # average 4 channels at a time (also chanaver)
 obs = difmapy.load("big.ms", channels=[(2, 29)], freqavg="all")  # drop edges, then average
-print(obs.header())                    # is the same function
+obs.header()                           # prints the summary
 print(obs.pols)                        # ['RR', 'LL', 'RL', 'LR']
 
 # Loading already selects total intensity; select() changes it at will:
@@ -142,11 +142,13 @@ obs.projplot(30)                       # vs uv distance projected at PA 30; < / 
 obs.vplot(3)                           # amp+phase vs time, 3 baselines/page
 obs.vplot(3, "EF")                     # only EF's baselines (difmap's order)
 obs.fplot()                            # amp+phase vs frequency, time-averaged
+obs.possm()                            # AIPS POSSM: vector averages vs frequency, 3x3 baselines
+obs.tplot()                            # time sampling; orange = partly flagged
 obs.cpplot()                           # closure phases vs the model
 obs.corplot()                          # self-cal gains: amp+phase per antenna
 
 info = obs.mapinfo()                   # beam, peak, model, residual noise
-m = obs.restore()                      # restored map (numpy array)
+obs.restore()                          # restored map, in obs.restored_map
 obs.wmap("clean.fits")                 # FITS output with WCS + beam
 obs.save("mysession")                  # .uvf .mod .win .par.json, plus the
                                        # .ms, caltable and image (see below)
@@ -156,23 +158,38 @@ obs.save("mysession")                  # .uvf .mod .win .par.json, plus the
 obs.clearmodel()                       # drop every component and start over
 ```
 
-`clean`, `modelfit`, `selfcal` and `gscale` print a short report and
-return it as a dict (and will write it to a file, see `outfile=` below),
-so a scripted run can keep the numbers:
+Commands follow one convention, so the prompt shows the reports and
+nothing else:
+
+- `quiet=True`, the default, returns None: nothing is echoed as
+  `Out[n]: {...}` under the report a command prints. `quiet=False` hands
+  the result back - a dict, a count, the observation itself (so
+  `obs.select("I", quiet=False).mapsize(...)` still chains).
+- `verbose=True`, the default on every command that prints a report
+  (`invert`, `clean`, `restore`, `modelfit`, `selfcal`, `gscale`,
+  `bayes_gscale`, `selfant`, `startmod`, `header`, `savecaltable`,
+  `wflags`, `save`), prints it; `verbose=False` prints nothing.
+
+Queries whose whole point is their value (`imstat`, `mapinfo`,
+`noise_stats`, `moddif`, `scans`, `station_gains`, `spectrum`,
+`closure_phases`, ...) always return it, and plot commands always return
+their window. A scripted run that keeps the numbers asks for them:
 
 ```python
-res = obs.clean(200, 0.03)
+res = obs.clean(200, 0.03, quiet=False)
 res["ncomp"], res["cleaned_flux"], res["total_flux"], res["residual_rms"]
 
-fit = obs.modelfit()          # niter=-1: iterate until it converges
+fit = obs.modelfit(quiet=False)   # niter=-1: iterate until it converges
 fit["rchisq"], fit["converged"], fit["components"], fit["errors"]
 
-g = obs.gscale()              # {"gains": {"EF": 1.03, ...}, ...}
+g = obs.gscale(quiet=False)       # {"gains": {"EF": 1.03, ...}, ...}
 g["gains"]["EF"], g["gains_per_if"]["EF"]
 
-sc = obs.selfcal(phase=True)  # difmap's "fit before/after self-cal"
+sc = obs.selfcal(phase=True, quiet=False)   # difmap's "fit before/after"
 sc["fit_before"]["rms"], sc["fit_after"]["rms"], sc["fit_after"]["sigma"]
 sc["map_before"]["max"], sc["map_after"]["rms"]   # when a map exists
+
+res = obs.clean(200, 0.03, quiet=False, verbose=False)   # silent
 ```
 
 `gscale` reports the same before/after numbers. Note that with its
@@ -182,7 +199,7 @@ onto the model, so the corrections can be large while the map peak
 barely moves - the fit statistics are what show that they were applied.
 
 Every one of them also takes `outfile=`, which writes the same result
-to a JSON file:
+to a JSON file (whatever `quiet` says):
 
 ```python
 obs.clean(200, 0.03, outfile="clean.json")
@@ -201,7 +218,7 @@ difmap does (`obs.moddif()` on its own returns the same numbers), and
 adds the residual-map statistics whenever a map is already there -
 which costs nothing in an imaging loop, because self-cal invalidates the
 map and the next `clean` would have to re-invert anyway. Pass
-`mapstats=False` to skip them or `quiet=True` to print nothing.
+`mapstats=False` to skip them or `verbose=False` to print nothing.
 
 `selfcal(converge=True)` alternates self-calibration and `modelfit()`
 (same selfcal parameters every time) until the model-data fit stops
@@ -213,7 +230,8 @@ parameters. The result adds `converged`, `niter`, `fit_change`, the last
 much each selfcal moved the gains:
 
 ```python
-sc = obs.selfcal(amp=True, phase=True, solint="scan", converge=True)
+sc = obs.selfcal(amp=True, phase=True, solint="scan", converge=True,
+                 quiet=False)
 sc["converged"], sc["niter"], sc["fit_change"]
 ```
 
@@ -266,8 +284,8 @@ samples difmapy has.
 
 ### What `save()` writes
 
-`obs.save("prefix")` keeps the whole session, and returns (and prints)
-the list of files:
+`obs.save("prefix")` keeps the whole session, and prints the list of
+files (and returns it, with `quiet=False`):
 
 | file | when | what |
 |---|---|---|
@@ -289,7 +307,11 @@ edit, and `x` shows or hides the flagged points (hidden by default).
 Plain drag/wheel keep pyqtgraph's pan/zoom, and `h` shows the full key
 legend of whichever plot is in front. In `vplot` the space bar switches
 flagging between the displayed baseline and every baseline of its first
-antenna.
+antenna; each baseline's amplitude and phase panels are framed together
+by a heavy border, and the time axis (and `u`) always spans the whole
+observation. `tplot` marks an integration blue when all of a station's
+baselines are unflagged and orange when some are flagged, as difmap
+does.
 
 Plots against time (`vplot`, `tplot`, `corplot`, `cpplot`) cut out any
 gap between integrations longer than 10% of the observation, so scans
@@ -535,7 +557,7 @@ amplitude scale is wrong has already pulled the model towards its error.
 `bayes_gscale` breaks that circle and puts error bars on the result:
 
 ```python
-r = obs.bayes_gscale(prefix="3C345_bayes")  # runs, applies, writes report
+r = obs.bayes_gscale(prefix="3C345_bayes", quiet=False)  # runs, applies, writes report
 print(r)                                    # the summary again
 r.plot()                                    # the diagnostic figure
 r.factors                                   # [IF, station] corrections applied
@@ -558,8 +580,10 @@ them into one correction per station.
    systematic uncertainty too: it may mean the full-array model had
    absorbed the station's error, or just that the station's baselines
    reach spatial frequencies nobody else constrains.
-2. **Compare source models** (`models=`, default CLEAN and one to three
-   Gaussians; also `pointN`, `cleanN` and `current`) by the Bayesian
+2. **Compare source models** (`models=`, default one to three
+   Gaussians; also `clean`, `pointN`, `cleanN` and `current` - CLEAN is
+   not in the default because the comparison often favoured it where it
+   should not have) by the Bayesian
    information criterion on the full array, with the chi-squared
    rescaled by the best model's reduced chi-squared (VLBI weights are
    rarely absolute). The corrections are averaged over models by their
@@ -622,7 +646,7 @@ session round-trips exactly.
 ```python
 obs.addcmp(1.5, 2.0, -1.0, type="gauss", major=3.0, ratio=0.7, phi=30,
            free=["flux", "pos", "shape"])
-res = obs.modelfit()            # niter=-1: run until it converges
+res = obs.modelfit(quiet=False)  # niter=-1: run until it converges
 print(res["rchisq"], res["converged"], obs.model, res["errors"])
 ```
 
@@ -672,7 +696,17 @@ pixels of a tenth of the estimated resolution (lambda / B_max), and it
 prints the beam it is showing. The "Weighting" box above the image
 switches between difmap's `uvweight` scheme and Briggs robust -2 ... +2
 and re-images straight away (the choice stays set, as `uvweight()`
-would leave it).
+would leave it). Beside it, the UV range (min, max) and Taper (value,
+radius) fields set `uvrange` and `uvtaper` on Enter;
+`mapplot(uvrange=(5, 100), uvtaper=(0.5, 20))` sets them on opening.
+
+`uvtaper(value, radius)` multiplies every visibility's gridding weight
+by `value ** ((r / radius) ** 2)` - 1 at the centre of the UV plane,
+`value` at `radius` - and `uvrange(uvmin, uvmax)` images only the
+visibilities between the two radii (`uvmax` 0: no limit). Both take
+**M-lambda** as bare numbers, or a number with a unit (`"500k"`,
+`"20M"`, `"2e7 lambda"`); bare numbers used to be wavelengths, so a
+taper radius beyond 100 G-lambda is refused with a hint.
 
 The image is shown as difmap shows it: in its pseudo-colour table
 (`rainbow`: dark blue through cyan, green and yellow to red) or, with
@@ -729,10 +763,37 @@ turns; phases come from the vector average, which is what makes a slope
 across the band visible. `specplot()` shows the same average over all
 baselines at once.
 
-Both draw on `obs.spectrum()`, which averages *all* channels - the
+`obs.possm()` is the AIPS POSSM view: a grid of baselines, nine to a
+page and three across (`nplot=`, `ncols=`), each an amplitude panel
+above a phase panel, both from the *vector* average over time, so a
+phase slope or ripple across the band shows and decorrelates the
+amplitudes too. `n`/`p` page in the same order as `vplot`, `reftel=`
+keeps one station's, and each baseline is framed as in `vplot`.
+
+All of them draw on `obs.spectrum()`, which averages *all* channels - the
 unselected ones too, so it can be used to choose them - with the
 accumulated calibration applied; `calibrated=False` averages the data
 as it was loaded.
+
+### The dashboard
+
+`obs.dashboard()` (`dashboard()` at the prompt, `difmapy --dashboard
+file.ms` from the shell, `difmapy.dashboard()` with no data yet) puts
+every view of the session in one window: `vplot`/`tplot`/`possm` in tabs
+top left, `radplot`/`projplot`/`corplot` top right, `mapplot` bottom
+left, and two tabs of controls bottom right. The plots are the usual
+interactive ones, embedded; whatever changes the data or the model in
+one - a flag edit, a CLEAN, a fit - reloads the others, as `r` would
+(plots in hidden tabs when they are next shown).
+
+**Main** loads a file (with optional `timeavg`/`freqavg`) and runs
+**Selfcal** (phase and/or amplitude, at a solution interval),
+**Gscale** (float scale on by default) and **Bayes** (`bayes_gscale`
+over the source models ticked; the Gaussians by default). **Output**
+shows everything the session prints, with buttons to save the restored
+and dirty maps, the dirty beam, the model, the visibilities, the
+calibration and flag tables, and the whole session. A file loaded from
+the dashboard becomes the prompt's `obs`.
 
 ### The colour bar
 

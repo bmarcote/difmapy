@@ -14,7 +14,7 @@ obs = difmapy.load("multi.ms", field="3C345", data_column="CORRECTED_DATA")
 ```
 
 ```python
-print(obs.header())      # source, antennas, IFs, selection
+obs.header()             # source, antennas, IFs, selection
 obs.pols                 # ['RR', 'LL', 'RL', 'LR']
 obs.antennas, obs.nif, obs.nchan
 ```

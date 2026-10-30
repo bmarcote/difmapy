@@ -1,66 +1,15 @@
 """Bayesian amplitude calibration of the stations (`bayes_gscale`).
 
-`gscale` solves one amplitude correction per station and IF for the
-whole observation, against *a* model - and that model was built from the
-very data being calibrated, so a station with a wrong amplitude scale
-has already pulled the model towards its own error. `bayes_gscale`
-removes that circularity and puts error bars on the answer:
+`gscale` solves one amplitude correction per station and IF for the whole observation, against *a* model - and that model was built from the very data being calibrated, so a station with a wrong amplitude scale has already pulled the model towards its own error. `bayes_gscale` removes that circularity and puts error bars on the answer:
 
-1. **Leave one station out.** For every station `a` (and once with the
-   full array) the source model is rebuilt with `a` ignored, phase
-   self-calibrating as it goes. `a` is then brought back, phase
-   self-calibrated against that fixed model, and the whole array
-   `gscale`d. The correction this gives `a` comes from a model it had no
-   say in. The runs that leave out the *other* stations give a
-   jackknife spread for it; and where leaving `a` out moves its own
-   estimate, that shift is counted as systematic uncertainty too,
-   since it can mean either that the full-array model had absorbed the
-   station's error or that the station's baselines reach spatial
-   frequencies no other station constrains.
-2. **Compare source models.** The same is done for several model
-   families - CLEAN, and one to a few Gaussians or point sources fitted
-   with `modelfit` - and the full-array runs are weighed against each
-   other by the Bayesian information criterion,
-   ``BIC = chisq / s^2 + k ln(n)``, with `k` the model's parameter count
-   and `s^2` the reduced chi-squared of the best of them (the data
-   weights of VLBI are rarely on an absolute scale, and this is the
-   usual way of not trusting them for it). ``exp(-BIC/2)``, normalised,
-   is each model's posterior probability, and the corrections are
-   averaged over models with those weights.
-3. **Correct only what is off.** Each station and IF is either *as
-   calibrated* - its true log-amplitude error drawn from a Gaussian of
-   width `prior_sigma`, the a-priori calibration accuracy (~10% for the
-   EVN) - or *off* - drawn from a much wider one, `outlier_sigma`
-   (a factor of a few: a wrong SEFD, a dead receptor averaged in, a
-   pointing problem). The Bayes factor between the two gives the
-   probability that it is off. An error within the a-priori accuracy is
-   left alone, since the data cannot tell it from the calibration's own
-   scatter and correcting it would only move the good stations; one
-   clearly beyond it gets its estimate almost in full, since the wide
-   prior hardly shrinks it. The correction applied is the posterior
-   average over both: zero if as calibrated, the posterior mean if off.
-4. **Keep the flux scale with the median station.** `gscale` keeps the
-   data's flux scale by setting the mean gain amplitude of every IF to
-   one (difmap's ``norm_cors``), so one station far off its a-priori
-   calibration drags every other station of its IFs with it - and
-   leaving it out of the model cannot show it, since it is still in the
-   normalisation. Each run therefore solves with a floating scale and
-   then sets the correction of the median station of every IF to one
-   (``norm="mean"`` restores difmap's behaviour); the findings name a
-   station that would have dragged the mean.
+1. **Leave one station out.** For every station `a` (and once with the full array) the source model is rebuilt with `a` ignored, phase self-calibrating as it goes. `a` is then brought back, phase self-calibrated against that fixed model, and the whole array `gscale`d. The correction this gives `a` comes from a model it had no say in. The runs that leave out the *other* stations give a jackknife spread for it; and where leaving `a` out moves its own estimate, that shift is counted as systematic uncertainty too, since it can mean either that the full-array model had absorbed the station's error or that the station's baselines reach spatial frequencies no other station constrains.
+2. **Compare source models.** The same is done for several model families - one to a few Gaussians or point sources fitted with `modelfit` (the default: one to three Gaussians), or CLEAN - and the full-array runs are weighed against each other by the Bayesian information criterion, ``BIC = chisq / s^2 + k ln(n)``, with `k` the model's parameter count and `s^2` the reduced chi-squared of the best of them (the data weights of VLBI are rarely on an absolute scale, and this is the usual way of not trusting them for it). ``exp(-BIC/2)``, normalised, is each model's posterior probability, and the corrections are averaged over models with those weights.
+3. **Correct only what is off.** Each station and IF is either *as calibrated* - its true log-amplitude error drawn from a Gaussian of width `prior_sigma`, the a-priori calibration accuracy (~10% for the EVN) - or *off* - drawn from a much wider one, `outlier_sigma` (a factor of a few: a wrong SEFD, a dead receptor averaged in, a pointing problem). The Bayes factor between the two gives the probability that it is off. An error within the a-priori accuracy is left alone, since the data cannot tell it from the calibration's own scatter and correcting it would only move the good stations; one clearly beyond it gets its estimate almost in full, since the wide prior hardly shrinks it. The correction applied is the posterior average over both: zero if as calibrated, the posterior mean if off.
+4. **Keep the flux scale with the median station.** `gscale` keeps the data's flux scale by setting the mean gain amplitude of every IF to one (difmap's ``norm_cors``), so one station far off its a-priori calibration drags every other station of its IFs with it - and leaving it out of the model cannot show it, since it is still in the normalisation. Each run therefore solves with a floating scale and then sets the correction of the median station of every IF to one (``norm="mean"`` restores difmap's behaviour); the findings name a station that would have dragged the mean.
 
-The likelihoods are Gaussian throughout (in log amplitude for the
-gains), which is what makes each step closed-form and the whole thing
-cheap enough to run on every station: every run is independent, works
-on its own copy of the observation, and the heavy lifting (imaging,
-CLEAN, model fitting, self-calibration) releases the GIL, so the runs go
-in parallel threads.
+The likelihoods are Gaussian throughout (in log amplitude for the gains), which is what makes each step closed-form and the whole thing cheap enough to run on every station: every run is independent, works on its own copy of the observation, and the heavy lifting (imaging, CLEAN, model fitting, self-calibration) releases the GIL, so the runs go in parallel threads.
 
-The result (`BayesGainResult`) prints a summary, plots its diagnostics,
-and writes a JSON report and a calibration table of the constant
-corrections applied - which, having been derived on a well-modelled
-calibrator, is what can be carried over to other sources of the same
-observation.
+The result (`BayesGainResult`) prints a summary, plots its diagnostics, and writes a JSON report and a calibration table of the constant corrections applied - which, having been derived on a well-modelled calibrator, is what can be carried over to other sources of the same observation.
 """
 
 from __future__ import annotations
@@ -79,8 +28,11 @@ from difmapy.report import write_json
 
 __all__ = ["bayes_gscale", "BayesGainResult", "DEFAULT_MODELS"]
 
-#: The source-model families compared by default.
-DEFAULT_MODELS = ("clean", "gauss1", "gauss2", "gauss3")
+#: The source-model families compared by default. CLEAN is left out:
+#: with its many degrees of freedom it was often favoured by the model
+#: comparison where it should not have been (why is still to be
+#: understood), so it has to be asked for (``models=("clean", ...)``).
+DEFAULT_MODELS = ("gauss1", "gauss2", "gauss3")
 DEFAULT_CLEAN_NITER = 200
 
 # Free parameters that each difmap free-parameter bit stands for
@@ -132,8 +84,7 @@ class ModelSpec:
         )
 
     def nparam(self, obs) -> int:
-        """Parameters the model spent on fitting the data: the free ones
-        of fitted components, and three (flux, x, y) per CLEAN position."""
+        """Parameters the model spent on fitting the data: the free ones of fitted components, and three (flux, x, y) per CLEAN position."""
         model = obs.model
         if self.kind == "clean" or (self.kind == "current" and
                                     not any(c["freepar"] for c in model)):
@@ -150,7 +101,7 @@ def _build_model(o, spec, nloop, solint, clean_gain):
     free_p = ("flux", "pos")
     for r in range(nloop):
         if spec.kind == "clean":
-            o.clean(spec.n, clean_gain, quiet=True)
+            o.clean(spec.n, clean_gain, verbose=False)
         elif spec.kind in ("gauss", "point"):
             if r == 0:
                 for _ in range(spec.n):
@@ -158,20 +109,18 @@ def _build_model(o, spec, nloop, solint, clean_gain):
                         o.seed_model(type="gauss", free=free_g)
                     else:
                         o.seed_model(type="delta", free=free_p)
-                    o.modelfit(quiet=True)
+                    o.modelfit(verbose=False)
             else:
-                o.modelfit(quiet=True)
+                o.modelfit(verbose=False)
         elif o.nvariable:
-            o.modelfit(quiet=True)
+            o.modelfit(verbose=False)
         if not o.model or not np.isfinite(o.model_flux) or o.model_flux <= 0:
             raise RuntimeError("the model came out empty")
-        o.selfcal(phase=True, solint=solint, quiet=True, mapstats=False)
+        o.selfcal(phase=True, solint=solint, verbose=False, mapstats=False)
 
 
 def _antenna_chisq(o):
-    """Reduced chi-squared of the fit per station, over every baseline
-    it is on (difmap's convention: real and imaginary parts count
-    separately), and the number of visibilities behind it."""
+    """Reduced chi-squared of the fit per station, over every baseline it is on (difmap's convention: real and imaginary parts count separately), and the number of visibilities behind it."""
     vis, wt = (np.asarray(x) for x in o._core.stream_vis())
     model = np.asarray(o._core.stream_model())
     sel = o._core.selection()
@@ -192,16 +141,9 @@ def _antenna_chisq(o):
 
 
 def _median_normalised(logg):
-    """Log-gains ``[nif, nant]`` shifted so that the median station of
-    each IF has no correction.
+    """Log-gains ``[nif, nant]`` shifted so that the median station of each IF has no correction.
 
-    gscale keeps the data's flux scale by setting the *mean* gain
-    amplitude of every IF to one (difmap's ``norm_cors``), so a single
-    station that is far off - one that needs x4 in the two IFs it has
-    data in - pulls every other station of those IFs down with it (to
-    x0.57 for eight stations), and leaving it out of the model does not
-    help: it is still in the normalisation. The median station is not
-    moved by it.
+    gscale keeps the data's flux scale by setting the *mean* gain amplitude of every IF to one (difmap's ``norm_cors``), so a single station that is far off - one that needs x4 in the two IFs it has data in - pulls every other station of those IFs down with it (to x0.57 for eight stations), and leaving it out of the model does not help: it is still in the normalisation. The median station is not moved by it.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
@@ -210,8 +152,7 @@ def _median_normalised(logg):
 
 
 def _model_variance(model_sigma, names, nif):
-    """``[nif, nant]`` variances from `bayes_gscale`'s ``model_sigma``
-    (zero where a station has none)."""
+    """``[nif, nant]`` variances from `bayes_gscale`'s ``model_sigma`` (zero where a station has none)."""
     extra = np.zeros((nif, len(names)))
     for name, value in (model_sigma or {}).items():
         if name not in names or value is None:
@@ -226,9 +167,7 @@ def _model_variance(model_sigma, names, nif):
 
 
 def _one_run(base, spec, exclude, st):
-    """Build `spec` without station `exclude` (None: the full array),
-    then gscale everyone against it. Returns the per-(IF, station)
-    log-amplitude corrections and the fit statistics on the full data."""
+    """Build `spec` without station `exclude` (None: the full array), then gscale everyone against it. Returns the per-(IF, station) log-amplitude corrections and the fit statistics on the full data."""
     t0 = time.perf_counter()
     o = base.copy()
     out = {"model": spec.name, "exclude": exclude, "ok": False}
@@ -240,7 +179,7 @@ def _one_run(base, spec, exclude, st):
             o.unignore(exclude)
             # Phase-calibrate the station just brought back against the
             # model it did not shape, so its amplitudes average coherently.
-            o.selfcal(phase=True, solint=st["solint"], quiet=True,
+            o.selfcal(phase=True, solint=st["solint"], verbose=False,
                       mapstats=False)
         keep = o.copy() if (exclude is None and st["keep"]) else None
         before = o.moddif()
@@ -248,7 +187,8 @@ def _one_run(base, spec, exclude, st):
         # The median renormalisation is done here, on the floating-scale
         # solution; difmap's own (the mean) is gscale's.
         median_norm = not st["float_scale"] and st["norm"] == "median"
-        g = o.gscale(float_scale=st["float_scale"] or median_norm, quiet=True, mapstats=False)
+        g = o.gscale(float_scale=st["float_scale"] or median_norm, quiet=False,
+                     verbose=False, mapstats=False)
         after = o.moddif()
         chi_after, nvis_ant = _antenna_chisq(o)
         amp = np.array([g["gains_per_if"][n] for n in o.antennas], float).T
@@ -284,9 +224,7 @@ def _one_run(base, spec, exclude, st):
 
 
 def _model_posterior(full_runs, model_names):
-    """BIC-based posterior probability of each model family, from the
-    full-array runs, with the chi-squared rescaled by the best model's
-    reduced chi-squared."""
+    """BIC-based posterior probability of each model family, from the full-array runs, with the chi-squared rescaled by the best model's reduced chi-squared."""
     rows = []
     for name in model_names:
         r = full_runs.get(name)
@@ -309,10 +247,7 @@ def _model_posterior(full_runs, model_names):
 
 @dataclass
 class BayesGainResult:
-    """What `bayes_gscale` found; see the module docstring for the
-    method. Log-gain arrays are natural logs of the amplitude
-    corrections (which multiply the data), ``[nif, nant]`` unless said
-    otherwise."""
+    """What `bayes_gscale` found; see the module docstring for the method. Log-gain arrays are natural logs of the amplitude corrections (which multiply the data), ``[nif, nant]`` unless said otherwise."""
 
     source: str
     antennas: list
@@ -360,8 +295,7 @@ class BayesGainResult:
         return f"IF{i + 1}"
 
     def _per_if(self, a):
-        """The per-IF numbers of station `a` (None where it has no
-        data in that IF)."""
+        """The per-IF numbers of station `a` (None where it has no data in that IF)."""
         bi = int(np.argmax(self.model_prob))
         out = []
         for i, freq in enumerate(self.if_freqs):
@@ -387,14 +321,7 @@ class BayesGainResult:
         return out
 
     def station_table(self) -> list[dict]:
-        """One row per station. `per_if` holds, for every IF, the
-        correction applied, its uncertainty, the probability that it is
-        needed (and the log10 Bayes factor), the plain gscale value, the
-        leave-one-out estimate and the factor by which leaving the
-        station out moved it. With ``per_if=False`` the IFs share one
-        correction; otherwise the station-level `correction`, `sigma`
-        and `p_correction` are only medians over IFs, for sorting - the
-        per-IF values are the ones applied."""
+        """One row per station. `per_if` holds, for every IF, the correction applied, its uncertainty, the probability that it is needed (and the log10 Bayes factor), the plain gscale value, the leave-one-out estimate and the factor by which leaving the station out moved it. With ``per_if=False`` the IFs share one correction; otherwise the station-level `correction`, `sigma` and `p_correction` are only medians over IFs, for sorting - the per-IF values are the ones applied."""
         rows = []
         for a, name in enumerate(self.antennas):
             per_if = self._per_if(a)
@@ -425,18 +352,11 @@ class BayesGainResult:
 
     @staticmethod
     def _mark(p):
-        """* for a correction needed (P >= 0.95), ? for probably needed
-        (P >= 0.75)."""
+        """* for a correction needed (P >= 0.95), ? for probably needed (P >= 0.75)."""
         return "*" if p >= 0.95 else "?" if p >= 0.75 else " "
 
     def _normalisation_findings(self) -> list[str]:
-        """The stations that would have dragged a mean renormalisation of
-        the flux scale (difmap's) by more than 5% in some IF on their own:
-        in each such IF, the station without which the drag would be less
-        than half, with its difmap gscale there, what every other station
-        would have been scaled by, and what was applied to it instead
-        (a station the data do not constrain gets a wild gscale and is
-        left alone)."""
+        """The stations that would have dragged a mean renormalisation of the flux scale (difmap's) by more than 5% in some IF on their own: in each such IF, the station without which the drag would be less than half, with its difmap gscale there, what every other station would have been scaled by, and what was applied to it instead (a station the data do not constrain gets a wild gscale and is left alone)."""
         if self.settings.get("float_scale") or self.settings.get("norm", "mean") != "median":
             return []
         dragged: dict = {}
@@ -525,8 +445,7 @@ class BayesGainResult:
         return out
 
     def summary(self) -> str:
-        """A plain-text report of the findings: the model comparison,
-        each station's correction in every IF, and the findings."""
+        """A plain-text report of the findings: the model comparison, each station's correction in every IF, and the findings."""
         lines = [
             f"bayes_gscale: {self.source}, {len(self.antennas)} stations, "
             f"{len(self.if_freqs)} IFs; {len(self.runs)} runs in "
@@ -650,17 +569,13 @@ class BayesGainResult:
         }
 
     def plot(self, path=None, show=None):
-        """The diagnostic figure (see `difmapy.bayesplot`); saved to
-        `path` if given. Returns the matplotlib figure."""
+        """The diagnostic figure (see `difmapy.bayesplot`); saved to `path` if given. Returns the matplotlib figure."""
         from difmapy.bayesplot import plot_bayes_gscale
 
         return plot_bayes_gscale(self, path=path, show=show)
 
-    def write(self, prefix, obs=None, outformat=None, quiet=False, **kwargs):
-        """Write ``<prefix>.json`` (the report), ``<prefix>.png`` (the
-        diagnostics) and, given the observation, the calibration table
-        of the corrections (`savecaltable` with these constant gains;
-        extra keyword arguments go to it). Returns the paths written."""
+    def write(self, prefix, obs=None, outformat=None, verbose=True, **kwargs):
+        """Write ``<prefix>.json`` (the report), ``<prefix>.png`` (the diagnostics) and, given the observation, the calibration table of the corrections (`savecaltable` with these constant gains; extra keyword arguments go to it). Returns the paths written."""
         files = {}
         self.files = files
         parent = os.path.dirname(os.fspath(prefix))
@@ -670,7 +585,7 @@ class BayesGainResult:
             self.plot(path=f"{prefix}.png", show=False)
             files["plot"] = f"{prefix}.png"
         except ImportError as exc:
-            if not quiet:
+            if verbose:
                 print(f"bayes_gscale: no diagnostic plot ({exc})")
         # The report first, so that a table that cannot be written (no
         # MS for a CASA table, say) does not lose it.
@@ -678,13 +593,12 @@ class BayesGainResult:
         write_json(files["json"], self.to_dict())
         if obs is not None:
             files["caltable"] = self.save_caltable(
-                obs, prefix, outformat=outformat, quiet=quiet, **kwargs)
+                obs, prefix, outformat=outformat, verbose=verbose, **kwargs)
             write_json(files["json"], self.to_dict())
         return files
 
-    def save_caltable(self, obs, path, outformat=None, quiet=False, **kwargs):
-        """The constant corrections as a CASA and/or AIPS table (see
-        `Observation.savecaltable`), for applying to other sources."""
+    def save_caltable(self, obs, path, outformat=None, verbose=True, **kwargs):
+        """The constant corrections as a CASA and/or AIPS table (see `Observation.savecaltable`), for applying to other sources."""
         from difmapy.io.solutions import constant
 
         fmts = obs.caltable_formats(outformat, ms=kwargs.get("ms"),
@@ -700,15 +614,13 @@ class BayesGainResult:
         written = []
         for fmt in fmts:
             info = obs.savecaltable(paths[fmt], outformat=fmt, solutions=sol,
-                                    quiet=quiet, **kwargs)
+                                    quiet=False, verbose=verbose, **kwargs)
             written.append(info["path"])
         return written
 
 
 def _combine_ifs(mean, var):
-    """One estimate per station from its per-IF ones: the
-    inverse-variance mean, with the variance of fully correlated
-    estimates (they share a model) plus the scatter between IFs."""
+    """One estimate per station from its per-IF ones: the inverse-variance mean, with the variance of fully correlated estimates (they share a model) plus the scatter between IFs."""
     w = np.where(np.isfinite(mean) & np.isfinite(var) & (var > 0), 1 / var, 0.0)
     sw = w.sum(axis=0)
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -732,48 +644,25 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
                  clean_gain=0.05, sigma_floor=0.01, model_sigma=None, timeavg=None,
                  workers=None, apply=True, prefix=None, outformat=None,
                  ms=None, uvfits=None, plot=None,
-                 quiet=False) -> BayesGainResult:
-    """Bayesian whole-observation amplitude calibration of every
-    station; the method is described in `difmapy.bayescal`.
+                 quiet=True, verbose=True) -> BayesGainResult:
+    """Bayesian whole-observation amplitude calibration of every station; the method is described in `difmapy.bayescal`.
 
     Parameters
     ----------
     models : sequence of str
-        Source-model families to compare: ``"clean"`` (``"clean500"``
-        for 500 iterations a round), ``"gaussN"``/``"pointN"`` (N
-        circular Gaussians / point sources, seeded at the residual peak
-        and fitted with `modelfit`), and ``"current"`` (the model in
-        the observation now, refitted where it has free parameters;
-        being built from all stations, its leave-one-out estimates are
-        not independent).
+        Source-model families to compare: ``"clean"`` (``"clean500"`` for 500 iterations a round), ``"gaussN"``/``"pointN"`` (N circular Gaussians / point sources, seeded at the residual peak and fitted with `modelfit`), and ``"current"`` (the model in the observation now, refitted where it has free parameters; being built from all stations, its leave-one-out estimates are not independent).
     prior_sigma : float
-        The fractional accuracy of the a-priori amplitude calibration:
-        width of the log-amplitude errors of a station *as calibrated*,
-        which are left alone.
+        The fractional accuracy of the a-priori amplitude calibration: width of the log-amplitude errors of a station *as calibrated*, which are left alone.
     outlier_sigma : float
-        Width of the log-amplitude errors of a station that is *off*
-        (1.0: a factor of a few), which are corrected almost in full.
+        Width of the log-amplitude errors of a station that is *off* (1.0: a factor of a few), which are corrected almost in full.
     jackknife : bool
-        Do the leave-one-station-out runs. Without them each station's
-        estimate comes from the full-array model and its uncertainty
-        from the spread between models only.
+        Do the leave-one-station-out runs. Without them each station's estimate comes from the full-array model and its uncertainty from the spread between models only.
     per_if : bool
-        True (the default): every IF gets its own correction, as
-        `gscale` solves them, with its own uncertainty and P(needed) -
-        the summary, the figure and the tables show and apply one per
-        station and IF. False: the IFs' estimates are combined into one
-        correction per station, applied to every IF.
+        True (the default): every IF gets its own correction, as `gscale` solves them, with its own uncertainty and P(needed) - the summary, the figure and the tables show and apply one per station and IF. False: the IFs' estimates are combined into one correction per station, applied to every IF.
     float_scale : bool
-        False keeps the data's flux scale (see `norm`); True lets it
-        float onto the model's.
+        False keeps the data's flux scale (see `norm`); True lets it float onto the model's.
     norm : {"median", "mean"}
-        How the flux scale is kept with ``float_scale=False``: the
-        median station of each IF gets no correction (the default), or
-        the mean gain amplitude of each IF is one, as difmap's `gscale`
-        does. One station far off its a-priori calibration drags the
-        mean, and so every other station of its IFs, with it - and
-        leaving it out of the model does not help, since it is still in
-        the normalisation. It does not move the median.
+        How the flux scale is kept with ``float_scale=False``: the median station of each IF gets no correction (the default), or the mean gain amplitude of each IF is one, as difmap's `gscale` does. One station far off its a-priori calibration drags the mean, and so every other station of its IFs, with it - and leaving it out of the model does not help, since it is still in the normalisation. It does not move the median.
     nloop : int
         Rounds of model building and phase self-calibration per run.
     solint : float | str
@@ -781,32 +670,28 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
     clean_gain : float
         CLEAN loop gain for the ``clean`` models.
     sigma_floor : float
-        Smallest uncertainty assumed for a log-gain (systematics the
-        jackknife cannot see).
+        Smallest uncertainty assumed for a log-gain (systematics the jackknife cannot see).
     model_sigma : dict | None
-        Station -> uncertainty of its log-gain that comes from the source
-        model (one value, or one per IF; NaN or None for none), added in
-        quadrature. For a model brought from elsewhere (``"current"``)
-        the jackknife cannot measure it: the model is not rebuilt without
-        the station, so one whose baselines reach spatial frequencies no
-        other station samples gets a confident correction that only
-        reflects the model there. The ``sigma`` an earlier run with the
-        station's own models found is that measure.
+        Station -> uncertainty of its log-gain that comes from the source model (one value, or one per IF; NaN or None for none), added in quadrature. For a model brought from elsewhere (``"current"``) the jackknife cannot measure it: the model is not rebuilt without the station, so one whose baselines reach spatial frequencies no other station samples gets a confident correction that only reflects the model there. The ``sigma`` an earlier run with the station's own models found is that measure.
     timeavg : float | str | None
-        Average the working data in time first (as `uvaver`); the
-        corrections are constant, so this costs little and speeds up
-        long observations.
+        Average the working data in time first (as `uvaver`); the corrections are constant, so this costs little and speeds up long observations.
     workers : int | None
         Threads to use (default: all CPUs).
     apply : bool
         Apply the corrections to `obs` (as `gscale` would).
     prefix : str | None
-        Write ``<prefix>.json``, ``<prefix>.png`` and the calibration
-        table (in `outformat`, default the data's native one; `ms` and
-        `uvfits` are the files it refers to, as for `savecaltable`).
+        Write ``<prefix>.json``, ``<prefix>.png`` and the calibration table (in `outformat`, default the data's native one; `ms` and `uvfits` are the files it refers to, as for `savecaltable`).
     plot : bool | None
-        Show the diagnostic figure (default: only when nothing is
-        written and not `quiet`).
+        Show the diagnostic figure (default: only when nothing is written and `verbose`).
+    quiet : bool
+        Return None (the default). ``False`` returns the `BayesGainResult`.
+    verbose : bool
+        Print the progress and the summary.
+
+    Returns
+    -------
+    BayesGainResult | None
+        The result, with ``quiet=False``.
     """
     from difmapy.observation import MAS
 
@@ -848,7 +733,7 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
           "float_scale": bool(float_scale), "norm": norm, "keep": True}
     jobs = [(s, e) for s in specs for e in subsets]
     nworkers = max(1, min(int(workers or os.cpu_count() or 1), len(jobs)))
-    if not quiet:
+    if verbose:
         print(f"bayes_gscale: {len(jobs)} runs ({len(specs)} models x "
               f"{len(subsets)} station subsets) on {nworkers} threads")
     results = []
@@ -987,17 +872,17 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
     res.elapsed = time.perf_counter() - t_start
     if prefix:
         extra = {k: v for k, v in (("ms", ms), ("uvfits", uvfits)) if v}
-        res.write(prefix, obs=obs, outformat=outformat, quiet=quiet, **extra)
-    if not quiet:
+        res.write(prefix, obs=obs, outformat=outformat, verbose=verbose, **extra)
+    if verbose:
         print(res.summary())
         if res.files:
             print("Wrote " + ", ".join(
                 p if isinstance(p, str) else ", ".join(p)
                 for p in res.files.values()))
-    if plot or (plot is None and not prefix and not quiet):
+    if plot or (plot is None and not prefix and verbose):
         try:
             res.plot(show=True)
         except ImportError as exc:
-            if not quiet:
+            if verbose:
                 print(f"bayes_gscale: no diagnostic plot ({exc})")
-    return res
+    return None if quiet else res

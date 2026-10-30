@@ -87,7 +87,7 @@ def test_ms_load_header(ms_path):
 
 def test_ms_invert_peak(ms_path):
     o = difmapy.load(ms_path)
-    o.select("I").mapsize(NX, CELL)
+    o.select("I", quiet=False).mapsize(NX, CELL)
     o.invert()
     # Only the inner quarter of the grid is valid (the outer margin is
     # amplified by the gridding correction), so search there.
@@ -100,11 +100,11 @@ def test_ms_invert_peak(ms_path):
 
 def test_ms_clean_selfcal_smoke(ms_path):
     o = difmapy.load(ms_path)
-    o.select("I").mapsize(NX, CELL)
+    o.select("I", quiet=False).mapsize(NX, CELL)
     o.add_window(X0_MAS - 2, X0_MAS + 2, Y0_MAS - 2, Y0_MAS + 2)
-    res = o.clean(300, 0.1)
+    res = o.clean(300, 0.1, quiet=False)
     assert abs(res["cleaned_flux"] - FLUX) / FLUX < 0.03
-    res = o.selfcal(phase=True)
+    res = o.selfcal(phase=True, quiet=False)
     assert res["nbadsol"] == 0
     stats = o.imstat()
     assert max(abs(stats["min"]), abs(stats["max"])) < 0.05 * FLUX
@@ -193,7 +193,7 @@ def test_save_writes_an_ms_for_averaged_data(ms_path, tmp_path, averaging):
     gains[:, 2] = 1.25
     obs._core.apply_gain_factors(gains, 0.3 * (gains - 1))
     prefix = str(tmp_path / "avg")
-    files = obs.save(prefix, quiet=True)
+    files = obs.save(prefix, quiet=False, verbose=False)
     assert files["ms"] == f"{prefix}.ms" and os.path.isdir(files["ms"])
 
     back = difmapy.load(files["ms"], data_column="CORRECTED_DATA", stokes=None)
@@ -266,7 +266,7 @@ def test_save_flags_from_averaged_data(ms_path, tmp_path):
     assert not hasattr(obs._core, "_ms_origin")   # averaged: rows differ
     times = np.asarray(obs._core.times())
     obs.flag(station="AN1", tmin=float(times[1]) - 1, tmax=float(times[2]) + 1)
-    n = obs.save_flags()
+    n = obs.save_flags(quiet=False)
     assert n > 0
 
     after = difmapy.load(work, stokes=None)
@@ -279,7 +279,7 @@ def test_save_flags_from_averaged_data(ms_path, tmp_path):
     assert hit.sum() > 0 and f_after[hit].all()
     np.testing.assert_array_equal(f_after[~hit], f_before[~hit])
     assert (f_after | ~f_before).all(), "nothing may be unflagged"
-    assert obs.save_flags() == 0, "a second call has nothing to add"
+    assert obs.save_flags(quiet=False) == 0, "a second call has nothing to add"
 
 
 def test_save_writes_caltable_and_image(uvfits_file, tmp_path):
@@ -288,17 +288,17 @@ def test_save_writes_caltable_and_image(uvfits_file, tmp_path):
     obs = difmapy.load(uvfits_file)
     obs.mapsize(NX, CELL)
     prefix = str(tmp_path / "plain")
-    files = obs.save(prefix, quiet=True)
+    files = obs.save(prefix, quiet=False, verbose=False)
     # Nothing calibrated or imaged yet: neither is written...
     assert "caltable" not in files and "image" not in files
     for kind in ("caltable", "image"):
         with pytest.raises(ValueError, match=f"{kind}=True"):
-            obs.save(prefix, quiet=True, **{kind: True})
+            obs.save(prefix, quiet=False, verbose=False, **{kind: True})
 
-    obs.clean(100, 0.1, quiet=True)
-    obs.selfcal(phase=True, quiet=True)
+    obs.clean(100, 0.1, quiet=False, verbose=False)
+    obs.selfcal(phase=True, quiet=False, verbose=False)
     prefix = str(tmp_path / "done")
-    files = obs.save(prefix, quiet=True)
+    files = obs.save(prefix, quiet=False, verbose=False)
     # ...and afterwards both are, the table in the data's own format.
     assert files["caltable"] == f"{prefix}.TASAV.FITS"
     assert files["image"] == f"{prefix}.fits"
@@ -307,7 +307,7 @@ def test_save_writes_caltable_and_image(uvfits_file, tmp_path):
     with fits.open(files["image"]) as h:
         assert h[0].header["BUNIT"].strip() == "JY/BEAM"
         assert np.nanmax(h[0].data) == pytest.approx(FLUX, rel=0.05)
-    files = obs.save(prefix, quiet=True, caltable=False, image=False)
+    files = obs.save(prefix, quiet=False, verbose=False, caltable=False, image=False)
     assert "caltable" not in files and "image" not in files
     assert "images" not in files
     # get() still restores the session from the same prefix.
@@ -325,11 +325,11 @@ def test_save_writes_an_image_per_weighting(uvfits_file, tmp_path):
     obs = difmapy.load(uvfits_file)
     obs.mapsize(NX, CELL)
     obs.uvweight(2, 0, robust=0.5)
-    obs.clean(100, 0.1, quiet=True)
-    restored = obs.restore().copy()
+    obs.clean(100, 0.1, quiet=False, verbose=False)
+    restored = obs.restore(quiet=False).copy()
     dmap = obs.dmap.copy()
     prefix = str(tmp_path / "w")
-    files = obs.save(prefix, quiet=True)
+    files = obs.save(prefix, quiet=False, verbose=False)
     assert files["images"] == [f"{prefix}.robust{r:+g}.fits"
                                for r in ROBUST_CHOICES]
     bmaj = []
@@ -361,7 +361,7 @@ def test_casa_applies_the_flag_commands_like_save_flags(ms_path, tmp_path):
         obs.flag(station="AN1", tmin=float(t[1]) - 1, tmax=float(t[3]) + 1)
         obs.flag(baseline=("AN0", "AN2"), if_index=1)
         cmds = str(tmp_path / "flags.flagcmd")
-        info = obs.wflags(cmds, quiet=True)
+        info = obs.wflags(cmds, quiet=False, verbose=False)
         assert info["format"] == "casa" and info["nrows"] == 2
         casatasks.flagdata(vis=b, mode="list", inpfile=cmds, flagbackup=False)
         obs.save_flags()
@@ -370,5 +370,5 @@ def test_casa_applies_the_flag_commands_like_save_flags(ms_path, tmp_path):
         assert fa.sum() > 0
         np.testing.assert_array_equal(fb, fa)
         # save() writes the same list, by default.
-        files = obs.save(str(tmp_path / "sess"), quiet=True, ms=False)
+        files = obs.save(str(tmp_path / "sess"), quiet=False, verbose=False, ms=False)
         assert files["flags"].endswith("sess.flagcmd")

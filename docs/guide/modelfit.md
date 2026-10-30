@@ -3,7 +3,7 @@
 ```python
 obs.addcmp(1.5, 2.0, -1.0, type="gauss", major=3.0, ratio=0.7, phi=30,
            free=["flux", "pos", "shape"])
-res = obs.modelfit()            # iterate until it converges
+res = obs.modelfit(quiet=False)   # iterate until it converges
 print(res["rchisq"], res["converged"], obs.model, res["errors"])
 ```
 
@@ -72,8 +72,9 @@ The component number is its index in `res["components"]` and
 puts the number between 0.1 and 100; an error is given to two
 significant figures and its value to the same decimal place; and a
 parameter that was not fitted has no error and is marked `(fixed)`. The
-heading is in bold in a terminal or a notebook. `quiet=True` prints
-nothing, and `outfile=` writes the dict `modelfit` returns to a JSON
+heading is in bold in a terminal or a notebook. `verbose=False` prints
+nothing, `quiet=False` returns the result as a dict, and `outfile=`
+writes that dict to a JSON
 file, [as for every command](imaging.md#the-numbers-each-command-returns).
 
 ## The model

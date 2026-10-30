@@ -1,12 +1,6 @@
 """Contour levels and contour tracing for the map display.
 
-Pure numpy, so it can be tested without Qt. The tracer is a marching
-squares that only does arithmetic on the cells a contour actually
-crosses: a level costs one comparison of the map plus work proportional
-to the length of the contour, which is what makes twenty-odd levels on
-a 2048-pixel map affordable on every redraw (pyqtgraph's own
-`isocurve` processes the whole array for each level, about a third of a
-second apiece at that size).
+Pure numpy, so it can be tested without Qt. The tracer is a marching squares that only does arithmetic on the cells a contour actually crosses: a level costs one comparison of the map plus work proportional to the length of the contour, which is what makes twenty-odd levels on a 2048-pixel map affordable on every redraw (pyqtgraph's own `isocurve` processes the whole array for each level, about a third of a second apiece at that size).
 """
 
 from __future__ import annotations
@@ -20,12 +14,7 @@ def contour_levels(rms, vmax, vmin=0.0, nsigma=3.0, factor=np.sqrt(2.0),
                    max_levels=40):
     """The contour levels of a map with noise `rms`.
 
-    Positive levels start at ``nsigma * rms`` and grow by `factor` up to
-    the peak `vmax`; negative ones mirror them, from ``-nsigma * rms``
-    down to the minimum `vmin`. Returns ``(positive, negative)`` arrays,
-    either of which may be empty (no emission above the first level, no
-    negative that deep). `max_levels` bounds each, against a noise
-    estimate that is absurdly small.
+    Positive levels start at ``nsigma * rms`` and grow by `factor` up to the peak `vmax`; negative ones mirror them, from ``-nsigma * rms`` down to the minimum `vmin`. Returns ``(positive, negative)`` arrays, either of which may be empty (no emission above the first level, no negative that deep). `max_levels` bounds each, against a noise estimate that is absurdly small.
     """
     base = float(nsigma) * float(rms)
     if not np.isfinite(base) or base <= 0.0:
@@ -41,14 +30,9 @@ def contour_levels(rms, vmax, vmin=0.0, nsigma=3.0, factor=np.sqrt(2.0),
 
 
 def contour_segments(data, level):
-    """Trace the `level` contour of the 2-D array `data` (row-major,
-    ``data[y, x]``).
+    """Trace the `level` contour of the 2-D array `data` (row-major, ``data[y, x]``).
 
-    Returns ``(x, y)``: the end points of the line segments, two
-    consecutive entries per segment (the form `pyqtgraph.arrayToQPath`
-    takes with ``connect="pairs"``), in pixel-index coordinates - a
-    point at ``(j, i)`` is the centre of pixel ``data[i, j]``. Both are
-    empty when the contour does not cross the array.
+    Returns ``(x, y)``: the end points of the line segments, two consecutive entries per segment (the form `pyqtgraph.arrayToQPath` takes with ``connect="pairs"``), in pixel-index coordinates - a point at ``(j, i)`` is the centre of pixel ``data[i, j]``. Both are empty when the contour does not cross the array.
     """
     d = np.asarray(data)
     empty = (np.array([]), np.array([]))

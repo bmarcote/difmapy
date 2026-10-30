@@ -1,10 +1,6 @@
 """Time and frequency averaging of UV data.
 
-`uvaver` (difmap's own command) averages the *calibrated* visibilities
-into coarser integrations, and `chanaver` averages adjacent channels of
-each IF (AIPS AVSPC, CASA split's `width`); both return a new
-observation. Flagged samples are excluded from the average; an output
-sample is flagged only if none of its inputs were usable.
+`uvaver` (difmap's own command) averages the *calibrated* visibilities into coarser integrations, and `chanaver` averages adjacent channels of each IF (AIPS AVSPC, CASA split's `width`); both return a new observation. Flagged samples are excluded from the average; an output sample is flagged only if none of its inputs were usable.
 """
 
 from __future__ import annotations
@@ -17,16 +13,14 @@ __all__ = ["uvaver", "chanaver"]
 
 
 def uvaver(core: CoreObservation, aver_time: float, doscatter: bool = False):
-    """Return a new CoreObservation with the data averaged into
-    `aver_time`-second bins.
+    """Return a new CoreObservation with the data averaged into `aver_time`-second bins.
 
     Parameters
     ----------
     aver_time : float
         Duration of the output integrations (seconds).
     doscatter : bool
-        If True, derive the output weights from the scatter of the
-        averaged samples instead of summing the input weights.
+        If True, derive the output weights from the scatter of the averaged samples instead of summing the input weights.
     """
     if aver_time <= 0:
         raise ValueError("aver_time must be positive")
@@ -162,29 +156,18 @@ def uvaver(core: CoreObservation, aver_time: float, doscatter: bool = False):
 
 
 def chanaver(core: CoreObservation, nchan=None, chlist=None):
-    """Return a new CoreObservation with every `nchan` adjacent channels
-    of each IF averaged into one.
+    """Return a new CoreObservation with every `nchan` adjacent channels of each IF averaged into one.
 
     Parameters
     ----------
     nchan : int | str | None
-        Channels per output channel. It must divide every IF's number
-        of channels, since an IF's channels are equally spaced by
-        construction. ``None``, ``0`` or ``"all"`` average each IF down
-        to a single channel.
+        Channels per output channel. It must divide every IF's number of channels, since an IF's channels are equally spaced by construction. ``None``, ``0`` or ``"all"`` average each IF down to a single channel.
     chlist : list[(int, int)] | None
-        Inclusive global channel ranges to use (as for `select`); the
-        other channels are left out of the averages, which is how band
-        edges are dropped before averaging. Default: all channels.
+        Inclusive global channel ranges to use (as for `select`); the other channels are left out of the averages, which is how band edges are dropped before averaging. Default: all channels.
 
-    As with `uvaver`, what is averaged is what the user currently sees -
-    gains, baseline corrections and any shift applied, the shift at each
-    channel's own frequency - and the result starts uncalibrated.
+    As with `uvaver`, what is averaged is what the user currently sees - gains, baseline corrections and any shift applied, the shift at each channel's own frequency - and the result starts uncalibrated.
 
-    The weights of the inputs add. A sample is good if any of its inputs
-    was; a bin whose inputs were all flagged keeps the average of those
-    (flagged, so `unflag` can bring it back), and only a bin with no
-    data at all is deleted.
+    The weights of the inputs add. A sample is good if any of its inputs was; a bin whose inputs were all flagged keeps the average of those (flagged, so `unflag` can bring it back), and only a bin with no data at all is deleted.
     """
     vis, wt = core.calibrated_cube(apply_shift=True)  # signed wt: <0 flagged
     vis = np.asarray(vis)

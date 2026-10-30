@@ -1,5 +1,4 @@
-"""Diagnostic plots: closure phases (cpplot), time sampling (tplot),
-self-cal corrections (corplot) and spectra (specplot, fplot)."""
+"""Diagnostic plots: closure phases (cpplot), time sampling (tplot), self-cal corrections (corplot) and spectra (specplot, fplot, possm)."""
 
 from __future__ import annotations
 
@@ -12,13 +11,18 @@ from difmapy.plots.base import (
     FluxAxis,
     PlotWindow,
     TimeGaps,
+    frame_panels,
     gradient_colors,
     install_time_axis,
     run_if_needed,
 )
 from difmapy.units import parse_time
 
-__all__ = ["cpplot", "tplot", "corplot", "specplot", "fplot"]
+#: Left-axis width of possm's panels, the same in every column so that
+#: the grid lines up.
+LEFT_AXIS_WIDTH = 64
+
+__all__ = ["cpplot", "tplot", "corplot", "specplot", "fplot", "possm"]
 
 RAD2DEG = 180.0 / np.pi
 
@@ -62,11 +66,7 @@ class _MultiPanel(PlotWindow):
     def _set_amp_range(panel, values):
         """Range an amplitude panel around its data, with a floor.
 
-        A flat band - or a single gain solution - is flat to the last
-        bit of float32, and autoscaling to that shows nothing but
-        rounding noise under ten-digit tick labels. Never range tighter
-        than a thousandth of the level. Returns the range applied, for
-        `z` to restore.
+        A flat band - or a single gain solution - is flat to the last bit of float32, and autoscaling to that shows nothing but rounding noise under ten-digit tick labels. Never range tighter than a thousandth of the level. Returns the range applied, for `z` to restore.
         """
         values = np.asarray(values, dtype=float)
         values = values[np.isfinite(values)]
@@ -78,16 +78,14 @@ class _MultiPanel(PlotWindow):
         return (lo - pad, hi + pad)
 
     def _new_plot(self, row, yrange=None, flux=False):
-        """Add a panel, recording the y range ``z`` should restore;
-        `flux` gives it a left axis in Jy/mJy/µJy (`FluxAxis`)."""
+        """Add a panel, recording the y range ``z`` should restore; `flux` gives it a left axis in Jy/mJy/µJy (`FluxAxis`)."""
         axes = {"left": FluxAxis()} if flux else None
         p = self.glw.addPlot(row=row, col=0, axisItems=axes)
         self._plots.append((p, yrange))
         return p
 
     def _share_x_axis(self):
-        """Tie every panel of the page to one x axis, with the tick
-        labels only on the bottom one."""
+        """Tie every panel of the page to one x axis, with the tick labels only on the bottom one."""
         plots = [p for p, _ in self._plots]
         for p in plots[1:]:
             p.setXLink(plots[0])
@@ -135,15 +133,12 @@ class CpPlot(_MultiPanel):
     def _triangle_list(self):
         """The triangles to page through, as sorted antenna indices.
 
-        Worked out from which baselines have unflagged data, without
-        computing any closure phase: those are computed a page at a
-        time, since a 28-station array has 3276 triangles (seconds of
-        work for all of them) and a page shows four.
+        Worked out from which baselines have unflagged data, without computing any closure phase: those are computed a page at a time, since a 28-station array has 3276 triangles (seconds of work for all of them) and a page shows four.
         """
         core = self.obs._core
         names = core.antenna_names
         if self._triangles is not None:
-            return [tuple(sorted(names.index(str(t)) for t in tri))
+            return [tuple(sorted(self.obs._ant_index(t) for t in tri))
                     for tri in self._triangles]
         _, wt = core.stream_vis()
         _, a1, a2, *_ = core.rows()
@@ -208,9 +203,13 @@ class CpPlot(_MultiPanel):
 class TPlot(PlotWindow):
     """Per-antenna time sampling (difmap tplot).
 
-    One row per antenna, labelled by name, showing where each has
-    unflagged data.
+    One row per antenna, labelled by name, with a mark at every integration where the antenna has unflagged data. As in difmap, the colour says whether that is all of it: an integration where every baseline to the antenna is unflagged is drawn in the primary colour (`GOOD_COLOR`, matplotlib's "C0"), one where some of its baselines are flagged and others are not in the secondary colour (`PARTIAL_COLOR`, "C1"). An integration with all of them flagged is not drawn. See `sampling` for what counts as flagged.
     """
+
+    #: Every baseline of the antenna unflagged (matplotlib "C0").
+    GOOD_COLOR = (31, 119, 180)
+    #: Some flagged, some not (matplotlib "C1").
+    PARTIAL_COLOR = (255, 127, 14)
 
     def __init__(self, obs):
         super().__init__("difmapy tplot")
@@ -224,32 +223,61 @@ class TPlot(PlotWindow):
     def view_boxes(self):
         return [] if self.plot is None else [self.plot.vb]
 
+    def sampling(self):
+        """Per-(integration, antenna) counts of baselines, ``(good, flagged)``, each [ntimes, nant].
+
+        A baseline is good at an integration if any selected IF of it is unflagged, and flagged if it has data but none of it unflagged. A flagged baseline counts against an antenna only when the station at its other end has unflagged data at that integration: a station that is out altogether (flagged or ignored) says nothing about the others, and would otherwise mark every antenna as partly flagged. Deleted data (weight 0) is absent, not flagged.
+        """
+        core = self.obs._core
+        nt, nant = core.ntimes, len(core.antenna_names)
+        _, wt = core.stream_vis()
+        used = np.asarray(core.selection()["if_used"], dtype=bool)
+        wt = np.asarray(wt)[:, used]
+        _, a1, a2, *_ = core.rows()
+        a1 = np.asarray(a1, dtype=np.int64)
+        a2 = np.asarray(a2, dtype=np.int64)
+        tidx = np.asarray(core.time_index(), dtype=np.int64)
+        row_good = (wt > 0).any(axis=1)
+        row_flag = ~row_good & (wt < 0).any(axis=1)
+        good = np.zeros(nt * nant, dtype=np.int64)
+        for ant in (a1, a2):
+            np.add.at(good, tidx * nant + ant, row_good)
+        good = good.reshape(nt, nant)
+        flagged = np.zeros(nt * nant, dtype=np.int64)
+        for ant, other in ((a1, a2), (a2, a1)):
+            m = row_flag & (good[tidx, other] > 0)
+            np.add.at(flagged, tidx[m] * nant + ant[m], 1)
+        return good, flagged.reshape(nt, nant)
+
     def refresh(self):
         self.glw.clear()
         obs = self.obs
         core = obs._core
-        samp = np.asarray(core.sampling())  # [ntimes, nant]
+        good, flagged = self.sampling()
         gaps = TimeGaps.of(obs)
         times = gaps.compress(np.asarray(core.times()) / 3600.0)
         names = list(core.antenna_names)
-        colors = gradient_colors(len(names), "turbo")
         self.plot = p = self.glw.addPlot()
         install_time_axis(p, gaps)
         p.setLabel("bottom", "Time (hours)")
         p.setLabel("left", "Antenna")
         p.showGrid(x=True, alpha=0.2)
         nsamp = []
-        for ia, name in enumerate(names):
-            good = samp[:, ia] > 0
-            nsamp.append(int(good.sum()))
-            if not good.any():
-                continue
-            p.addItem(
-                FastScatter(
-                    times[good], np.full(good.sum(), ia), size=5, symbol="s",
-                    pen=None, brush=pg.mkBrush(*colors[ia % len(colors)], 220),
-                )
-            )
+        npartial = 0
+        for ia in range(len(names)):
+            some = good[:, ia] > 0
+            partial = some & (flagged[:, ia] > 0)
+            nsamp.append(int(some.sum()))
+            npartial += int(partial.sum())
+            for m, col in ((some & ~partial, self.GOOD_COLOR),
+                           (partial, self.PARTIAL_COLOR)):
+                if m.any():
+                    p.addItem(
+                        FastScatter(
+                            times[m], np.full(m.sum(), ia), size=5, symbol="s",
+                            pen=None, brush=pg.mkBrush(*col, 230),
+                        )
+                    )
         ax = p.getAxis("left")
         # Label the rows with the station names rather than their index.
         ax.setTicks([[(i, n) for i, n in enumerate(names)], []])
@@ -257,22 +285,23 @@ class TPlot(PlotWindow):
         p.setYRange(-0.5, len(names) - 0.5)
         dead = [n for n, c in zip(names, nsamp) if c == 0]
         self.statusBar().showMessage(
-            "unflagged data per antenna vs time"
+            "blue: unflagged | orange: partly flagged"
+            + (f" ({npartial} antenna-integrations)" if npartial else "")
             + (f" | no data: {', '.join(dead)}" if dead else "")
             + " | h: help"
         )
 
     def key_help(self):
-        return [("", "one row per antenna; a mark means unflagged data")]
+        return [
+            ("", "one row per antenna, one mark per integration with data"),
+            ("", "blue: all its baselines unflagged; orange: some flagged"),
+        ]
 
 
 class CorPlot(_MultiPanel):
     """Self-calibration corrections vs time (difmap corplot).
 
-    One antenna to a pair of panels - amplitude above, phase below,
-    sharing the time axis, as `vplot` lays out its baselines. `quantity`
-    narrows that to "amp" or "phase" alone; the default shows both,
-    since an amplitude solution is usually read against its phase.
+    One antenna to a pair of panels - amplitude above, phase below, sharing the time axis, as `vplot` lays out its baselines. `quantity` narrows that to "amp" or "phase" alone; the default shows both, since an amplitude solution is usually read against its phase.
     """
 
     #: Tall: a page is several antennas of stacked amp/phase panels.
@@ -415,8 +444,7 @@ class SpecPlot(PlotWindow):
         core = obs._core
         bl = None
         if baseline is not None:
-            names = core.antenna_names
-            bl = (names.index(str(baseline[0])), names.index(str(baseline[1])))
+            bl = (obs._ant_index(baseline[0]), obs._ant_index(baseline[1]))
         s = core.spectrum(baseline=bl, tmin=self.tmin, tmax=self.tmax)
         wt = np.asarray(s["wt"])
         good = wt > 0
@@ -444,24 +472,13 @@ class SpecPlot(PlotWindow):
 
 
 class FPlot(_MultiPanel):
-    """Amplitude and phase against frequency, one baseline to a pair of
-    panels, averaged over the whole time range (difmapy fplot).
+    """Amplitude and phase against frequency, one baseline to a pair of panels, averaged over the whole time range (difmapy fplot).
 
-    The frequency counterpart of `vplot`: every channel of every IF is
-    averaged over the observation - or over `tmin`..`tmax` - so that a
-    slope or a ripple across the band stands out where a single
-    integration would only show noise. `n`/`p` page through the
-    baselines, `reftel` restricts them to one station's.
+    The frequency counterpart of `vplot`: every channel of every IF is averaged over the observation - or over `tmin`..`tmax` - so that a slope or a ripple across the band stands out where a single integration would only show noise. `n`/`p` page through the baselines, `reftel` restricts them to one station's.
 
-    Amplitudes are scalar-averaged, so they do not decorrelate as the
-    fringe turns; phases come from the vector average, which is what
-    makes a phase slope across the band visible. The accumulated
-    calibration is applied (`calibrated=False` shows the data as
-    loaded), and channels outside the current selection are shown too,
-    so the plot can be used to choose them.
+    Amplitudes are scalar-averaged, so they do not decorrelate as the fringe turns; phases come from the vector average, which is what makes a phase slope across the band visible. The accumulated calibration is applied (`calibrated=False` shows the data as loaded), and channels outside the current selection are shown too, so the plot can be used to choose them.
 
-    This is a view rather than an editor: each point averages many
-    integrations, while flag editing works on whole rows.
+    This is a view rather than an editor: each point averages many integrations, while flag editing works on whole rows.
     """
 
     def __init__(self, obs, reftel=None, baselines=None, nplot=3,
@@ -477,12 +494,11 @@ class FPlot(_MultiPanel):
 
     @staticmethod
     def _ant(obs, name):
-        return int(name) if isinstance(name, int) else obs.antennas.index(str(name))
+        return int(name) if isinstance(name, int) else obs._ant_index(name)
 
     @classmethod
     def _select_baselines(cls, obs, reftel, baselines):
-        """The (a1, a2) pairs to page through, as global antenna
-        indices."""
+        """The (a1, a2) pairs to page through, as global antenna indices."""
         if baselines is not None:
             return [tuple(sorted(cls._ant(obs, a) for a in bl)) for bl in baselines]
         _, a1, a2, _, _, _ = obs._core.rows()
@@ -570,32 +586,286 @@ class FPlot(_MultiPanel):
         ]
 
 
+class PossmPlot(_MultiPanel):
+    """Vector-averaged amplitude and phase against frequency, a grid of baselines to a page (AIPS POSSM).
+
+    Every channel of every IF is vector-averaged over the whole observation (or `tmin`..`tmax`): the amplitude is the modulus of the averaged visibility and the phase its argument, so a phase slope or ripple across the band shows, and a decorrelating one lowers the amplitudes too - which is what POSSM shows and how bandpass and delay errors are spotted. Each baseline gets an amplitude panel above a phase panel, framed together; `nplot` baselines go to a page, `ncols` to a row of the grid, and they are paged through with ``n``/``p`` in the same order as `vplot` (`reftel` keeps one station's only).
+
+    The accumulated calibration is applied unless `calibrated=False`. Channels outside the current selection are shown too, so the plot can be used to choose them. The plot is a view, not an editor.
+    """
+
+    #: A page is a grid of baselines, each two panels high.
+    DEFAULT_SIZE = (1400, 950)
+
+    def __init__(self, obs, nplot=9, reftel=None, baselines=None, ncols=3,
+                 tmin=None, tmax=None, calibrated=True):
+        self.tmin = parse_time(tmin, "s")
+        self.tmax = parse_time(tmax, "s")
+        self.calibrated = bool(calibrated)
+        self.ncols = max(1, int(ncols))
+        self._items = FPlot._select_baselines(obs, reftel, baselines)
+        nplot = int(nplot)
+        if nplot <= 0:
+            # difmap's 0, as for vplot: every baseline on one page.
+            nplot = max(len(self._items), 1)
+        title = "difmapy possm"
+        if reftel is not None:
+            title += f" ({obs.antennas[FPlot._ant(obs, reftel)]})"
+        super().__init__(obs, title, nplot=nplot)
+
+    def averaged(self, baseline):
+        """The vector average of one baseline over the time range, as a dict of per-channel arrays: `freq` (Hz), `if_index`, `amp` (Jy, the modulus of the averaged visibility), `phase` (degrees) and the summed weight `wt` (0 where there is no unflagged data)."""
+        a, b = baseline
+        s = self.obs._core.spectrum(
+            baseline=(a, b), tmin=self.tmin, tmax=self.tmax,
+            calibrated=self.calibrated,
+        )
+        re, im = np.asarray(s["re"]), np.asarray(s["im"])
+        nchan = list(self.obs.nchan)
+        cif = (np.concatenate([np.full(n, i, dtype=int) for i, n in enumerate(nchan)])
+               if nchan else np.zeros(0, dtype=int))
+        return {
+            "freq": np.asarray(s["freq"]),
+            "if_index": cif,
+            "amp": np.hypot(re, im),
+            "phase": np.rad2deg(np.arctan2(im, re)),
+            "wt": np.asarray(s["wt"]),
+        }
+
+    def refresh(self):
+        self.glw.clear()
+        self._plots = []
+        names = self.obs.antennas
+        colors = gradient_colors(self.obs.nif)
+        lo = self.page * self.nplot
+        page = self._items[lo: lo + self.nplot]
+        nplotted = 0
+        groups = []
+        for k, (a, b) in enumerate(page):
+            r, c = divmod(k, self.ncols)
+            d = self.averaged((a, b))
+            good = d["wt"] > 0
+            freq = d["freq"] / 1e9
+            pair = []
+            for j, key in enumerate(("amp", "phase")):
+                p = self.glw.addPlot(row=2 * r + j, col=c,
+                                     axisItems={"left": FluxAxis()} if key == "amp" else None)
+                self._plots.append((p, (-180, 180) if key == "phase" else None))
+                p.setLabel("left", "Amp" if key == "amp" else "Phase (deg)")
+                p.getAxis("left").setWidth(LEFT_AXIS_WIDTH)
+                p.showGrid(x=True, y=True, alpha=0.15)
+                if key == "amp":
+                    p.setTitle(f"{names[a]}-{names[b]}", size="10pt", color="#222")
+                else:
+                    p.setYRange(-180, 180)
+                y = d[key]
+                for band in range(self.obs.nif):
+                    m = good & (d["if_index"] == band)
+                    if not m.any():
+                        continue
+                    col = colors[band % len(colors)]
+                    p.addItem(pg.PlotDataItem(
+                        freq[m], y[m], pen=pg.mkPen(*col, width=1.2),
+                        symbol="o", symbolSize=5, symbolPen=None,
+                        symbolBrush=pg.mkBrush(*col, 220),
+                    ))
+                    if key == "amp":
+                        nplotted += int(m.sum())
+                if key == "amp":
+                    self._plots[-1] = (p, self._set_amp_range(p, y[good]))
+                    # The frequency ticks go under the phase panel only.
+                    p.getAxis("bottom").setStyle(showValues=False)
+                else:
+                    p.setLabel("bottom", "Frequency (GHz)")
+                pair.append(p)
+            groups.append(pair)
+        # Every baseline has the same channels: one frequency axis.
+        plots = [p for p, _ in self._plots]
+        for p in plots[1:]:
+            p.setXLink(plots[0])
+        for pair in groups:
+            frame_panels(pair)
+        self.reset_ranges("x")
+        window = (
+            "the whole observation" if self.tmin is None and self.tmax is None
+            else f"{(self.tmin or 0) / 3600.0:.3g}-{(self.tmax or 0) / 3600.0:.3g} h"
+        )
+        cal = "calibrated" if self.calibrated else "as loaded"
+        self.statusBar().showMessage(
+            f"page {self.page + 1}/{self.npages} of {len(self._items)} baselines "
+            f"| vector-averaged over {window} ({cal}), {nplotted} channels drawn "
+            "| n/p: page | h: help"
+        )
+
+    def key_help(self):
+        return super().key_help() + [
+            ("", "amplitude and phase of the vector average over time"),
+            ("", "colours are the IFs, in order"),
+        ]
+
+
 def cpplot(obs, triangles=None, if_index=None, nplot=4, block=None):
+    """Closure phases against time, with the model overplotted (difmap `cpplot`), `nplot` triangles to a page.
+
+    Parameters
+    ----------
+    obs : Observation
+        The observation to plot.
+    triangles : list of tuple of str | None, default None
+        The triangles to show, as triples of station names; ``None`` shows every closed triangle.
+    if_index : int | None, default None
+        One IF (0-based); ``None`` shows each.
+    nplot : int, default 4
+        Triangles per page.
+    block : bool | None, default None
+        Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+    Returns
+    -------
+    PlotWindow
+        The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+    """
     p = CpPlot(obs, triangles=triangles, if_index=if_index, nplot=nplot)
     run_if_needed(p, block)
     return p
 
 
 def tplot(obs, block=None):
+    """The time sampling of each antenna (difmap `tplot`): one row per station with a mark at every integration where it has unflagged data, in the primary colour when all of its baselines are unflagged and in the secondary colour when some are flagged.
+
+    Parameters
+    ----------
+    obs : Observation
+        The observation to plot.
+    block : bool | None, default None
+        Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+    Returns
+    -------
+    PlotWindow
+        The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+    """
     p = TPlot(obs)
     run_if_needed(p, block)
     return p
 
 
 def corplot(obs, quantity="both", nplot=3, block=None):
+    """The self-calibration gain corrections against time (difmap `corplot`): one antenna to a pair of panels, amplitude above and phase below on a shared time axis.
+
+    Parameters
+    ----------
+    obs : Observation
+        The observation to plot.
+    quantity : str, default "both"
+        "both", "amp" or "phase".
+    nplot : int, default 3
+        Antennas per page.
+    block : bool | None, default None
+        Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+    Returns
+    -------
+    PlotWindow
+        The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+    """
     p = CorPlot(obs, quantity=quantity, nplot=nplot)
     run_if_needed(p, block)
     return p
 
 
 def specplot(obs, baseline=None, tmin=None, tmax=None, xaxis="freq", block=None):
+    """The time-averaged spectrum of the selected polarization (difmap `specplot`), over every baseline or one.
+
+    Parameters
+    ----------
+    obs : Observation
+        The observation to plot.
+    baseline : tuple of str | None, default None
+        One baseline, as a pair of station names; ``None`` averages every baseline.
+    tmin : float | str | None, default None
+        Start of the averaging range: seconds, or a string with a unit; ``None``: from the start.
+    tmax : float | str | None, default None
+        End of the averaging range; ``None``: to the end.
+    xaxis : str, default "freq"
+        "freq" for frequency or "chan" for channel number.
+    block : bool | None, default None
+        Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+    Returns
+    -------
+    PlotWindow
+        The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+    """
     p = SpecPlot(obs, baseline=baseline, tmin=tmin, tmax=tmax, xaxis=xaxis)
+    run_if_needed(p, block)
+    return p
+
+
+def possm(obs, nplot=9, reftel=None, baselines=None, ncols=3, tmin=None,
+          tmax=None, calibrated=True, block=None):
+    """Vector-averaged amplitude and phase against frequency (AIPS POSSM), a grid of baselines to a page - 3 x 3 by default - each an amplitude panel above a phase panel. Every channel of every IF is vector-averaged over the whole observation (or `tmin`..`tmax`), so phase slopes and ripples across the band show, and decorrelate the amplitudes as POSSM does. ``n``/``p`` page through the baselines in the same order as `vplot`.
+
+    Parameters
+    ----------
+    obs : Observation
+        The observation to plot.
+    nplot : int, default 9
+        Baselines per page; 0 puts them all on one.
+    reftel : str | int | None, default None
+        Show only this station's baselines (a name, case-insensitive, or an antenna index).
+    baselines : list of tuple of str | None, default None
+        The baselines to show, as pairs of station names; ``None`` shows all.
+    ncols : int, default 3
+        Baselines per row of the grid.
+    tmin : float | str | None, default None
+        Start of the averaging range: seconds, or a string with a unit ("30min"); ``None``: from the start.
+    tmax : float | str | None, default None
+        End of the averaging range; ``None``: to the end.
+    calibrated : bool, default True
+        Apply the accumulated calibration; ``False`` shows the data as loaded.
+    block : bool | None, default None
+        Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+    Returns
+    -------
+    PlotWindow
+        The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+    """
+    p = PossmPlot(obs, nplot=nplot, reftel=reftel, baselines=baselines,
+                  ncols=ncols, tmin=tmin, tmax=tmax, calibrated=calibrated)
     run_if_needed(p, block)
     return p
 
 
 def fplot(obs, reftel=None, baselines=None, nplot=3, tmin=None, tmax=None,
           calibrated=True, block=None):
+    """Amplitude and phase against frequency, one baseline to a pair of panels, averaged over time. Amplitudes are scalar-averaged, so they do not decorrelate, and phases vector-averaged. `possm()` shows the vector average of both, on a grid of baselines; `specplot()` averages every baseline at once.
+
+    Parameters
+    ----------
+    obs : Observation
+        The observation to plot.
+    reftel : str | int | None, default None
+        Show only this station's baselines.
+    baselines : list of tuple of str | None, default None
+        The baselines to show, as pairs of station names; ``None`` shows all.
+    nplot : int, default 3
+        Baselines per page.
+    tmin : float | str | None, default None
+        Start of the averaging range: seconds, or a string with a unit ("30min"); ``None``: from the start.
+    tmax : float | str | None, default None
+        End of the averaging range; ``None``: to the end.
+    calibrated : bool, default True
+        Apply the accumulated calibration; ``False`` shows the data as loaded.
+    block : bool | None, default None
+        Wait until the window is closed. ``None`` blocks only when nothing else runs the Qt event loop: a plain script blocks, an IPython or Jupyter session does not.
+
+    Returns
+    -------
+    PlotWindow
+        The plot window, for `savefig`, `to_png` or further calls; in a notebook (or with no display) the plot is drawn off-screen and shown inline.
+    """
     p = FPlot(obs, reftel=reftel, baselines=baselines, nplot=nplot,
               tmin=tmin, tmax=tmax, calibrated=calibrated)
     run_if_needed(p, block)

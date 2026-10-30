@@ -6,7 +6,7 @@ amplitude scale is wrong has already pulled the model towards its error.
 `bayes_gscale` breaks that circle and puts error bars on the result.
 
 ```python
-r = obs.bayes_gscale(prefix="3C345_bayes")  # runs, applies, writes the report
+r = obs.bayes_gscale(prefix="3C345_bayes", quiet=False)  # runs, applies, writes the report
 print(r)                                    # the summary again
 r.plot()                                    # the diagnostic figure
 r.factors                                   # [IF, station] corrections applied
@@ -28,7 +28,7 @@ r.factors                                   # [IF, station] corrections applied
     constrains, and the data cannot tell the two apart.
 
 2.  **Compare source models.** The same is done for several model
-    families - by default CLEAN and one to three Gaussians - and the
+    families - by default one to three Gaussians - and the
     full-array runs are weighed against each other by the Bayesian
     information criterion, with the chi-squared rescaled by the best
     model's reduced chi-squared (VLBI weights are rarely absolute). The
@@ -95,9 +95,12 @@ With `prefix`:
 ## Options worth knowing
 
 `models`
-:   The source models to compare: `"clean"` (`"clean500"` for 500
-    iterations a round), `"gaussN"`, `"pointN"`, and `"current"` for the
-    model already in the observation.
+:   The source models to compare: `"gaussN"`, `"pointN"`, `"clean"`
+    (`"clean500"` for 500 iterations a round), and `"current"` for the
+    model already in the observation. The default is
+    `("gauss1", "gauss2", "gauss3")`: CLEAN is left out because the
+    comparison often favoured it where it should not have, so add it
+    explicitly if you want it weighed too.
 
 `prior_sigma`
 :   How well you trust the a-priori amplitude calibration.

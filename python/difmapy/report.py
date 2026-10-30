@@ -1,14 +1,8 @@
 """Writing command results out as JSON.
 
-Every difmapy command that returns a dict of numbers takes an
-``outfile=`` argument; the result is written there as JSON as well as
-returned, so a scripted run can keep its numbers without repeating the
-structure by hand.
+Every difmapy command that returns a dict of numbers takes an ``outfile=`` argument; the result is written there as JSON as well as returned, so a scripted run can keep its numbers without repeating the structure by hand.
 
-Numpy scalars and arrays are converted on the way out, and anything
-that has no JSON form at all (a complex number, an unexpected object)
-is written as a string rather than aborting a run that has already done
-the expensive part.
+Numpy scalars and arrays are converted on the way out, and anything that has no JSON form at all (a complex number, an unexpected object) is written as a string rather than aborting a run that has already done the expensive part.
 """
 
 from __future__ import annotations
@@ -24,10 +18,7 @@ __all__ = ["to_jsonable", "write_json"]
 def to_jsonable(obj):
     """`obj` rebuilt out of types `json` can write.
 
-    Arrays become lists, numpy scalars become Python numbers, and
-    non-finite floats - which JSON has no syntax for - become null,
-    since a NaN in a report means "no solution" and null says that in
-    every language that will read the file.
+    Arrays become lists, numpy scalars become Python numbers, and non-finite floats - which JSON has no syntax for - become null, since a NaN in a report means "no solution" and null says that in every language that will read the file.
     """
     if isinstance(obj, dict):
         return {str(k): to_jsonable(v) for k, v in obj.items()}

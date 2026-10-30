@@ -84,7 +84,7 @@ def test_resoff_and_clroff(obs):
     obs.addcmp(FLUX, X0_MAS, Y0_MAS)
     obs.invert()
     rms0 = obs.imstat()["rms"]
-    n = obs.resoff()
+    n = obs.resoff(quiet=False)
     assert n == len(obs.baseline_corrections()) * obs.nif
     # Corrections were recorded and the fit improved (or stayed perfect).
     obs.invert()
@@ -117,7 +117,7 @@ def test_resoff_corrects_baseline_error(uvfits_file):
 def test_startmod(uvfits_file):
     o = difmapy.load(uvfits_file)
     o.select("I")
-    res = o.startmod(flux=FLUX)
+    res = o.startmod(flux=FLUX, quiet=False)
     assert res["nbadsol"] == 0
     # The starting model is discarded afterwards.
     assert o.model == []
@@ -167,7 +167,7 @@ def test_uvaver_keeps_integrations_intact(obs):
     # Self-cal on the averaged data solves per integration, not per row
     # (nbins counts solution bins per subarray and IF).
     avg.addcmp(FLUX, X0_MAS, Y0_MAS)
-    res = avg.selfcal(phase=True)
+    res = avg.selfcal(phase=True, quiet=False)
     assert res["nbins"] == avg._core.ntimes * avg.nif
 
 
@@ -280,7 +280,7 @@ def test_real_data_resoff_reduces_residuals():
     o.addcmp(s["max"], px - 512, py - 512)
     o.invert()
     rms0 = o.imstat()["rms"]
-    n = o.resoff()
+    n = o.resoff(quiet=False)
     assert n > 0
     o.invert()
     # Baseline corrections absorb non-closing errors: residuals drop.
@@ -302,14 +302,14 @@ def test_outfile_writes_the_result_as_json(obs, tmp_path):
     obs.addcmp(FLUX, X0_MAS, Y0_MAS, free=["flux", "pos"])
 
     calls = {
-        "invert": lambda f: obs.invert(outfile=f),
+        "invert": lambda f: obs.invert(outfile=f, quiet=False),
         "imstat": lambda f: obs.imstat(outfile=f),
         "noise_stats": lambda f: obs.noise_stats(outfile=f),
         "moddif": lambda f: obs.moddif(outfile=f),
         "mapinfo": lambda f: obs.mapinfo(outfile=f),
-        "clean": lambda f: obs.clean(50, 0.05, quiet=True, outfile=f),
-        "selfcal": lambda f: obs.selfcal(phase=True, quiet=True, outfile=f),
-        "gscale": lambda f: obs.gscale(quiet=True, outfile=f),
+        "clean": lambda f: obs.clean(50, 0.05, quiet=False, verbose=False, outfile=f),
+        "selfcal": lambda f: obs.selfcal(phase=True, quiet=False, verbose=False, outfile=f),
+        "gscale": lambda f: obs.gscale(quiet=False, verbose=False, outfile=f),
         "station_gains": lambda f: obs.station_gains(outfile=f),
         "spectrum": lambda f: obs.spectrum(outfile=f),
         "closure_phases": lambda f: obs.closure_phases(outfile=f),
@@ -330,7 +330,7 @@ def test_outfile_writes_the_result_as_json(obs, tmp_path):
 
     # modelfit's report includes arrays and NaN errors; both survive.
     path = tmp_path / "modelfit.json"
-    res = obs.modelfit(niter=5, quiet=True, outfile=str(path))
+    res = obs.modelfit(niter=5, quiet=False, verbose=False, outfile=str(path))
     d = json.loads(path.read_text())
     assert d["ncomp"] == res["ncomp"]
     assert len(d["components"]) == len(res["components"])
@@ -354,7 +354,7 @@ def test_outfile_json_is_readable_and_nan_becomes_null(obs, tmp_path):
     obs.addcmp(FLUX, X0_MAS, Y0_MAS)
     obs.ignore("AN0")            # leaves AN0 without a solution
     path = tmp_path / "gains.json"
-    res = obs.gscale(quiet=True, outfile=str(path))
+    res = obs.gscale(quiet=False, verbose=False, outfile=str(path))
     assert not np.isfinite(res["gains"]["AN0"])
     text = path.read_text()
     assert "NaN" not in text
@@ -373,7 +373,7 @@ def test_modelfit_prints_each_component(obs, capsys):
     density, position and size on lines of their own, with errors."""
     obs.addcmp(FLUX, X0_MAS + 0.1, Y0_MAS, type="gauss", major=1.0,
                free=["flux", "pos"])
-    res = obs.modelfit(niter=5)
+    res = obs.modelfit(niter=5, quiet=False)
     out = capsys.readouterr().out
     assert "reduced chi-squared" in out
     assert "\033" not in out            # captured output is not a terminal
@@ -392,7 +392,7 @@ def test_modelfit_prints_each_component(obs, capsys):
     assert size.endswith("1 mas FWHM (fixed)")
     assert res["components"][0]["major"] == pytest.approx(1.0)
 
-    assert obs.modelfit(niter=1, quiet=True) and capsys.readouterr().out == ""
+    assert obs.modelfit(niter=1, quiet=False, verbose=False) and capsys.readouterr().out == ""
 
 
 def test_modelfit_report_is_bold_only_where_it_shows(monkeypatch):
@@ -428,3 +428,61 @@ def test_load_can_average_in_time(uvfits_file):
                        np.asarray(avg._core.stream_vis()[0]))
     assert raw._core.ntimes == difmapy.load(uvfits_file, average=None)._core.ntimes
 
+
+
+def test_commands_return_nothing_unless_asked(obs, capsys):
+    """quiet=True, the default, keeps the prompt clean: a command prints
+    its report and returns None, so nothing is echoed under it.
+    quiet=False hands the result back; verbose=False silences the
+    report."""
+    assert obs.select("I") is None
+    assert obs.mapsize(NX, CELL) is None
+    assert obs.select("I", quiet=False) is obs     # chaining still works
+    capsys.readouterr()
+
+    assert obs.invert() is None
+    assert "invert:" in capsys.readouterr().out
+    obs.add_window(-8, 8, -8, 8)
+    assert obs.clean(50, 0.1) is None
+    assert "clean:" in capsys.readouterr().out
+    res = obs.clean(10, 0.1, quiet=False, verbose=False)
+    assert res["niter"] == 10 and capsys.readouterr().out == ""
+    assert obs.restore() is None
+    assert "restore:" in capsys.readouterr().out
+    assert obs.restore(quiet=False, verbose=False).shape == (NX, NX)
+    assert obs.selfcal() is None
+    assert "selfcal:" in capsys.readouterr().out
+    assert obs.header() is None
+    assert "Source:" in capsys.readouterr().out
+    assert obs.header(quiet=False, verbose=False).startswith("Source:")
+    assert obs.flag(station="AN4") is None
+    assert obs.unflag(station="AN4", quiet=False) > 0
+    # Queries are what they return.
+    assert set(obs.imstat()) >= {"rms", "max"}
+
+
+def test_filename_is_shown_in_the_mapplot_title(obs, uvfits_file):
+    """mapplot's title starts with the name of the file loaded, and so
+    does its window title; the name survives averaging and copy()."""
+    from difmapy.plots.mapplot import MapPlot
+
+    name = os.path.basename(uvfits_file)
+    assert obs.filename == name and obs.path == uvfits_file
+    assert obs.copy().filename == name
+    assert obs.uvaver(60).filename == name
+    p = MapPlot(obs, verbose=False)
+    assert p.plot.titleLabel.text.startswith(f"{name} — Residual map")
+    assert name in p.windowTitle()
+    p.close()
+
+
+def test_station_names_are_case_insensitive_in_plots(obs):
+    from difmapy.plots.diagnostics import FPlot
+    from difmapy.plots.points import VPlot
+
+    v = VPlot(obs, 3, "an1")
+    assert v.reftel == obs.antennas.index("AN1")
+    v.close()
+    f = FPlot(obs, reftel="an1")
+    assert all(1 in bl for bl in f._items)
+    f.close()

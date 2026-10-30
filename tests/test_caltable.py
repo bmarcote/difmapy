@@ -50,7 +50,7 @@ def ms(tmp_path):
 def test_table_is_valid_for_casa(ms, tmp_path):
     o = _calibrated(ms)
     out = str(tmp_path / "cal.G")
-    info = o.savecaltable(out, quiet=True)
+    info = o.savecaltable(out, quiet=False, verbose=False)
 
     assert os.path.isdir(out)
     assert info["nrows"] == o._core.ntimes * o.nif * len(o.antennas)
@@ -84,7 +84,7 @@ def test_applycal_reproduces_difmapy_visibilities(ms, tmp_path):
     shows, which is only true if the reciprocal convention is right."""
     o = _calibrated(ms, amp=True, solint=30)
     out = str(tmp_path / "cal.G")
-    o.savecaltable(out, quiet=True)
+    o.savecaltable(out, quiet=False, verbose=False)
     casatasks.applycal(vis=ms, gaintable=[out], interp=["nearest"],
                        calwt=False, applymode="calonly", flagbackup=False)
 
@@ -118,7 +118,7 @@ def test_gains_actually_needed_to_match(ms, tmp_path):
     CORRECTED_DATA would *not* match difmapy."""
     o = _calibrated(ms)
     out = str(tmp_path / "cal.G")
-    o.savecaltable(out, quiet=True)
+    o.savecaltable(out, quiet=False, verbose=False)
     # Reset CORRECTED_DATA to the raw data, i.e. apply nothing.
     casatasks.clearcal(vis=ms, addmodel=False)
     mine, wt = (np.asarray(x) for x in o._core.calibrated_cube())
@@ -144,7 +144,7 @@ def test_apply_to_a_different_ms(ms, tmp_path):
     shutil.copytree(SRC_MS, other)
     o = _calibrated(ms)
     out = str(tmp_path / "cal.G")
-    o.savecaltable(out, ms=other, quiet=True)
+    o.savecaltable(out, ms=other, quiet=False, verbose=False)
     casatasks.applycal(vis=other, gaintable=[out], interp=["nearest"],
                        calwt=False, applymode="calonly", flagbackup=False)
 
@@ -167,7 +167,7 @@ def test_phase_only_and_amp_only(ms, tmp_path):
     o.mapsize(1024, 1.0)
     o.startmod(flux=1.0)  # phase self-cal only
     out = str(tmp_path / "ph.G")
-    o.savecaltable(out, quiet=True)
+    o.savecaltable(out, quiet=False, verbose=False)
     tb = casatools.table()
     tb.open(out)
     try:
@@ -183,7 +183,7 @@ def test_phase_only_and_amp_only(ms, tmp_path):
     o2.addcmp(1.0, 0.0, 0.0)
     o2.gscale()
     out2 = str(tmp_path / "amp.G")
-    o2.savecaltable(out2, quiet=True)
+    o2.savecaltable(out2, quiet=False, verbose=False)
     tb.open(out2)
     try:
         g2 = tb.getcol("CPARAM")[0, 0]
@@ -207,7 +207,7 @@ def test_reciprocal_convention_explicitly(ms, tmp_path):
     """CPARAM must be the reciprocal of difmapy's correction."""
     o = _calibrated(ms)
     out = str(tmp_path / "cal.G")
-    o.savecaltable(out, quiet=True)
+    o.savecaltable(out, quiet=False, verbose=False)
     amp, phs, _ = (np.asarray(x) for x in o._core.gains())
     nant, nif, nt = len(o.antennas), o.nif, o._core.ntimes
     corr = (amp * np.exp(1j * phs)).reshape(nt, nif, nant)
@@ -235,15 +235,15 @@ def test_incremental_tables_compose(ms, tmp_path):
     # Round 1, then a snapshot, then round 2.
     o.selfcal(phase=True)
     t1 = str(tmp_path / "round1.G")
-    o.savecaltable(t1, quiet=True)
+    o.savecaltable(t1, quiet=False, verbose=False)
     mark = o.gain_snapshot()
     o.clean(200, 0.03)
     o.selfcal(amp=True, phase=True, solint=30)
 
     t2 = str(tmp_path / "round2.G")  # increment only
-    o.savecaltable(t2, quiet=True, since=mark)
+    o.savecaltable(t2, quiet=False, verbose=False, since=mark)
     cum = str(tmp_path / "cumulative.G")
-    o.savecaltable(cum, quiet=True)
+    o.savecaltable(cum, quiet=False, verbose=False)
 
     # The increment must differ from the cumulative table...
     tb = casatools.table()
@@ -296,14 +296,14 @@ def test_snapshot_shape_is_checked(ms, tmp_path):
     mark = o.gain_snapshot()
     mark["amp"] = mark["amp"][:, :, :-1]  # wrong shape
     with pytest.raises(ValueError, match="does not match"):
-        o.savecaltable(str(tmp_path / "x.G"), since=mark, quiet=True)
+        o.savecaltable(str(tmp_path / "x.G"), since=mark, quiet=False, verbose=False)
 
 
 def test_warns_about_resoff_and_shift(ms, tmp_path):
     o = _calibrated(ms)
     o.resoff()
     o.shift(3.0, -2.0)
-    info = o.savecaltable(str(tmp_path / "cal.G"), quiet=True)
+    info = o.savecaltable(str(tmp_path / "cal.G"), quiet=False, verbose=False)
     joined = " ".join(info["warnings"])
     assert "baseline-based" in joined
     assert "phase-centre shift" in joined
@@ -315,10 +315,10 @@ def test_warns_about_resoff_and_shift(ms, tmp_path):
 def test_flag_uncalibrated_option(ms, tmp_path):
     o = difmapy.load(ms)
     o.select("I")
-    plain = o.savecaltable(str(tmp_path / "a.G"), quiet=True)
+    plain = o.savecaltable(str(tmp_path / "a.G"), quiet=False, verbose=False)
     assert plain["nflagged"] == 0  # nothing solved, nothing flagged
     flagged = o.savecaltable(str(tmp_path / "b.G"), flag_uncalibrated=True,
-                             quiet=True)
+                             quiet=False, verbose=False)
     assert flagged["nflagged"] == flagged["nrows"]
 
 
@@ -329,9 +329,9 @@ def test_requires_a_measurement_set(tmp_path):
     o = difmapy.load(UVF)
     o.select("I")
     with pytest.raises(ValueError, match="Measurement Set is needed"):
-        o.savecaltable(str(tmp_path / "x.G"), outformat="CASA", quiet=True)
+        o.savecaltable(str(tmp_path / "x.G"), outformat="CASA", quiet=False, verbose=False)
     # With a reference MS it works: antennas are matched by name.
-    info = o.savecaltable(str(tmp_path / "y.G"), ms=SRC_MS, quiet=True)
+    info = o.savecaltable(str(tmp_path / "y.G"), ms=SRC_MS, quiet=False, verbose=False)
     assert info["nrows"] > 0
     tb = casatools.table()
     tb.open(info["path"])
@@ -356,4 +356,4 @@ def test_unknown_antenna_is_reported(ms, tmp_path):
     finally:
         tb.close()
     with pytest.raises(ValueError, match="not in .*ANTENNA"):
-        o.savecaltable(str(tmp_path / "z.G"), quiet=True)
+        o.savecaltable(str(tmp_path / "z.G"), quiet=False, verbose=False)

@@ -1,17 +1,10 @@
 """Parsing of unit-bearing arguments.
 
-Every difmapy argument that carries a time accepts a string with its
-unit - ``"30s"``, ``"30 s"``, ``"1min"``, ``"1.5 hours"`` - as well as a
-plain number in the argument's own base unit. Solution intervals also
-accept ``"scan"`` and ``"Nscan"``, which bin by whole scans rather than
-by a fixed duration.
+Every difmapy argument that carries a time accepts a string with its unit - ``"30s"``, ``"30 s"``, ``"1min"``, ``"1.5 hours"`` - as well as a plain number in the argument's own base unit. Solution intervals also accept ``"scan"`` and ``"Nscan"``, which bin by whole scans rather than by a fixed duration.
 
-Plain numbers keep the unit each argument has always had (minutes for
-`selfcal`'s solint, seconds for time ranges), so existing code and
-scripts are unaffected; a string is how you say something else.
+Plain numbers keep the unit each argument has always had (minutes for `selfcal`'s solint, seconds for time ranges), so existing code and scripts are unaffected; a string is how you say something else.
 
-The other direction - a number with its uncertainty and unit, as a
-report prints it - is `format_value` and `format_flux`.
+The other direction - a number with its uncertainty and unit, as a report prints it - is `format_value` and `format_flux`.
 """
 
 from __future__ import annotations
@@ -19,8 +12,9 @@ from __future__ import annotations
 import math
 import re
 
-__all__ = ["TIME_UNITS", "FLUX_UNITS", "parse_time", "parse_interval",
-           "format_interval", "flux_unit", "format_value", "format_flux"]
+__all__ = ["TIME_UNITS", "FLUX_UNITS", "UV_UNITS", "parse_time", "parse_interval",
+           "format_interval", "parse_uvdist", "format_uvdist", "flux_unit", "format_value",
+           "format_flux"]
 
 #: Recognised time units and their length in seconds.
 TIME_UNITS = {
@@ -59,13 +53,56 @@ def _bad(text, scans=False):
                                                 else "") + f" (units: {units})")
 
 
+#: UV-distance prefixes and the number of wavelengths each stands for. A trailing "l", "lambda" or "λ" is optional ("50M" = "50 Mλ" = "50 Mlambda"); case does not matter, so "m" is mega, not milli - a milli-wavelength is no UV distance.
+UV_UNITS = {"": 1.0, "k": 1e3, "m": 1e6, "g": 1e9}
+
+# A number followed by an optional prefix (k, M, G) and an optional
+# "l"/"lambda"/"λ".
+_UV_SPEC = re.compile(
+    r"^\s*(?P<num>[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*"
+    r"(?P<prefix>[kKmMgG]?)\s*(?P<lam>l|lambda|λ|wl|wavelengths?)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_uvdist(value, default="M") -> float:
+    """A UV distance in wavelengths, from a number or a string with a unit.
+
+    A number is taken to be in `default` - mega-wavelengths unless told otherwise (``"k"`` for kilo-, ``""`` or ``"lambda"`` for wavelengths). A string carries its own unit: a prefix k, M or G, optionally followed by "l", "lambda" or "λ"; a bare number in a string means `default` again. None gives None.
+
+        parse_uvdist(50)            -> 5e7
+        parse_uvdist("50M")         -> 5e7
+        parse_uvdist("500 klambda") -> 5e5
+        parse_uvdist("2e6 lambda")  -> 2e6
+        parse_uvdist(5e7, "")       -> 5e7
+    """
+    if value is None:
+        return None
+    unit = str(default).lower().rstrip("λ").replace("lambda", "")
+    if unit not in UV_UNITS:
+        raise ValueError(f"unknown default UV unit {default!r}; use 'k', 'M', 'G' or ''")
+    if isinstance(value, str):
+        m = _UV_SPEC.match(value)
+        if m is None:
+            raise ValueError(f"cannot read {value!r} as a UV distance; write a number with an optional unit, "
+                             "e.g. '50', '50M', '500k', '2e6 lambda' (a bare number is in M-lambda)")
+        num = float(m.group("num"))
+        if m.group("prefix"):
+            return num * UV_UNITS[m.group("prefix").lower()]
+        # A bare "lambda" means wavelengths; a bare number, the default.
+        return num * (1.0 if m.group("lam") else UV_UNITS[unit])
+    return float(value) * UV_UNITS[unit]
+
+
+def format_uvdist(wavelengths) -> str:
+    """A UV distance as a short string in M-lambda, the unit `parse_uvdist` reads by default (``5e7`` -> ``"50"``)."""
+    return f"{float(wavelengths) / 1e6:g}"
+
+
 def parse_time(value, default="s") -> float:
     """`value` in seconds, from a number or a string with a unit.
 
-    A number is taken to be in `default` (seconds unless told
-    otherwise), which is the unit that argument has always had; a
-    string must carry its own unit, or be a bare number meaning
-    `default` again.
+    A number is taken to be in `default` (seconds unless told otherwise), which is the unit that argument has always had; a string must carry its own unit, or be a bare number meaning `default` again.
 
         parse_time(30)         -> 30.0        seconds
         parse_time("30s")      -> 30.0
@@ -92,9 +129,7 @@ def parse_time(value, default="s") -> float:
 def parse_interval(value, default="s"):
     """A solution interval, as ``(seconds, nscan)``.
 
-    Exactly one of the two is set: `nscan` counts whole scans for the
-    scan-based forms ("scan", "2scan"), where the interval is not a
-    duration at all, and is 0 otherwise.
+    Exactly one of the two is set: `nscan` counts whole scans for the scan-based forms ("scan", "2scan"), where the interval is not a duration at all, and is 0 otherwise.
 
         parse_interval(0, "min")        -> (0.0, 0)   per integration
         parse_interval(30, "min")       -> (1800.0, 0)
@@ -135,10 +170,7 @@ def format_interval(seconds, nscan) -> str:
 def format_value(value, err=None, unit="") -> str:
     """``value ± err unit``, as a report prints a measurement.
 
-    The uncertainty is given to two significant figures and the value
-    to the same decimal place. With no uncertainty (None, or the NaN of
-    a parameter that was not fitted) the value stands alone, to four
-    significant figures.
+    The uncertainty is given to two significant figures and the value to the same decimal place. With no uncertainty (None, or the NaN of a parameter that was not fitted) the value stands alone, to four significant figures.
 
         format_value(12.3456, 0.0421, "mas")  -> "12.346 ± 0.042 mas"
         format_value(-41.27, 3.6, "deg")      -> "-41.3 ± 3.6 deg"
@@ -160,8 +192,7 @@ def format_value(value, err=None, unit="") -> str:
 
 
 def flux_unit(jy):
-    """The unit a flux density of `jy` Jy reads best in, as ``(name,
-    size in Jy)``: whichever of Jy, mJy and µJy puts it between 0.1 and
+    """The unit a flux density of `jy` Jy reads best in, as ``(name, size in Jy)``: whichever of Jy, mJy and µJy puts it between 0.1 and
     100. Outside what those cover it is the nearest one - Jy above
     100 Jy, µJy below 0.1 µJy - and Jy for zero.
     """
@@ -175,8 +206,7 @@ def flux_unit(jy):
 
 
 def format_flux(jy, err=None) -> str:
-    """A flux density in Jy, with its uncertainty if there is one, in
-    the unit `flux_unit` picks for it; both are put in that unit.
+    """A flux density in Jy, with its uncertainty if there is one, in the unit `flux_unit` picks for it; both are put in that unit.
 
         format_flux(1.5021, 0.0034)   -> "1.5021 ± 0.0034 Jy"
         format_flux(0.0123, 0.0004)   -> "12.30 ± 0.40 mJy"

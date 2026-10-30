@@ -9,7 +9,9 @@ obs.mapplot(what="clean", cmap="grey", scale="log")
 `mapsize` (pixels), `cellsize` (mas) and `uvweight` (a Briggs
 robustness) override the current imaging setup. With none given and
 `mapsize()` never called, the window images 4096 pixels of a tenth of
-the estimated resolution, and prints the beam it is showing.
+the estimated resolution, and prints the beam it is showing
+(`verbose=False` prints nothing). The title over the image names the
+file the data came from (`obs.filename`), then the image shown.
 
 ![The restored map with contours](../images/mapplot_color.png){ loading=lazy }
 
@@ -70,6 +72,13 @@ The "Weighting" box above the image switches between Difmap's own
 `uvweight` scheme and Briggs robust -2, -1, 0, +1, +2, and re-images
 straight away. The choice stays set after the window closes, as a call
 to `uvweight()` would leave it.
+
+Beside it, the **UV range** (min, max) and **Taper** (value, radius)
+fields set [`uvrange` and `uvtaper`](imaging.md#taper-and-uv-range) -
+M-lambda, or a number with a unit such as `500k` - and re-image when
+Enter is pressed; an empty field means no limit or no taper. They show
+whatever is in effect, also when it was set at the prompt.
+`mapplot(uvrange=(5, 100), uvtaper=(0.5, 20))` sets both on opening.
 
 ## Placing and fitting components
 
