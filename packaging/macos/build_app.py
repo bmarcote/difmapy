@@ -139,13 +139,36 @@ def make_icon(dest: Path):
     return dest
 
 
-def write_plist(contents: Path, version: str, min_macos="13.0"):
+#: The app icon, made in Icon Composer (layers in packaging/macos/icon/).
+ICON = HERE / "icon" / "macos-icon.icon"
+
+
+def compile_icon(resources: Path) -> dict:
+    """Compile the Icon Composer icon (`ICON`) with actool into ``Assets.car`` (the Liquid Glass icon of macOS 26+) and an ``.icns`` for older systems. Returns the Info.plist keys naming it, or {} if there is no icon or no actool (then `make_icon` draws one)."""
+    if not ICON.exists() or shutil.which("xcrun") is None:
+        return {}
+    with tempfile.TemporaryDirectory() as tmp:
+        partial = Path(tmp) / "partial.plist"
+        r = subprocess.run(["xcrun", "actool", str(ICON), "--compile", str(resources),
+                            "--app-icon", ICON.stem, "--platform", "macosx", "--target-device", "mac",
+                            "--minimum-deployment-target", "12.0",
+                            "--output-partial-info-plist", str(partial)],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not partial.exists():
+            print(f"actool could not compile {ICON.name}; drawing the icon instead\n{r.stdout}{r.stderr}")
+            return {}
+        with open(partial, "rb") as f:
+            return plistlib.load(f)
+
+
+def write_plist(contents: Path, version: str, min_macos="13.0", icon_keys=None):
     plist = {
         "CFBundleName": "difmapy",
         "CFBundleDisplayName": "difmapy",
         "CFBundleIdentifier": BUNDLE_ID,
         "CFBundleExecutable": "difmapy",
         "CFBundleIconFile": "difmapy.icns",
+        **(icon_keys or {}),
         "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": version,
         "CFBundleVersion": version,
@@ -219,9 +242,11 @@ def main(argv=None) -> int:
     install_difmapy(site, version)
     build_launcher(contents, python)
     write_command(contents)
-    make_icon(contents / "Resources" / "difmapy.icns")
+    icon_keys = compile_icon(contents / "Resources")
+    if not icon_keys:
+        make_icon(contents / "Resources" / "difmapy.icns")
     # casatools' macOS wheels need macOS 15; without it, PySide6's 13.
-    write_plist(contents, version, min_macos="13.0" if args.no_ms else "15.0")
+    write_plist(contents, version, min_macos="13.0" if args.no_ms else "15.0", icon_keys=icon_keys)
     sign(app, args.sign)
     size = subprocess.run(["du", "-sh", str(app)], capture_output=True, text=True).stdout.split()[0]
     print(f"built {app} ({size})")
