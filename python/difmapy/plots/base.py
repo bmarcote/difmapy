@@ -140,6 +140,24 @@ def ensure_app():
             # all a headless pipeline can use anyway.
             os.environ["QT_QPA_PLATFORM"] = "offscreen"
         app = pg.mkQApp("difmapy")
+        from difmapy.plots import style
+
+        # pyqtgraph puts every Qt 6 application on the Fusion style and
+        # its own icon. Fusion is the base the web-like style sheet is
+        # drawn on (GNU/Linux, and the terminal on macOS); in the macOS
+        # app the platform style goes back, for its native (Liquid Glass)
+        # controls.
+        if style.native_controls() and app.platformName() == "cocoa" \
+                and "macos" in [k.lower() for k in QtWidgets.QStyleFactory.keys()]:
+            app.setStyle("macos")
+        # The base style, by name: once a style sheet is installed,
+        # app.style() is Qt's sheet wrapper and has none.
+        app.setProperty("difmapy_base_style", app.style().name())
+        style.apply(app)
+        if app.platformName() not in ("offscreen", "minimal"):
+            from difmapy.plots.icon import app_icon
+
+            app.setWindowIcon(app_icon())
     return app
 
 
@@ -1017,9 +1035,8 @@ class FlagPlotBase(PlotWindow):
         axes = {"left": FluxAxis()} if key == "amp" else None
         plot = self.glw.addPlot(row=row, col=0, viewBox=vb, axisItems=axes)
         plot.setLabel("left", ylabel or self.QUANTITIES.get(key, key))
-        plot.showGrid(x=True, y=True, alpha=0.15)
         if key == "phase":
-            plot.setYRange(-180, 180)
+            plot.setYRange(-180, 180, padding=0)
         panel = Panel(key, plot, vb, group=group, label=label or "")
         vb.panel = panel
         vb.sigSelected.connect(
@@ -1378,8 +1395,8 @@ class TimeGaps:
 class TimeGapAxis(pg.AxisItem):
     """A bottom axis over `TimeGaps` coordinates, labelled with the real times; ticks that land in a cut are left unlabelled."""
 
-    def __init__(self, gaps, **kwargs):
-        super().__init__(orientation="bottom", **kwargs)
+    def __init__(self, gaps, orientation="bottom", **kwargs):
+        super().__init__(orientation=orientation, **kwargs)
         self.gaps = gaps
 
     def tickValues(self, minVal, maxVal, size):
@@ -1412,34 +1429,55 @@ class TimeGapAxis(pg.AxisItem):
 BREAK_BRUSH = (120, 120, 120, 45)
 
 
-def frame_panels(plots, color=FRAME_COLOR, width=FRAME_WIDTH):
-    """Draw a heavy frame round a stack of panels that belong together - the amplitude and phase panels of one baseline - so that a page of several reads as distinct baselines at a glance.
+#: Length of the ticks, in pixels; negative points them into the plot.
+TICK_LENGTH = -7
 
-    `plots` are the PlotItems of the group, top to bottom. The frame is made of their axis lines: both y axes of every panel, the top axis of the first and the bottom axis of the last; the line between two panels of the group stays thin. Ticks, grid lines and tick labels keep their normal pens.
+
+def frame_panels(plots, color=FRAME_COLOR, width=FRAME_WIDTH, yticks=True):
+    """Give a stack of panels that belong together - the amplitude and phase panels of one baseline, or a single plot - the look every difmapy plot shares: a heavy outer frame, no grid, and ticks, major and minor, pointing inwards on all four sides (the top and right ones mirroring the bottom and left, without labels).
+
+    `plots` are the PlotItems of the group, top to bottom. The frame is made of their axis lines: both y axes of every panel, the top axis of the first and the bottom axis of the last; the line between two panels of the group stays thin. Every panel gets a label-less right axis of `RIGHT_AXIS_WIDTH`, so that the plot areas of a page keep the same width.
+
+    Parameters
+    ----------
+    plots : list of pyqtgraph.PlotItem
+        The panels, top to bottom.
+    color : tuple, default FRAME_COLOR
+        RGB of the frame and the ticks.
+    width : float, default FRAME_WIDTH
+        Width of the frame lines, in pixels.
+    yticks : bool, default True
+        Ticks on the y axes; tplot, whose y axis is a list of stations, has none.
     """
     if not plots:
         return
-    pen = pg.mkPen(*color, width=width)
+    heavy = pg.mkPen(*color, width=width)
+    thin = pg.mkPen(*color, width=1)
+    tick = pg.mkPen(*color, width=1)
 
-    def heavy(axis):
-        thin, text = axis.tickPen(), axis.textPen()
-        axis.setPen(pen)
-        axis.setTickPen(thin)
+    def dress(axis, outline, ticks=True):
+        text = axis.textPen()
+        axis.setPen(heavy if outline else thin)
+        axis.setTickPen(tick)
         axis.setTextPen(text)
+        axis.setStyle(tickLength=TICK_LENGTH if ticks else 0)
 
-    for plot in plots:
+    last = len(plots) - 1
+    for i, plot in enumerate(plots):
+        plot.showGrid(x=False, y=False)
         plot.showAxis("right")
         right = plot.getAxis("right")
-        right.setStyle(showValues=False, tickLength=0)
+        right.setStyle(showValues=False)
         right.setWidth(RIGHT_AXIS_WIDTH)
-        heavy(right)
-        heavy(plot.getAxis("left"))
-    plots[0].showAxis("top")
-    top = plots[0].getAxis("top")
-    top.setStyle(showValues=False, tickLength=0)
-    top.setHeight(RIGHT_AXIS_WIDTH)
-    heavy(top)
-    heavy(plots[-1].getAxis("bottom"))
+        dress(right, True, yticks)
+        dress(plot.getAxis("left"), True, yticks)
+        if i == 0:
+            plot.showAxis("top")
+            top = plot.getAxis("top")
+            top.setStyle(showValues=False)
+            top.setHeight(RIGHT_AXIS_WIDTH)
+            dress(top, True)
+        dress(plot.getAxis("bottom"), i == last)
 
 
 def install_time_axis(plot, gaps):
@@ -1450,7 +1488,10 @@ def install_time_axis(plot, gaps):
     old = plot.getAxis("bottom")
     label, grid = old.labelText, old.grid
     axis = TimeGapAxis(gaps)
-    plot.setAxisItems({"bottom": axis})
+    # The top axis cuts the same gaps, so its mirrored ticks (see
+    # `frame_panels`) fall where the bottom ones do.
+    plot.setAxisItems({"bottom": axis, "top": TimeGapAxis(gaps, orientation="top")})
+    plot.hideAxis("top")
     axis.setGrid(grid)
     if label:
         plot.setLabel("bottom", label)

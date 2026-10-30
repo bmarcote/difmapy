@@ -866,6 +866,7 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
     )
     if apply:
         fac = np.exp(np.where(np.isfinite(applied), applied, 0.0))
+        obs._forget_solution_flags()
         obs._core.apply_gain_factors(np.ascontiguousarray(fac, np.float32))
         obs._dirty()
         res.applied = True

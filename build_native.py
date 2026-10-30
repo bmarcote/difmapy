@@ -33,5 +33,26 @@ def build() -> Path:
     return target
 
 
+def build_glass(out=None) -> Path | None:
+    """macOS only: compile the window-glass helper (packaging/macos/glass.m) into python/difmapy/_glass.dylib, which difmapy.plots.macglass loads. Returns its path, or None elsewhere or without a compiler."""
+    if sys.platform != "darwin" or shutil.which("clang") is None:
+        return None
+    root = Path(__file__).resolve().parent
+    target = Path(out) if out else root / "python" / "difmapy" / "_glass.dylib"
+    with tempfile.NamedTemporaryFile(dir=target.parent, prefix="_glass-build-", delete=False) as handle:
+        staged = Path(handle.name)
+    try:
+        subprocess.run(["clang", "-fobjc-arc", "-dynamiclib", "-O2", "-mmacosx-version-min=11.0",
+                        "-framework", "AppKit", str(root / "packaging" / "macos" / "glass.m"),
+                        "-o", str(staged)], check=True)
+        os.replace(staged, target)
+    finally:
+        staged.unlink(missing_ok=True)
+    return target
+
+
 if __name__ == "__main__":
     print(build())
+    glass = build_glass()
+    if glass:
+        print(glass)

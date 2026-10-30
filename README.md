@@ -145,7 +145,7 @@ obs.fplot()                            # amp+phase vs frequency, time-averaged
 obs.possm()                            # AIPS POSSM: vector averages vs frequency, 3x3 baselines
 obs.tplot()                            # time sampling; orange = partly flagged
 obs.cpplot()                           # closure phases vs the model
-obs.corplot()                          # self-cal gains: amp+phase per antenna
+obs.corplot()                          # self-cal gains per antenna; shift+drag flags solutions
 
 info = obs.mapinfo()                   # beam, peak, model, residual noise
 obs.restore()                          # restored map, in obs.restored_map
@@ -768,7 +768,9 @@ page and three across (`nplot=`, `ncols=`), each an amplitude panel
 above a phase panel, both from the *vector* average over time, so a
 phase slope or ripple across the band shows and decorrelates the
 amplitudes too. `n`/`p` page in the same order as `vplot`, `reftel=`
-keeps one station's, and each baseline is framed as in `vplot`.
+keeps one station's, and each baseline is framed as in `vplot`. Only the
+left column has y labels and only the bottom row x labels, and the
+amplitude panels of a page share one scale.
 
 All of them draw on `obs.spectrum()`, which averages *all* channels - the
 unselected ones too, so it can be used to choose them - with the
@@ -786,14 +788,52 @@ interactive ones, embedded; whatever changes the data or the model in
 one - a flag edit, a CLEAN, a fit - reloads the others, as `r` would
 (plots in hidden tabs when they are next shown).
 
-**Main** loads a file (with optional `timeavg`/`freqavg`) and runs
-**Selfcal** (phase and/or amplitude, at a solution interval),
-**Gscale** (float scale on by default) and **Bayes** (`bayes_gscale`
-over the source models ticked; the Gaussians by default). **Output**
-shows everything the session prints, with buttons to save the restored
-and dirty maps, the dirty beam, the model, the visibilities, the
-calibration and flag tables, and the whole session. A file loaded from
-the dashboard becomes the prompt's `obs`.
+**Main** is a column of cards, each command's options under its
+button: **File...** (the platform's own open dialog: a UVFITS file, or a
+Measurement Set - entering its folder picks it) with optional
+`timeavg`/`freqavg` and **Load**; **Selfcal** (phase and/or amplitude,
+at a solution interval; by default converging with `modelfit`, as
+`selfcal(converge=True)`, when the model has components to fit),
+**Gscale** (float scale on by default) and
+**Bayes** (`bayes_gscale` over the source models ticked; the Gaussians
+by default); **UV range** and **Taper**. **Output** shows everything the
+session prints, and under **Save:** buttons for the restored and dirty
+maps, the dirty beam, the model, the visibilities, the calibration and
+flag tables, and the whole session. A file loaded from the dashboard
+becomes the prompt's `obs`. From a terminal (GNU/Linux or macOS) every
+difmapy window is drawn in a web-like style - a clean typeface, rounded
+fields with a focus ring, blue action buttons, underlined tabs, lighter
+field captions - following the system's light or dark appearance; the
+macOS app keeps the native controls (`$DIFMAPY_STYLE=web|native`
+overrides).
+
+### Editing self-calibration solutions
+
+`corplot()` edits solutions as `vplot` edits data (Shift+drag flags,
+Ctrl+drag restores, `f`/`F`, Ctrl+Z undo, `x` shows the flagged ones as
+red crosses), and so do `obs.flag_solutions(station, tmin, tmax,
+if_index)` / `obs.unflag_solutions(...)` from the prompt. A flagged
+solution is replaced by interpolating the remaining ones of its antenna
+and IF in time (amplitude linearly, phase through the unit phasor), and
+the data are re-calibrated from the raw visibilities at once - which are
+never modified, for Measurement Sets and UVFITS alike, so no copy is
+needed. With no solution left, the data behind it are flagged. A new
+`selfcal`/`gscale`/`uncalib` supersedes the edits.
+
+### The macOS app
+
+`python packaging/macos/build_app.py` builds `dist/difmapy.app` and a
+drag-to-Applications disk image, `dist/difmapy-<version>.dmg`. The app
+carries its own Python (a copy of uv's relocatable CPython with difmapy,
+PySide6-Essentials, casatools and the rest installed into it), opens
+the dashboard, and on first launch offers to link `/usr/local/bin/difmapy`
+to the `difmapy` command inside it (macOS asks for the password). Its
+main executable is a small launcher compiled against the current macOS
+SDK that embeds Python - macOS gives an app the Liquid Glass look of the
+SDK its main executable was built with. `--no-ms` leaves out casatools (and with it the macOS 15
+minimum); the default ad hoc signature runs on the Mac that built it,
+and `--sign "Developer ID Application: ..." --notarize <profile>` makes
+a disk image other Macs accept.
 
 ### The colour bar
 

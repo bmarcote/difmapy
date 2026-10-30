@@ -175,3 +175,103 @@ def test_cli_dashboard_rebinds_the_session(uvfits_file, scanned_uvfits_file):
     assert ns["obs"] is new
     assert ns["clean"].__self__ is new
     d.close()
+
+
+def test_file_button_opens_a_native_dialog_without_blocking(dash, tmp_path):
+    """File... opens the platform's dialog asynchronously (the static
+    helpers run a nested modal loop, which IPython's input hook on macOS
+    ends at once); a table.dat inside a Measurement Set, or entering the
+    MS folder, picks the MS."""
+    from pyqtgraph.Qt import QtWidgets
+
+    labels = {b.text() for b in dash.findChildren(QtWidgets.QPushButton)}
+    assert "File…" in labels and not labels & {"UVFITS...", "MS..."}
+    dlg = dash._browse()
+    assert dlg.isVisible() and not dlg.testOption(
+        QtWidgets.QFileDialog.Option.DontUseNativeDialog)
+    ms = tmp_path / "x.ms"
+    ms.mkdir()
+    (ms / "table.dat").write_bytes(b"")
+    dlg.fileSelected.emit(str(ms / "table.dat"))
+    assert dash.file_edit.text() == str(ms)
+    dash.file_edit.setText("")
+    dlg = dash._browse()
+    dlg.directoryEntered.emit(str(ms))
+    assert dash.file_edit.text() == str(ms) and not dlg.isVisible()
+
+
+def test_controls_are_cards_and_output_has_a_save_heading(dash):
+    from pyqtgraph.Qt import QtWidgets
+
+    cards = dash.tabs.findChildren(QtWidgets.QFrame, "card")
+    # data, selfcal, gscale, bayes, uv range, taper, and the save buttons
+    assert len(cards) == 7
+    for button in (dash.selfcal_button, dash.gscale_button, dash.bayes_button,
+                   dash.uvrange_button, dash.uvtaper_button):
+        card = button.parentWidget()
+        assert card.objectName() == "card"
+        # The button heads its card, the options are under it.
+        assert card.layout().itemAt(0).widget() is button
+    titles = [l.text() for l in dash.tabs.findChildren(QtWidgets.QLabel, "sectionTitle")]
+    assert "SAVE:" in titles
+    from pyqtgraph.Qt import QtWidgets as W
+
+    assert "QFrame#card" in W.QApplication.instance().styleSheet()   # styled
+    assert dash.map_panel.current_plot().uv_edits == {}
+
+
+def test_save_without_a_path_asks_with_a_native_dialog(dash, obs, tmp_path):
+    obs.addcmp(2.5, 4.0, -2.5)
+    assert dash.save_file("model") is None          # the dialog is open, nothing written yet
+    dlg = dash._dialog
+    assert dlg.isVisible()
+    path = str(tmp_path / "chosen.mod")
+    dlg.fileSelected.emit(path)
+    assert os.path.exists(path)
+    dlg.reject()
+
+
+def test_output_survives_an_ascii_stdout(obs, monkeypatch):
+    """A modelfit report has "±" in it. Printed through the dashboard onto
+    an ASCII stdout it raised UnicodeEncodeError, which mapplot's fit took
+    for a failed fit - and undid the fit. Now the text reaches the Output
+    tab whole, the stream gets an escape, and the fit stands."""
+    import io
+
+    raw = io.BytesIO()
+    ascii_out = io.TextIOWrapper(raw, encoding="ascii")
+    monkeypatch.setattr(sys, "stdout", ascii_out)
+    d = Dashboard(obs)
+    mp = d.map_panel.current_plot()
+    mp.verbose = True
+    mp._placed = [dict(type="gauss", flux=2.0, x=4.0, y=-2.5, major=0.5, ratio=1.0, phi=0.0,
+                       freepar=difmapy.observation._free_mask(["flux", "pos", "major"]))]
+    res = mp.run_modelfit()
+    assert res is not None and res["converged"]
+    assert len(obs.model) == 1 and obs.model[0]["flux"] == pytest.approx(2.5, rel=0.01)
+    assert "±" in d.output.toPlainText()
+    ascii_out.flush()
+    assert b"\\xb1" in raw.getvalue()
+    d.close()
+
+
+def test_selfcal_converges_with_modelfit_by_default(dash, obs):
+    """The Selfcal card alternates selfcal and modelfit until the fit
+    converges (selfcal(converge=True)) when the model has components to
+    fit; a CLEAN-only model, which modelfit cannot vary, gets one round."""
+    assert dash.converge_check.isChecked()
+    obs.addcmp(2.0, 4.0, -2.5, type="gauss", major=0.5, free=["flux", "pos", "major"])
+    res = dash.run_selfcal()
+    assert "converged" in res and res["niter"] >= 2 and "history" in res
+    assert "alternating with modelfit" in dash.output.toPlainText()
+
+    obs.clearmodel()
+    obs.addcmp(2.5, 4.0, -2.5)                      # fixed: nothing to fit
+    res = dash.run_selfcal()
+    assert res is not None and "history" not in res
+    assert "running one selfcal round" in dash.output.toPlainText()
+
+    dash.converge_check.setChecked(False)
+    obs.clearmodel()
+    obs.addcmp(2.0, 4.0, -2.5, type="gauss", major=0.5, free=["flux"])
+    assert "history" not in dash.run_selfcal()

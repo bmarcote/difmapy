@@ -140,6 +140,7 @@ class RadPlot(_VisPlot):
             _place_corner(panel.vb, lbl)
             self._labels[key] = lbl
         self._share_x_axis()
+        frame_panels([p.plot for p in self._panels])
         self._set_xlabel()
 
     def _set_xlabel(self):
@@ -253,6 +254,7 @@ class UVPlot(FlagPlotBase):
     def _build_panels(self):
         panel = self._add_panel(0, "y", ylabel="V (Mλ)")
         panel.plot.setLabel("bottom", "U (Mλ)")
+        frame_panels([panel.plot])
         panel.vb.setAspectLocked(True)
         panel.vb.invertX(True)
 
@@ -279,6 +281,9 @@ class VPlot(_VisPlot):
 
     #: Tall: a page is several baselines of stacked amp/phase panels.
     DEFAULT_SIZE = (1200, 950)
+    #: Short y labels: under the baseline name on a short panel, the
+    #: full words overlapped each other.
+    SHORT_LABELS = {"amp": "Amp", "phase": "\u03c6 (deg)"}
 
     def __init__(self, obs, nplot=3, reftel=None, quantity="ap"):
         names = obs.antennas
@@ -328,7 +333,7 @@ class VPlot(_VisPlot):
                 row = i * len(self.quantities) + j
                 panel = self._add_panel(
                     row, key, group=i, label=label,
-                    ylabel=f"{label}<br>{self.QUANTITIES[key]}",
+                    ylabel=f"{label}<br>{self.SHORT_LABELS[key]}",
                 )
                 install_time_axis(panel.plot, self.gaps)
         self._share_x_axis()

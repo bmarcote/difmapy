@@ -161,6 +161,13 @@ class Observation:
         self._restore_beam = None
         #: station name -> (rows, pre-ignore FLAG snapshot of those rows)
         self._ignored: dict[str, tuple] = {}
+        #: Self-cal solutions flagged by hand (`flag_solutions`, corplot):
+        #: a boolean [ntimes, nif, nant] mask, and the gain table as it
+        #: was before the first of them, which every edit is re-derived
+        #: from. Both None until a solution is flagged, and again after
+        #: any new calibration (which supersedes the edits).
+        self._sol_flags = None
+        self._sol_orig = None
         #: The FLAG column as the data came in (after any averaging), so
         #: that the flags added since can be told apart (`wflags`).
         self._flags_at_load = None
@@ -1533,6 +1540,7 @@ class Observation:
             mapstats = self._invert_result is not None
         before = self.moddif(uvmin, uvmax)
         map_before = self.imstat() if mapstats else None
+        self._forget_solution_flags()
         res = self._core.selfcal(
             doamp=bool(amp),
             dophs=bool(phase),
@@ -1693,6 +1701,7 @@ class Observation:
         # An antenna with no prior solution starts from unity, so that
         # the first gscale reports its own corrections rather than NaN.
         before, _ = self._gain_amps(fill=1.0)
+        self._forget_solution_flags()
         res = dict(
             self._core.selfcal(
                 doamp=True, dophs=False, dofloat=bool(float_scale),
@@ -1838,6 +1847,157 @@ class Observation:
             out[name] = cols if per_if else float(np.median(cols))
         return self._report(out, outfile)
 
+    # ------------------------------------------------------------------
+    # editing self-calibration solutions
+    # ------------------------------------------------------------------
+
+    def _forget_solution_flags(self):
+        """A new calibration replaces the table the solution edits were made on: keep the corrections as they now are, and forget the edits."""
+        self._sol_flags = None
+        self._sol_orig = None
+
+    def _gain_shape(self):
+        return (self._core.ntimes, self.nif, len(self.antennas))
+
+    @property
+    def solution_flags(self) -> np.ndarray:
+        """Which self-calibration solutions are flagged by hand, as a boolean array [ntimes, nif, nant] (all False when none are). See `flag_solutions`."""
+        if self._sol_flags is None:
+            return np.zeros(self._gain_shape(), dtype=bool)
+        return self._sol_flags.copy()
+
+    def original_solutions(self):
+        """The gain table as it was before any solution was flagged: ``(amp, phs, bad)``, each [ntimes, nif, nant] (phases in radians). This is the table itself while nothing is flagged."""
+        if self._sol_orig is not None:
+            return tuple(a.copy() for a in self._sol_orig)
+        amp, phs, bad = (np.asarray(x) for x in self._core.gains())
+        shape = self._gain_shape()
+        return (amp.reshape(shape).astype(np.float64), phs.reshape(shape).astype(np.float64),
+                bad.reshape(shape).astype(bool))
+
+    def _solution_mask(self, station=None, tmin=None, tmax=None, if_index=None):
+        """The [ntimes, nif, nant] entries a station/time/IF selection covers (None: all)."""
+        mask = np.ones(self._gain_shape(), dtype=bool)
+        if station is not None:
+            keep = np.zeros(mask.shape[2], dtype=bool)
+            for name in ([station] if isinstance(station, (str, int)) else station):
+                keep[name if isinstance(name, int) else self._ant_index(name)] = True
+            mask &= keep[None, None, :]
+        times = np.asarray(self._core.times())
+        lo, hi = parse_time(tmin, "s"), parse_time(tmax, "s")
+        if lo is not None:
+            mask &= (times >= lo)[:, None, None]
+        if hi is not None:
+            mask &= (times <= hi)[:, None, None]
+        if if_index is not None:
+            keep = np.zeros(mask.shape[1], dtype=bool)
+            keep[np.atleast_1d(if_index)] = True
+            mask &= keep[None, :, None]
+        return mask
+
+    def set_solution_flags(self, flags):
+        """Make `flags` (boolean [ntimes, nif, nant]) the set of hand-flagged solutions and re-calibrate. Only solved entries can be flagged; the rest of `flags` is ignored. This is what `flag_solutions`, `unflag_solutions` and corplot's editing (and its undo) come down to.
+
+        Every flagged correction is re-derived from the solutions that remain for its antenna and IF: the amplitude interpolated linearly in time, the phase through the unit phasor (so it cannot wrap the long way round), and held at the nearest solution beyond the first or last. An antenna and IF left with no solution at all has its flagged entries marked bad, which flags the data behind them. The raw data are never modified, so the calibration is simply re-applied to them.
+
+        Parameters
+        ----------
+        flags : numpy.ndarray
+            Boolean, of shape [ntimes, nif, nant].
+
+        Returns
+        -------
+        int
+            The number of solutions flagged afterwards.
+        """
+        shape = self._gain_shape()
+        flags = np.asarray(flags, dtype=bool)
+        if flags.shape != shape:
+            raise ValueError(f"solution flags must have shape {shape} (ntimes, nif, nant), not {flags.shape}")
+        used = np.asarray(self._core.gains_used()).reshape(shape)
+        flags = flags & used
+        amp0, phs0, bad0 = self.original_solutions()
+        if self._sol_orig is None:
+            self._sol_orig = (amp0, phs0, bad0)
+        amp, phs, bad = amp0.copy(), phs0.copy(), bad0.copy()
+        t = np.asarray(self._core.times(), dtype=np.float64)
+        for cif, ia in zip(*np.nonzero(flags.any(axis=0))):
+            f = flags[:, cif, ia]
+            good = used[:, cif, ia] & ~f & ~bad0[:, cif, ia]
+            if not good.any():
+                bad[f, cif, ia] = True
+                continue
+            amp[f, cif, ia] = np.interp(t[f], t[good], amp0[good, cif, ia])
+            re = np.interp(t[f], t[good], np.cos(phs0[good, cif, ia]))
+            im = np.interp(t[f], t[good], np.sin(phs0[good, cif, ia]))
+            phs[f, cif, ia] = np.arctan2(im, re)
+        self._core.set_gains(np.ascontiguousarray(amp.ravel(), np.float32),
+                             np.ascontiguousarray(phs.ravel(), np.float32),
+                             np.ascontiguousarray(bad.ravel(), bool))
+        if flags.any():
+            self._sol_flags = flags
+        else:
+            # Nothing flagged any more: the table is the original again.
+            self._forget_solution_flags()
+        self._dirty()
+        return int(flags.sum())
+
+    def flag_solutions(self, station=None, tmin=None, tmax=None, if_index=None, quiet=True):
+        """Flag self-calibration solutions and re-calibrate from the remaining ones (the editing of difmap's `corplot`, which `corplot()` does with the mouse).
+
+        A flagged correction is not used: it is re-derived by interpolating, in time, the solutions that remain for the same antenna and IF (see `set_solution_flags`); where none remain, the data behind it are flagged instead. `unflag_solutions` puts the original corrections back. The raw data are never modified, for Measurement Sets and UVFITS files alike, so the calibration is re-applied to them each time. A new `selfcal`, `gscale`, `bayes_gscale` or `uncalib` works on the corrections as they then are, and the edits can no longer be undone.
+
+        Parameters
+        ----------
+        station : str | int | list | None, default None
+            The antenna(s) whose solutions to flag; ``None``: every antenna.
+        tmin : float | str | None, default None
+            Start of the time range: seconds since the reference day, or a string with a unit ("1.5h"); ``None``: from the start.
+        tmax : float | str | None, default None
+            End of the time range; ``None``: to the end.
+        if_index : int | list of int | None, default None
+            Only these IFs (0-based); ``None``: every IF.
+        quiet : bool, default True
+            Return None. ``False`` returns the number of solutions newly flagged.
+
+        Returns
+        -------
+        int | None
+            The number of solutions newly flagged, with ``quiet=False``.
+        """
+        before = self.solution_flags
+        used = np.asarray(self._core.gains_used()).reshape(before.shape)
+        new = self._solution_mask(station, tmin, tmax, if_index) & used & ~before
+        self.set_solution_flags(before | new)
+        return self._done(int(new.sum()), quiet)
+
+    def unflag_solutions(self, station=None, tmin=None, tmax=None, if_index=None, quiet=True):
+        """Put back self-calibration solutions flagged with `flag_solutions` (or in corplot), and re-calibrate.
+
+        Parameters
+        ----------
+        station : str | int | list | None, default None
+            The antenna(s) whose solutions to restore; ``None``: every antenna.
+        tmin : float | str | None, default None
+            Start of the time range: seconds, or a string with a unit; ``None``: from the start.
+        tmax : float | str | None, default None
+            End of the time range; ``None``: to the end.
+        if_index : int | list of int | None, default None
+            Only these IFs (0-based); ``None``: every IF.
+        quiet : bool, default True
+            Return None. ``False`` returns the number of solutions restored.
+
+        Returns
+        -------
+        int | None
+            The number of solutions restored, with ``quiet=False``.
+        """
+        before = self.solution_flags
+        back = self._solution_mask(station, tmin, tmax, if_index) & before
+        if back.any():
+            self.set_solution_flags(before & ~back)
+        return self._done(int(back.sum()), quiet)
+
     def uncalib(self, amp=True, phase=True, flags=False, quiet=True):
         """Undo the self-calibration corrections (difmap `uncalib`): a pure reset of the gain table.
 
@@ -1857,6 +2017,7 @@ class Observation:
         Observation | None
             This observation, with ``quiet=False``.
         """
+        self._forget_solution_flags()
         self._core.uncalib(amp, phase, flags)
         self._dirty()
         return self._done(self, quiet)
@@ -2883,7 +3044,9 @@ class Observation:
         return tplot(self, block=block)
 
     def corplot(self, quantity="both", nplot=3, block=None):
-        """The self-calibration gain corrections against time (difmap `corplot`): one antenna to a pair of panels, amplitude above and phase below on a shared time axis.
+        """The self-calibration gain corrections against time (difmap `corplot`): one antenna to a pair of panels, amplitude above and phase below on a shared time axis, framed together.
+
+        Solutions can be edited as data are in `vplot`: Shift+drag flags the solutions in the box, Ctrl+drag restores them, ``f``/``F`` act on the one nearest the cursor, Ctrl+Z / Ctrl+Shift+Z undo and redo, ``x`` shows or hides the flagged ones (red crosses at their original values). A flagged solution is replaced by interpolating the remaining ones of its antenna and IF, and the data are re-calibrated from the raw visibilities at once; see `flag_solutions`, which does the same from the prompt.
 
         Parameters
         ----------

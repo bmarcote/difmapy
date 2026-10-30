@@ -31,7 +31,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from difmapy.observation import ROBUST_CHOICES
-from difmapy.plots.base import MODEL_COLOR, PlotWindow, run_if_needed
+from difmapy.plots.base import MODEL_COLOR, PlotWindow, frame_panels, run_if_needed
 from difmapy.plots.contours import contour_levels, contour_segments
 from difmapy.units import format_uvdist
 
@@ -122,10 +122,13 @@ class MapPlot(PlotWindow):
 
     def __init__(self, obs, what="map", mapsize=None, cellsize=None,
                  uvweight=None, clean_args=None, verbose=True, scale="linear",
-                 cmap="color", uvrange=None, uvtaper=None):
+                 cmap="color", uvrange=None, uvtaper=None, uv_controls=True):
         super().__init__("difmapy mapplot"
                          + (f" ({obs.filename})" if obs.filename else ""))
         self.obs = obs
+        #: Show the UV range and taper fields above the image (the
+        #: dashboard sets them in its own Main tab instead).
+        self.uv_controls = bool(uv_controls)
         self.what = what
         self.cmap = _cmap_name(cmap)
         self.scale = "log" if str(scale).lower().startswith("log") else "linear"
@@ -162,10 +165,8 @@ class MapPlot(PlotWindow):
         # window explains itself without pressing "h".
         self.footer = QtWidgets.QLabel(SHORTCUTS)
         self.footer.setWordWrap(True)
-        self.footer.setStyleSheet(
-            "background: #f4f4f4; color: #333; border-top: 1px solid #ccc;"
-            "padding: 3px 6px; font-size: 10px;"
-        )
+        # Drawn by the application's style sheet (difmapy.plots.style).
+        self.footer.setObjectName("footer")
         lay.addWidget(self.footer, 0)
         self.setCentralWidget(central)
         self.glw.setBackground("w")
@@ -194,7 +195,8 @@ class MapPlot(PlotWindow):
         # the colour bar so the two read together.
         self.hist = self.glw.addPlot(row=0, col=2)
         self.hist.setLabel("bottom", "log10 N")
-        self.hist.showGrid(x=True, alpha=0.2)
+        frame_panels([self.plot])
+        frame_panels([self.hist])
         self.hist.getAxis("left").setStyle(showValues=False)
         self.hist.setMaximumWidth(170)
         self._hist_items = []
@@ -256,6 +258,9 @@ class MapPlot(PlotWindow):
         # UV range and taper, typed in M-lambda (or with a unit, "500k");
         # Enter applies them and re-images.
         self.uv_edits = {}
+        if not self.uv_controls:
+            row.addStretch(1)
+            return bar
 
         def field(key, width, tip, placeholder=""):
             e = QtWidgets.QLineEdit()

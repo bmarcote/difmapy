@@ -40,7 +40,9 @@ def _plot_factories():
         "uv": (("radplot", lambda o: RadPlot(o)),
                ("projplot", lambda o: RadPlot(o, projection_deg=0.0)),
                ("corplot", lambda o: CorPlot(o))),
-        "map": (("mapplot", lambda o: MapPlot(o)),),
+        # The UV range and taper are set in the Main tab, so the map
+        # panel goes without its own copy of those fields.
+        "map": (("mapplot", lambda o: MapPlot(o, uv_controls=False)),),
     }
 
 
@@ -54,10 +56,21 @@ class _Tee(QtCore.QObject):
         self._original = original
 
     def write(self, s):
-        if self._original is not None:
-            self._original.write(s)
+        # The tab first: whatever happens to the stream below, the output
+        # is shown. And printing must never fail what printed: a report
+        # with a "±" on an ASCII stdout (the app started from Finder, a
+        # terminal without a UTF-8 locale) raised UnicodeEncodeError - a
+        # ValueError - which mapplot took for a failed fit and undid it.
         if s:
             self.text.emit(s)
+        if self._original is not None:
+            try:
+                self._original.write(s)
+            except UnicodeEncodeError:
+                enc = getattr(self._original, "encoding", None) or "ascii"
+                self._original.write(s.encode(enc, "backslashreplace").decode(enc))
+            except (OSError, ValueError):  # a closed or broken stream
+                pass
         return len(s)
 
     def flush(self):
@@ -82,8 +95,12 @@ class _PlotPanel(QtWidgets.QTabWidget):
         self.plots: dict[int, PlotWindow] = {}
         #: tabs whose plot is out of date (reloaded when shown)
         self.stale: set[int] = set()
+        from difmapy.plots import style
+
         self.setTabBarAutoHide(True)
-        self.setDocumentMode(True)
+        # Native tabs (a segmented control) in the macOS app; the flat
+        # document-mode bar, which the web style underlines, elsewhere.
+        self.setDocumentMode(not style.native_controls())
         for label, _ in self.specs:
             page = QtWidgets.QWidget()
             lay = QtWidgets.QVBoxLayout(page)
@@ -180,9 +197,13 @@ class Dashboard(PlotWindow):
         self.panels = (self.time_panel, self.uv_panel, self.map_panel)
 
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.setDocumentMode(True)
+        from difmapy.plots import style
+
+        self.tabs.setObjectName("dashboardControls")
+        self.tabs.setDocumentMode(not style.native_controls())
         self.tabs.addTab(self._make_main(), "Main")
         self.tabs.addTab(self._make_output(), "Output")
+        self.apply_style()
 
         top = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         top.addWidget(self.time_panel)
@@ -223,113 +244,149 @@ class Dashboard(PlotWindow):
     # ---- the controls -------------------------------------------------
 
     def _make_main(self):
-        page = QtWidgets.QWidget()
-        grid = QtWidgets.QGridLayout(page)
-        grid.setColumnStretch(1, 1)
+        """The Main tab: cards of controls, each action's options under its button."""
+        from difmapy.plots import style
 
-        grid.addWidget(QtWidgets.QLabel("<b>File</b>"), 0, 0)
+        page = QtWidgets.QWidget()
+        page.setObjectName("controlsPage")
+        scroll = QtWidgets.QScrollArea()
+        scroll.setObjectName("controlsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        body = QtWidgets.QWidget()
+        body.setObjectName("controlsBody")
+        col = QtWidgets.QVBoxLayout(body)
+        col.setContentsMargins(14, 10, 14, 14)
+        col.setSpacing(10)
+
+        # -- data --
+        col.addWidget(_section("DATA"))
+        data, lay = _card()
+        row = QtWidgets.QHBoxLayout()
+        self.file_button = QtWidgets.QPushButton("File\u2026")
+        self.file_button.setObjectName("action")
+        self.file_button.setToolTip("choose a UVFITS file, or a Measurement Set (a folder ending in .ms)")
+        self.file_button.clicked.connect(lambda: self._browse())
+        row.addWidget(self.file_button)
         self.file_edit = QtWidgets.QLineEdit()
         self.file_edit.setPlaceholderText("a UVFITS file or a Measurement Set")
         if self.obs is not None and self.obs.path:
             self.file_edit.setText(os.fspath(self.obs.path))
-        grid.addWidget(self.file_edit, 0, 1, 1, 3)
-        browse = QtWidgets.QHBoxLayout()
-        for text, ms in (("UVFITS...", False), ("MS...", True)):
-            b = QtWidgets.QPushButton(text)
-            b.clicked.connect(lambda _=False, ms=ms: self._browse(ms))
-            browse.addWidget(b)
-        grid.addLayout(browse, 0, 4)
-
-        avg = QtWidgets.QHBoxLayout()
-        avg.addWidget(QtWidgets.QLabel("timeavg"))
+        row.addWidget(self.file_edit, 1)
+        lay.addLayout(row)
+        row = QtWidgets.QHBoxLayout()
         self.timeavg_edit = QtWidgets.QLineEdit()
-        self.timeavg_edit.setPlaceholderText('e.g. 10s, 2min')
-        avg.addWidget(self.timeavg_edit)
-        avg.addWidget(QtWidgets.QLabel("freqavg"))
+        self.timeavg_edit.setPlaceholderText("none (e.g. 10s, 2min)")
         self.freqavg_edit = QtWidgets.QLineEdit()
-        self.freqavg_edit.setPlaceholderText('channels, or "all"')
-        avg.addWidget(self.freqavg_edit)
-        grid.addLayout(avg, 1, 1, 1, 3)
+        self.freqavg_edit.setPlaceholderText('none (channels, or "all")')
+        row.addLayout(_labelled("Time average", self.timeavg_edit), 1)
+        row.addLayout(_labelled("Frequency average", self.freqavg_edit), 1)
         self.load_button = QtWidgets.QPushButton("Load")
+        self.load_button.setObjectName("primary")
+        self.load_button.setDefault(True)
+        if style.native_controls():
+            self.file_button.setDefault(True)
+            self.file_button.setAutoDefault(False)
         self.load_button.clicked.connect(lambda: self.load())
-        grid.addWidget(self.load_button, 1, 4)
+        row.addWidget(self.load_button, 0, QtCore.Qt.AlignmentFlag.AlignBottom)
+        lay.addLayout(row)
+        col.addWidget(data)
 
-        line = QtWidgets.QFrame()
-        line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        grid.addWidget(line, 2, 0, 1, 5)
-
-        self.selfcal_button = QtWidgets.QPushButton("Selfcal")
-        self.selfcal_button.clicked.connect(lambda: self.run_selfcal())
-        grid.addWidget(self.selfcal_button, 3, 0)
-        self.phase_check = QtWidgets.QCheckBox("phase")
+        # -- calibration: one card per command, its options under it --
+        col.addWidget(_section("CALIBRATION"))
+        cal = QtWidgets.QHBoxLayout()
+        cal.setSpacing(10)
+        card, lay, self.selfcal_button = _action_card("Selfcal", self.run_selfcal)
+        self.phase_check = QtWidgets.QCheckBox("Phase")
         self.phase_check.setChecked(True)
-        self.amp_check = QtWidgets.QCheckBox("amplitude")
-        grid.addWidget(self.phase_check, 3, 1)
-        grid.addWidget(self.amp_check, 4, 1)
-        grid.addWidget(QtWidgets.QLabel("sol. interval"), 3, 2,
-                       alignment=QtCore.Qt.AlignmentFlag.AlignRight)
+        self.amp_check = QtWidgets.QCheckBox("Amplitude")
+        checks = QtWidgets.QHBoxLayout()
+        checks.addWidget(self.phase_check)
+        checks.addWidget(self.amp_check)
+        checks.addStretch(1)
+        lay.addLayout(checks)
+        # selfcal(converge=True): alternate with modelfit until the fit
+        # stops improving. It needs a model with free parameters; with
+        # CLEAN components alone, one selfcal round is run instead.
+        self.converge_check = QtWidgets.QCheckBox("Converge with modelfit")
+        self.converge_check.setChecked(True)
+        self.converge_check.setToolTip(
+            "alternate selfcal and modelfit until the model-data fit stops improving "
+            "(needs fitted components; a CLEAN-only model gets one selfcal round)")
+        checks = QtWidgets.QHBoxLayout()
+        checks.addWidget(self.converge_check)
+        checks.addStretch(1)
+        lay.addLayout(checks)
         self.solint_edit = QtWidgets.QLineEdit()
-        self.solint_edit.setPlaceholderText('minutes, "30s", "scan"')
-        grid.addWidget(self.solint_edit, 3, 3, 1, 2)
-
-        self.gscale_button = QtWidgets.QPushButton("Gscale")
-        self.gscale_button.clicked.connect(lambda: self.run_gscale())
-        grid.addWidget(self.gscale_button, 5, 0)
-        self.float_check = QtWidgets.QCheckBox("float scale")
+        self.solint_edit.setPlaceholderText('per integration ("30s", "scan")')
+        lay.addLayout(_labelled("Solution interval", self.solint_edit))
+        lay.addStretch(1)
+        cal.addWidget(card, 1)
+        card, lay, self.gscale_button = _action_card("Gscale", self.run_gscale)
+        self.float_check = QtWidgets.QCheckBox("Float scale")
         self.float_check.setChecked(True)
-        grid.addWidget(self.float_check, 5, 1)
-
-        self.bayes_button = QtWidgets.QPushButton("Bayes")
-        self.bayes_button.clicked.connect(lambda: self.run_bayes())
-        grid.addWidget(self.bayes_button, 6, 0)
-        models = QtWidgets.QHBoxLayout()
+        lay.addWidget(self.float_check)
+        lay.addStretch(1)
+        cal.addWidget(card, 1)
+        card, lay, self.bayes_button = _action_card("Bayes", self.run_bayes)
+        self.bayes_button.setToolTip("Bayesian gscale (bayes_gscale) over the source models ticked")
+        grid = QtWidgets.QGridLayout()
         self.model_checks = {}
-        for name, on in BAYES_MODELS:
-            cb = QtWidgets.QCheckBox(name)
+        for i, (name, on) in enumerate(BAYES_MODELS):
+            cb = QtWidgets.QCheckBox(name.capitalize().replace("Gauss", "Gauss "))
             cb.setChecked(on)
-            models.addWidget(cb)
+            grid.addWidget(cb, i // 2, i % 2)
             self.model_checks[name] = cb
-        models.addStretch(1)
-        grid.addLayout(models, 6, 1, 1, 4)
+        lay.addLayout(grid)
+        lay.addStretch(1)
+        cal.addWidget(card, 1)
+        col.addLayout(cal)
 
-        line = QtWidgets.QFrame()
-        line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        grid.addWidget(line, 7, 0, 1, 5)
-
-        # Imaging: the UV range and the taper, in M-lambda unless a unit
-        # is typed ("500k"). Like the calibration rows, the name applies.
+        # -- imaging: the UV range and the taper, in M-lambda unless a
+        # unit is typed ("500k"); the button (or Enter) applies --
+        col.addWidget(_section("IMAGING"))
+        img = QtWidgets.QHBoxLayout()
+        img.setSpacing(10)
         self.uv_edits = {}
 
-        def uv_row(row, name, apply, fields):
-            b = QtWidgets.QPushButton(name)
-            b.clicked.connect(lambda: apply())
-            grid.addWidget(b, row, 0)
-            box = QtWidgets.QHBoxLayout()
+        def uv_card(name, apply, fields):
+            card, lay, button = _action_card(name, apply)
+            row = QtWidgets.QHBoxLayout()
             for key, label, placeholder, tip in fields:
-                box.addWidget(QtWidgets.QLabel(label))
                 e = QtWidgets.QLineEdit()
                 e.setPlaceholderText(placeholder)
                 e.setToolTip(tip)
                 e.returnPressed.connect(lambda: apply())
-                box.addWidget(e)
                 self.uv_edits[key] = e
-            box.addWidget(QtWidgets.QLabel("M\u03bb"))
-            grid.addLayout(box, row, 1, 1, 4)
-            return b
+                row.addLayout(_labelled(label, e), 1)
+            lay.addLayout(row)
+            hint = QtWidgets.QLabel("M\u03bb, or with a unit: 500k, 2e7 lambda")
+            hint.setObjectName("hint")
+            lay.addWidget(hint)
+            img.addWidget(card, 1)
+            return button
 
-        self.uvrange_button = uv_row(8, "UV range", self.run_uvrange, (
-            ("uvmin", "min", "0", "shortest UV radius imaged: M-lambda, or with a unit (500k)"),
-            ("uvmax", "max", "no limit", "longest UV radius imaged; empty for no limit")))
-        self.uvtaper_button = uv_row(9, "Taper", self.run_uvtaper, (
-            ("value", "value", "none", "the taper at the radius, between 0 and 1; empty for no taper"),
-            ("radius", "radius", "", "UV radius where the taper falls to the value: M-lambda, or with a unit")))
+        self.uvrange_button = uv_card("UV range", self.run_uvrange, (
+            ("uvmin", "Min", "0", "shortest UV radius imaged: M-lambda, or with a unit (500k)"),
+            ("uvmax", "Max", "no limit", "longest UV radius imaged; empty for no limit")))
+        self.uvtaper_button = uv_card("Taper", self.run_uvtaper, (
+            ("value", "Value", "none", "the taper at the radius, between 0 and 1; empty for no taper"),
+            ("radius", "Radius", "", "UV radius where the taper falls to the value: M-lambda, or with a unit")))
+        col.addLayout(img)
         self._sync_uv_fields()
 
+        col.addStretch(1)
+        row = QtWidgets.QHBoxLayout()
+        row.addStretch(1)
         reload_all = QtWidgets.QPushButton("Reload all")
         reload_all.setToolTip("re-read the data in every panel (after changes made at the prompt)")
         reload_all.clicked.connect(lambda: self.reload())
-        grid.addWidget(reload_all, 11, 4)
-        grid.setRowStretch(10, 1)
+        row.addWidget(reload_all)
+        col.addLayout(row)
+        scroll.setWidget(body)
+        outer = QtWidgets.QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
         return page
 
     def _sync_uv_fields(self):
@@ -351,22 +408,41 @@ class Dashboard(PlotWindow):
                 e.setText(values[key])
 
     def _make_output(self):
+        """The Output tab: what the session prints, and the buttons that save its products."""
         page = QtWidgets.QWidget()
+        page.setObjectName("controlsPage")
         lay = QtWidgets.QVBoxLayout(page)
+        lay.setContentsMargins(14, 10, 14, 14)
+        lay.setSpacing(8)
         self.output = QtWidgets.QPlainTextEdit()
+        self.output.setObjectName("output")
         self.output.setReadOnly(True)
         self.output.setFont(QtGui.QFontDatabase.systemFont(
             QtGui.QFontDatabase.SystemFont.FixedFont))
         lay.addWidget(self.output, 1)
+        lay.addWidget(_section("SAVE:"))
+        card, inner = _card()
         buttons = QtWidgets.QGridLayout()
+        buttons.setSpacing(8)
         self.save_buttons = {}
         for i, (kind, (label, *_)) in enumerate(SAVERS.items()):
             b = QtWidgets.QPushButton(label)
             b.clicked.connect(lambda _=False, k=kind: self.save_file(k))
             buttons.addWidget(b, i // 4, i % 4)
             self.save_buttons[kind] = b
-        lay.addLayout(buttons)
+        inner.addLayout(buttons)
+        lay.addWidget(card)
         return page
+
+    def apply_style(self, glass=None):
+        """Style the controls for the platform and the system's light or dark appearance (`difmapy.plots.style`). The window is opaque; on macOS ``$DIFMAPY_GLASS=1`` puts it on a glass background instead (`difmapy.plots.macglass`)."""
+        from difmapy.plots import macglass, style
+
+        if glass is None:
+            glass = macglass.enable(self)
+        self.glass = int(glass)
+        style.apply(QtWidgets.QApplication.instance(), glass=bool(self.glass))
+        return self.glass
 
     def _ensure_tee(self):
         """Put the output tab's tee on ``sys.stdout``, unless it is there."""
@@ -385,14 +461,46 @@ class Dashboard(PlotWindow):
         self.output.setTextCursor(cursor)
         self.output.ensureCursorVisible()
 
-    def _browse(self, ms):
-        if ms:
-            path = QtWidgets.QFileDialog.getExistingDirectory(self, "Measurement Set")
-        else:
-            path, _ = QtWidgets.QFileDialog.getOpenFileName(
-                self, "UVFITS file", "", "UVFITS (*.uvf *.uvfits *.fits *.UVF *.UVFITS *.FITS);;All files (*)")
-        if path:
+    def _file_dialog(self, title, save=False, filters=(), suffix=""):
+        """A native file dialog, opened asynchronously (`QFileDialog.open`) rather than through the static helpers. Those run the dialog in a nested modal loop, and under IPython's Qt input hook on macOS that loop is ended - and the native panel closed at once - whenever the hook stops for terminal input."""
+        dlg = QtWidgets.QFileDialog(self, title)
+        dlg.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave if save
+                          else QtWidgets.QFileDialog.AcceptMode.AcceptOpen)
+        if not save:
+            dlg.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
+        if filters:
+            dlg.setNameFilters(list(filters))
+        if suffix:
+            dlg.setDefaultSuffix(suffix.lstrip("."))
+        # Kept, so that the dialog is not collected while it is open.
+        self._dialog = dlg
+        return dlg
+
+    def _browse(self):
+        """Choose the file to load with the platform's own dialog: a UVFITS file, or a Measurement Set - entering the MS folder accepts it, as does choosing the ``table.dat`` inside it."""
+        dlg = self._file_dialog(
+            "Open a UVFITS file or a Measurement Set",
+            filters=("Visibility data (*.uvf *.uvfits *.fits *.UVF *.UVFITS *.FITS table.dat)",
+                     "All files (*)"))
+        start = self.file_edit.text().strip()
+        if start:
+            dlg.setDirectory(os.path.dirname(os.path.normpath(start)) or start)
+
+        def chosen(path):
+            if os.path.basename(path) == "table.dat":
+                path = os.path.dirname(path)
             self.file_edit.setText(path)
+
+        def entered(directory):
+            # A Measurement Set is a folder: going into one means it.
+            if _is_ms(directory):
+                dlg.reject()
+                self.file_edit.setText(directory)
+
+        dlg.fileSelected.connect(chosen)
+        dlg.directoryEntered.connect(entered)
+        dlg.open()
+        return dlg
 
     def _set_title(self):
         name = None if self.obs is None else self.obs.filename
@@ -518,7 +626,7 @@ class Dashboard(PlotWindow):
               f"beam {bmaj:.4g} x {bmin:.4g} mas at {bpa:.4g} deg")
 
     def run_selfcal(self):
-        """Self-calibrate with what the Selfcal row says: phase and/or amplitude, at the solution interval typed (minutes as a bare number, or a string with a unit, or "scan"; empty for one solution per integration)."""
+        """Self-calibrate with what the Selfcal card says: phase and/or amplitude, at the solution interval typed (minutes as a bare number, or a string with a unit, or "scan"; empty for one solution per integration), and - with "Converge with modelfit", the default - alternating with `modelfit` until the fit converges (`selfcal(converge=True)`). That needs components with free parameters; a model of CLEAN components alone gets one selfcal round, with a note saying so."""
         if not self._need_model("selfcal"):
             return None
         amp, phase = self.amp_check.isChecked(), self.phase_check.isChecked()
@@ -526,8 +634,13 @@ class Dashboard(PlotWindow):
             print("selfcal: tick phase, amplitude or both")
             return None
         solint = self.solint_edit.text().strip() or 0.0
+        converge = self.converge_check.isChecked()
+        if converge and not self.obs.nvariable:
+            print("selfcal: the model has no free parameters (CLEAN components only), so there is "
+                  "nothing for modelfit to converge; running one selfcal round")
+            converge = False
         return self._run("selfcal", lambda: self.obs.selfcal(
-            amp=amp, phase=phase, solint=solint, quiet=False))
+            amp=amp, phase=phase, solint=solint, converge=converge, quiet=False))
 
     def run_gscale(self):
         """Run `gscale`, floating the flux scale if the box is ticked."""
@@ -548,7 +661,7 @@ class Dashboard(PlotWindow):
             models=tuple(models), plot=False, quiet=False))
 
     def save_file(self, kind, path=None):
-        """Save one product of the session (`kind` is a key of `SAVERS`). Without a `path` a file dialog asks for one. Returns the path written, or None."""
+        """Save one product of the session (`kind` is a key of `SAVERS`). Without a `path` the platform's file dialog asks for one, and the file is written once it is chosen (None is returned then). Returns the path written, or None."""
         if self.obs is None:
             print("save: no data loaded")
             return None
@@ -557,9 +670,13 @@ class Dashboard(PlotWindow):
             if callable(suffix):
                 suffix = suffix(self.obs)
             base = os.path.splitext(self.obs.filename or "difmapy")[0]
-            path, _ = QtWidgets.QFileDialog.getSaveFileName(self, title, base + suffix, filt)
-            if not path:
-                return None
+            dlg = self._file_dialog(title, save=True, filters=(filt,))
+            if self.obs.path:
+                dlg.setDirectory(os.path.dirname(os.path.normpath(os.fspath(self.obs.path))))
+            dlg.selectFile(base + suffix)
+            dlg.fileSelected.connect(lambda p: self.save_file(kind, p))
+            dlg.open()
+            return None
 
         def go():
             write(self.obs, path)
@@ -614,6 +731,59 @@ class Dashboard(PlotWindow):
         for plot in self.plots():
             plot.on_change = None
         super().closeEvent(ev)
+
+
+def _is_ms(path) -> bool:
+    """True for a Measurement Set: a folder holding a casacore table."""
+    return os.path.isdir(path) and os.path.exists(os.path.join(path, "table.dat"))
+
+
+def _section(text):
+    """A small capitalised heading over a group of cards."""
+    lbl = QtWidgets.QLabel(text)
+    lbl.setObjectName("sectionTitle")
+    return lbl
+
+
+def _card():
+    """A rounded card, and the layout to fill it with."""
+    from difmapy.plots import style
+
+    frame = QtWidgets.QFrame()
+    frame.setObjectName("card")
+    style.add_shadow(frame)
+    lay = QtWidgets.QVBoxLayout(frame)
+    lay.setContentsMargins(14, 12, 14, 12)
+    lay.setSpacing(8)
+    return frame, lay
+
+
+def _action_card(name, slot):
+    """A card headed by the button that runs `slot`; the options go under it. Returns (card, layout, button)."""
+    frame, lay = _card()
+    from difmapy.plots import style
+
+    button = QtWidgets.QPushButton(name)
+    button.setObjectName("action")
+    if style.native_controls():
+        # macOS draws a default button in the accent colour: the actions
+        # stand out as in the web style, without grey bars.
+        button.setDefault(True)
+        button.setAutoDefault(False)
+    button.clicked.connect(lambda: slot())
+    lay.addWidget(button)
+    return frame, lay, button
+
+
+def _labelled(text, widget):
+    """`widget` with a small caption above it."""
+    box = QtWidgets.QVBoxLayout()
+    box.setSpacing(3)
+    lbl = QtWidgets.QLabel(text)
+    lbl.setObjectName("hint")
+    box.addWidget(lbl)
+    box.addWidget(widget)
+    return box
 
 
 def _restore_stdout(tee):

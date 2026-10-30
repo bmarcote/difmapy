@@ -152,7 +152,7 @@ def test_corplot_shows_amplitude_and_phase_by_default(obs):
     assert p.quantity == "both"
     assert len(p._plots) == 4                      # 2 antennas x 2 panels
     labels = [q.getAxis("left").labelText for q, _ in p._plots]
-    assert "Amplitude" in labels[0] and "Phase" in labels[1]
+    assert labels[0].endswith("<br>Amp") and labels[1].endswith("<br>\u03c6 (deg)")
     assert labels[0].split("<br>")[0] == labels[1].split("<br>")[0]
 
     # "z" brings a phase panel back to +-180, and an amplitude panel to
@@ -172,7 +172,7 @@ def test_corplot_shows_amplitude_and_phase_by_default(obs):
     p.close()
 
     # A single quantity still gives one panel per antenna.
-    for quantity, key in (("phase", "Phase"), ("amp", "Amplitude")):
+    for quantity, key in (("phase", "\u03c6 (deg)"), ("amp", "Amp")):
         q = CorPlot(obs, quantity=quantity, nplot=2)
         assert q.quantity == quantity
         assert len(q._plots) == 2
@@ -461,4 +461,123 @@ def test_tplot_marks_partially_flagged_integrations(obs):
             colours[key] = colours.get(key, 0) + len(item.getData()[0])
     assert colours[TPlot.PARTIAL_COLOR] == int(partial.sum())
     assert colours[TPlot.GOOD_COLOR] == int(((good > 0) & ~partial).sum())
+    p.close()
+
+
+@pytest.fixture()
+def calibrated(corrupted_uvfits_file):
+    """Corrupted data self-calibrated once per integration against the
+    true point source, so every integration has its own solution."""
+    from conftest import FLUX, X0_MAS, Y0_MAS
+
+    path, _ = corrupted_uvfits_file
+    o = difmapy.load(path)
+    o.mapsize(256, 0.25)
+    o.addcmp(FLUX, X0_MAS, Y0_MAS)
+    o.selfcal(amp=True, phase=True, solint=0, verbose=False)
+    return o
+
+
+def test_flag_solutions_interpolates_and_recalibrates(calibrated):
+    """A flagged solution is replaced by the interpolation of the remaining
+    ones of its antenna and IF, the data are re-calibrated from the raw
+    visibilities, and unflagging gives back exactly the original."""
+    o = calibrated
+    shape = o.solution_flags.shape
+    t = np.asarray(o._core.times())
+    vis_good = np.array(o._core.stream_vis()[0], copy=True)
+    # Spoil one solution, as an outlier would be: twice the amplitude and
+    # a phase 90 degrees off.
+    it, cif, ia = 5, 0, 1
+    amp, phs, bad = (np.asarray(x).reshape(shape).copy() for x in o._core.gains())
+    amp[it, cif, ia] *= 2.0
+    phs[it, cif, ia] += np.pi / 2
+    o._core.set_gains(amp.ravel(), phs.ravel(), bad.ravel())
+    amp0, phs0, _ = o.original_solutions()
+    vis_bad = np.array(o._core.stream_vis()[0], copy=True)
+    _, a1, a2, *_ = o._core.rows()
+    tidx = np.asarray(o._core.time_index())
+    rows = ((np.asarray(a1) == ia) | (np.asarray(a2) == ia)) & (tidx == it)
+    assert not np.allclose(vis_bad[rows, cif], vis_good[rows, cif])
+
+    assert o.flag_solutions("AN1", tmin=t[it], tmax=t[it], if_index=0, quiet=False) == 1
+    flags = o.solution_flags
+    assert flags.sum() == 1 and flags[it, cif, ia]
+    amp, phs, bad = (np.asarray(x).reshape(shape) for x in o._core.gains())
+    good = np.ones(shape[0], bool)
+    good[it] = False
+    assert amp[it, cif, ia] == pytest.approx(np.interp(t[it], t[good], amp0[good, cif, ia]), rel=1e-6)
+    expect = np.angle(np.interp(t[it], t[good], np.cos(phs0[good, cif, ia]))
+                      + 1j * np.interp(t[it], t[good], np.sin(phs0[good, cif, ia])))
+    assert phs[it, cif, ia] == pytest.approx(expect, abs=1e-6)
+    assert not bad.any()
+    # The data are re-calibrated: the spoiled integration is repaired (the
+    # neighbours' constant gain is the right one here), nothing else moved.
+    vis = np.asarray(o._core.stream_vis()[0])
+    np.testing.assert_allclose(vis[rows, cif], vis_good[rows, cif], rtol=1e-4, atol=1e-6)
+    others = np.ones(vis.shape, bool)
+    others[rows, cif] = False
+    np.testing.assert_array_equal(vis[others], vis_bad[others])
+    # Restoring it gives back the spoiled table and data exactly.
+    assert o.unflag_solutions(quiet=False) == 1
+    amp, phs, _ = (np.asarray(x).reshape(shape) for x in o._core.gains())
+    np.testing.assert_array_equal(amp, amp0.astype(np.float32))
+    np.testing.assert_array_equal(np.asarray(o._core.stream_vis()[0]), vis_bad)
+    assert o._sol_orig is None
+
+
+def test_flagging_every_solution_flags_the_data(calibrated):
+    """With no solution left for an antenna and IF there is nothing to
+    interpolate: its data are flagged instead, and come back on unflag."""
+    o = calibrated
+    wt0 = np.array(o._core.stream_vis()[1], copy=True)
+    o.flag_solutions("AN2", if_index=1)
+    _, _, bad = (np.asarray(x).reshape(o.solution_flags.shape) for x in o._core.gains())
+    assert bad[:, 1, 2].all() and not bad[:, 0, 2].any()
+    wt = np.asarray(o._core.stream_vis()[1])
+    _, a1, a2, *_ = o._core.rows()
+    rows = (np.asarray(a1) == 2) | (np.asarray(a2) == 2)
+    assert (wt[rows, 1] < 0).all() and (wt[~rows, 1] > 0).all()
+    o.unflag_solutions("AN2")
+    np.testing.assert_array_equal(np.asarray(o._core.stream_vis()[1]), wt0)
+
+
+def test_new_calibration_supersedes_the_edits(calibrated):
+    o = calibrated
+    o.flag_solutions("AN1", if_index=0, tmax=np.asarray(o._core.times())[3])
+    assert o.solution_flags.any()
+    o.selfcal(phase=True, verbose=False)
+    assert not o.solution_flags.any() and o._sol_orig is None
+
+
+def test_corplot_edits_solutions(calibrated):
+    """Shift+drag in corplot flags the solutions in the box (amplitude and
+    phase go together), red crosses show them, Ctrl+drag and undo restore
+    them; each antenna's panels are framed."""
+    from difmapy.plots.base import FRAME_WIDTH
+    from difmapy.plots.diagnostics import CorPlot
+
+    o = calibrated
+    p = CorPlot(o, nplot=2)
+    assert p._panel_info[0][:2] == (0, "amp") and p._panel_info[1][:2] == (0, "phase")
+    for n, (_, key, plot) in enumerate(p._panel_info):
+        assert plot.getAxis("left").pen().widthF() == FRAME_WIDTH
+        assert plot.getAxis("top").isVisible() == (key == "amp")
+    pts = p._points[1]                                  # AN0's phase panel
+    sel = pts["t"] < 3
+    x0, x1 = pts["x"][sel].min(), pts["x"][sel].max()
+    p._on_selected(1, x0 - 1e-6, x1 + 1e-6, -200, 200, True)
+    flags = o.solution_flags
+    assert flags[:, :, 0].sum() == sel.sum() and flags[:3, :, 0].all()
+    assert p._points[0]["flagged"].sum() == sel.sum()  # shown in the amp panel too
+    crosses = [it for it in p._panel_info[0][2].items
+               if type(it).__name__ == "FastScatter" and it._symbol == "x"]
+    assert crosses
+    assert p.undo()
+    assert not o.solution_flags.any()
+    assert p.undo(redo=True)
+    assert o.solution_flags[:3, :, 0].all()
+    pts = p._points[1]
+    p._on_selected(1, pts["x"].min() - 1, pts["x"].max() + 1, -200, 200, False)
+    assert not o.solution_flags.any()
     p.close()

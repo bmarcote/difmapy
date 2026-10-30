@@ -127,6 +127,36 @@ construction - blending across a slew would undo the point of solving
 per scan. Where a station's data gap is wider than the interpolation can
 reach, those integrations get no solution and are left out of the plot.
 
+## Editing solutions
+
+`corplot()` edits the solutions as `vplot` edits data: Shift+drag flags
+the solutions inside the box, Ctrl+drag restores them, ++f++ / ++shift+f++
+act on the one nearest the cursor, Ctrl+Z / Ctrl+Shift+Z undo and redo,
+and ++x++ shows or hides the flagged ones - red crosses at their original
+values. Each antenna's amplitude and phase panels are framed together.
+
+```python
+obs.flag_solutions("EF", tmin="14h", tmax="14.5h")   # the same from the prompt
+obs.flag_solutions("T6", if_index=2)
+obs.unflag_solutions()                               # all back
+obs.solution_flags                                   # [time, IF, antenna] mask
+```
+
+A flagged solution (one complex gain: amplitude and phase go together)
+is not used. Its correction is re-derived from the solutions that remain
+for the same antenna and IF - the amplitude interpolated linearly in
+time, the phase through the unit phasor so it cannot wrap the long way
+round, held at the nearest solution beyond the first or last - and the
+data are re-calibrated at once. An antenna and IF with no solution left
+have their data flagged instead. Restoring a solution gives back exactly
+the original correction.
+
+The raw visibilities are never modified, for Measurement Sets and UVFITS
+files alike: calibration is always applied to them afresh, which is what
+makes this possible without keeping a copy. A new `selfcal`, `gscale`,
+`bayes_gscale` or `uncalib` works on the corrections as they then are,
+and the edits can no longer be undone.
+
 ## Amplitude scale per station
 
 ```python

@@ -32,7 +32,7 @@ COMMANDS = (
     "add_window", "clear_windows",
     # calibration
     "selfcal", "gscale", "bayes_gscale", "station_gains", "uncalib",
-    "selfant", "startmod",
+    "selfant", "startmod", "flag_solutions", "unflag_solutions",
     "resoff", "clroff",
     # models
     "addcmp", "seed_model", "modelfit", "rmodel", "wmodel",

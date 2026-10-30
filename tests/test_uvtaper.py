@@ -174,7 +174,8 @@ def test_dashboard_uv_rows(obs):
     d.uvtaper_button.click()
     assert (obs._gauval, obs._gaurad) == (0.5, 1e7)
     mp = d.map_panel.current_plot()
-    assert mp.uv_edits["radius"].text() == "10"      # the map panel shows it too
+    assert mp.uv_edits == {}                         # set in the Main tab only
+    assert "taper 0.5 at 10" in d.output.toPlainText()
     d.uv_edits["value"].setText("x")
     assert d.run_uvtaper() is None                  # a typo is reported, not raised
     assert "uvtaper" in d.output.toPlainText()

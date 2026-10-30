@@ -900,6 +900,50 @@ impl CoreObservation {
         Ok(())
     }
 
+    /// Replace the gain table's corrections and bad flags, each flat in
+    /// `gains()` order [ntimes, nif, nant], and re-apply the calibration
+    /// to the raw data (which is never modified, so this can be done
+    /// any number of times). The "solved" marks are left as they are.
+    /// This is how solutions edited by hand (corplot) are put back.
+    fn set_gains(
+        &mut self,
+        py: Python<'_>,
+        amp: PyReadonlyArray1<f32>,
+        phs: PyReadonlyArray1<f32>,
+        bad: PyReadonlyArray1<bool>,
+    ) -> PyResult<()> {
+        let n = self.ob.gains.amp.len();
+        let (amp, phs, bad) = (amp.as_array(), phs.as_array(), bad.as_array());
+        if amp.len() != n || phs.len() != n || bad.len() != n {
+            return Err(PyValueError::new_err(format!(
+                "amp, phs and bad must each have {n} entries (ntimes x nif x nant)"
+            )));
+        }
+        if amp.iter().any(|a| !(a.is_finite() && *a > 0.0)) || phs.iter().any(|p| !p.is_finite()) {
+            return Err(PyValueError::new_err(
+                "gain amplitudes must be finite and positive, and phases finite",
+            ));
+        }
+        let (amp, phs, bad): (Vec<f32>, Vec<f32>, Vec<bool>) = (
+            amp.iter().cloned().collect(),
+            phs.iter().cloned().collect(),
+            bad.iter().cloned().collect(),
+        );
+        py.detach(|| {
+            let g = &mut self.ob.gains;
+            g.amp = amp;
+            g.phs = phs;
+            g.bad = bad;
+            let mut stream = self.ob.stream.take();
+            if let Some(s) = stream.as_mut() {
+                s.apply_calibration(&self.ob);
+            }
+            self.ob.stream = stream;
+        });
+        self.mb = None;
+        Ok(())
+    }
+
     /// An independent deep copy: data, flags, gains, models, selection
     /// and the current map. Attributes set from Python (the provenance
     /// in `__dict__`) are not copied here; `Observation.copy()` does it.

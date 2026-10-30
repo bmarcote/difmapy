@@ -12,7 +12,7 @@
 | `specplot()` | the same, averaged over all baselines |
 | `cpplot()` | closure phases against the model |
 | `tplot()` | time sampling per station |
-| `corplot()` | the self-calibration corrections per station |
+| `corplot()` | the self-calibration corrections per station, with [editing](selfcal.md#editing-solutions) |
 | [`dashboard()`](dashboard.md) | all of the above in one window, kept in step, with controls to load and calibrate |
 
 ![vplot: amplitude and phase against time](../images/vplot.png){ loading=lazy }
@@ -44,6 +44,12 @@ out altogether does not turn every other row orange.
 | ++h++ | the key legend of the plot in front |
 | ++n++ / ++p++ | next / previous page, in paged plots |
 
+Every plot is drawn the same way: a heavy frame round each panel (or
+round the amplitude and phase panels of one baseline, antenna or
+triangle together), no grid, and major and minor ticks pointing inwards
+on all four sides - except tplot's station axis. Phase axes run exactly
+from -180 to +180 degrees.
+
 ++r++ matters because a window does not know when the data behind it
 change: flag, calibrate, `ignore` a station or re-image from the prompt,
 then press ++r++ to catch up.
@@ -72,7 +78,10 @@ amplitude panel above a phase panel, both from the *vector* average over
 time. A phase slope or ripple across the band shows in the phases, and
 decorrelates the amplitudes too. ++n++ / ++p++ page through the
 baselines in the same order as `vplot`, and `reftel=` keeps one
-station's.
+station's. The grid is tight: only the left column carries y labels and
+only the bottom of each column frequency labels, each baseline's title
+sits just above it, and the amplitude panels of a page share one scale
+(so the left column's labels read for all of them).
 
 `fplot`, `possm` and `specplot` all draw on `obs.spectrum()`, which averages
 *all* channels - the unselected ones too, so it can be used to choose

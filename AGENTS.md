@@ -307,6 +307,12 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
 - Docstrings are numpy-style with typed parameters (`name : type,
   default X`), and each paragraph is **one line**: the user wants the
   terminal to wrap them, not hard wraps at 70 columns.
+- **Every plot has one look**, set by `plots.base.frame_panels`: heavy
+  outer frame, no grid (the user asked to remove it), inward major and
+  minor ticks on all four sides (top/right mirrored, no labels; time
+  plots get a `TimeGapAxis` on top too, so the ticks line up), except
+  tplot's y axis (station names, no ticks). A new plot calls it on each
+  group of panels; phase axes are exactly +-180 (`padding=0`).
 - `vplot` frames each baseline's panels with `plots.base.frame_panels`
   (heavy left/right axes on every panel, top on the first, bottom on
   the last); every panel then has a label-less right axis of
@@ -319,6 +325,61 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
   at that integration, C1 when some are flagged; a flagged baseline
   counts only if the station at its other end has data then (a station
   that is out altogether would otherwise turn every row C1).
+- **Solution editing** (`flag_solutions`, corplot): `_sol_orig` is the
+  gain table before the first flag and `_sol_flags` the mask; every edit
+  re-derives the whole table from `_sol_orig` (`set_solution_flags`:
+  amplitude interpolated in time, phase through the unit phasor; no
+  remaining solution -> `bad`, i.e. the data flagged) and writes it with
+  the `set_gains` binding, which re-applies calibration to the raw data.
+  Any new calibration (`selfcal`, `gscale`, `uncalib`, bayes apply) calls
+  `_forget_solution_flags()` first - the edits are then committed.
+- **pyqtgraph's `mkQApp` forces Fusion and its own icon on every Qt 6
+  app.** `ensure_app` installs difmapy's application style sheet
+  (`plots/style.py`, `style.apply`) and drawn icon (`plots/icon.py`).
+  The user wants the *web-like* style (typeface, rounded fields, blue
+  buttons, underlined tabs, lighter field captions) everywhere except
+  the macOS app, which keeps the native "macos" style (Liquid Glass) -
+  `style.native_controls()` decides, by `$DIFMAPY_APP_BUNDLE` (set by
+  the app launcher) or `$DIFMAPY_STYLE`. In native mode never style
+  QPushButton/QLineEdit/QTabBar, nor *any* rule matching a QScrollArea
+  (Qt then draws its scroll bars non-natively, with arrows); tab widgets
+  are not in document mode (that is a grey flat bar on macOS, not the
+  segmented control); the window is one surface, `palette(base)` in the
+  sheet (not an app palette, which would stop dark mode following the
+  system); cards are hairline outlines; action buttons are default
+  buttons, which macOS draws in the accent colour (only while the window
+  is active, so a `grab()` of an inactive window shows them grey).
+  `DIFMAPY_APP_SELFTEST=<s> DIFMAPY_APP_SNAPSHOT=<png>` saves what the
+  app draws. Light
+  and dark follow `styleHints().colorSchemeChanged` (connected once in
+  `apply`) - not a palette-change event handler, which re-fires on the
+  palette the sheet itself sets.
+- **Printing must never fail a computation.** The dashboard's stdout tee
+  writes to the Output tab first and escapes what the real stream cannot
+  encode: an ASCII stdout (app from Finder; the isolated embedded Python
+  had no UTF-8 mode until the launcher set it) made a modelfit report's
+  "±" raise UnicodeEncodeError, a ValueError, which mapplot's fit took
+  for a failed fit and undid.
+- **Never use the static QFileDialog helpers** (`getOpenFileName` ...).
+  They run a nested modal loop, and under IPython's Qt input hook on
+  macOS the native panel is closed the moment the hook exits its loop
+  for terminal input (reproduced: closed after 0.67 s). Open a
+  `QFileDialog` with `.open()` and connect `fileSelected`; keep the
+  native dialog (the user wants it).
+- The window glass background is **off by default** (the user asked for
+  an opaque window, 2026-10-30); `$DIFMAPY_GLASS=1|glass|material` turns
+  it on. It is `_glass.dylib` (`packaging/macos/glass.m`,
+  built by `build_native.py` and the app build), loaded by ctypes in
+  `plots/macglass.py` - no PyObjC. It needs WA_TranslucentBackground set
+  before the native window exists. Liquid Glass *controls* depend on the
+  SDK of the process's main executable: the uv Python is built with SDK
+  14, so only the app (its launcher, `packaging/macos/launcher.c`, built
+  with the current SDK, embeds Python) gets them.
+- `packaging/macos/build_app.py` makes `dist/difmapy.app` + DMG: a copy
+  of the standalone CPython with deps installed via `uv pip --target`
+  resolved by the bundled interpreter (casatools has macOS 15+ wheels
+  only), PySide6-Essentials (not PySide6: the add-ons are ~1 GB),
+  difmapy copied in with a minimal dist-info. `--selftest` runs it.
 - `selfcal` reports difmap's `moddif` fit before and after the solution,
   and the residual-map statistics too when a map already exists. The
   extra invert that costs is the one the next `clean` would have done,

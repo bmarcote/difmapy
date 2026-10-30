@@ -1200,7 +1200,7 @@ def test_amplitude_axes_pick_jy_mjy_or_ujy(obs):
                                   ((0, 0.02), "mJy", 1e3),
                                   ((0, 5e-4), "µJy", 1e6)):
         panel.vb.setYRange(lo, hi, padding=0)
-        assert f"Amplitude ({unit})" in axis.labelString()
+        assert f"Amp ({unit})" in axis.labelString()      # short, unit kept
         assert axis.autoSIPrefixScale == pytest.approx(scale)
         assert panel.vb.viewRange()[1] == pytest.approx([lo, hi])
     v.close()

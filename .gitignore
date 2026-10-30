@@ -16,3 +16,5 @@ test_data
 site/
 .stignore
 python/difmapy/_core.abi3.so
+python/difmapy/_glass.dylib
+.DS_Store
