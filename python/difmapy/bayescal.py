@@ -135,6 +135,29 @@ def _antenna_chisq(o):
         return chi / (2.0 * cnt), cnt.astype(int)
 
 
+def _antenna_mismatch(o):
+    """Model mismatch per station as a fraction of the model amplitude: the rms of ``V - M`` beyond the thermal
+    noise, over the rms of ``M``, on every baseline it is on.
+
+    Unlike the reduced chi-squared this does not grow with the station's sensitivity: the same fractional error
+    (an imperfect model, a closure error) costs a phased array or a 100-m dish ``(SEFD_median / SEFD)`` times more
+    chi-squared than a median station, so ranking stations by chi-squared names the most sensitive one the worst.
+    """
+    vis, wt = (np.asarray(x) for x in o._core.stream_vis())
+    model = np.asarray(o._core.stream_model())
+    sel = o._core.selection()
+    good = (wt > 0) & np.asarray(sel["if_used"], dtype=bool)[None, :]
+    r2 = np.where(good, wt * np.abs(vis - model) ** 2, 0.0).sum(axis=1)
+    m2 = np.where(good, wt * np.abs(model) ** 2, 0.0).sum(axis=1)
+    n = good.sum(axis=1)
+    _, a1, a2, *_ = o._core.rows()
+    nant = len(o.antennas)
+    excess = np.bincount(a1, r2 - 2.0 * n, nant) + np.bincount(a2, r2 - 2.0 * n, nant)
+    power = np.bincount(a1, m2, nant) + np.bincount(a2, m2, nant)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(power > 0, np.sqrt(np.maximum(excess, 0.0) / power), np.nan)
+
+
 # ----------------------------------------------------------------------
 # one run
 # ----------------------------------------------------------------------
@@ -191,6 +214,7 @@ def _one_run(base, spec, exclude, st):
                      verbose=False, mapstats=False)
         after = o.moddif()
         chi_after, nvis_ant = _antenna_chisq(o)
+        mismatch_after = _antenna_mismatch(o)
         amp = np.array([g["gains_per_if"][n] for n in o.antennas], float).T
         with np.errstate(invalid="ignore", divide="ignore"):
             logg = np.where(amp > 0, np.log(amp), np.nan)
@@ -210,6 +234,7 @@ def _one_run(base, spec, exclude, st):
             antenna_rchisq_before=chi_before,
             antenna_rchisq=chi_after,
             antenna_nvis=nvis_ant,
+            antenna_mismatch=mismatch_after,
             state=keep,
         )
     except Exception as exc:  # noqa: BLE001 - a failed run is reported
@@ -278,6 +303,7 @@ class BayesGainResult:
     applied: bool = False
     elapsed: float = 0.0
     files: dict = field(default_factory=dict)
+    antenna_mismatch: dict = field(default_factory=dict)   # naive/after, [nant] each: fraction of |model|
 
     # -- derived views ----------------------------------------------------
 
@@ -346,6 +372,7 @@ class BayesGainResult:
                 "loo_shift": med("loo_shift", log=True),
                 "rchisq_before": float(self.antenna_rchisq["before"][a]),
                 "rchisq_after": float(self.antenna_rchisq["after"][a]),
+                "mismatch_after": float(self.antenna_mismatch["after"][a]) if self.antenna_mismatch else math.nan,
                 "per_if": per_if,
             })
         return rows
@@ -424,14 +451,25 @@ class BayesGainResult:
                     "uncertainty"
                 )
         out += self._normalisation_findings()
-        worst = int(np.nanargmax(np.nan_to_num(
-            self.antenna_rchisq["after"], nan=-np.inf)))
-        out.append(
-            f"Worst-fitting station after calibration: "
-            f"{self.antennas[worst]} (reduced chi-squared "
-            f"{self.antenna_rchisq['after'][worst]:.3g} vs a median of "
-            f"{np.nanmedian(self.antenna_rchisq['after']):.3g})"
-        )
+        if self.antenna_mismatch:
+            # Ranked by the fractional mismatch: chi-squared would name the most sensitive station.
+            mis = np.asarray(self.antenna_mismatch["after"], float)
+            worst = int(np.nanargmax(np.nan_to_num(mis, nan=-np.inf)))
+            out.append(
+                f"Worst-fitting station after calibration: "
+                f"{self.antennas[worst]} (model mismatch {100 * mis[worst]:.1f}% "
+                f"of the visibility amplitude vs a median of {100 * np.nanmedian(mis):.1f}%; "
+                f"reduced chi-squared {self.antenna_rchisq['after'][worst]:.3g})"
+            )
+        else:
+            worst = int(np.nanargmax(np.nan_to_num(
+                self.antenna_rchisq["after"], nan=-np.inf)))
+            out.append(
+                f"Worst-fitting station after calibration: "
+                f"{self.antennas[worst]} (reduced chi-squared "
+                f"{self.antenna_rchisq['after'][worst]:.3g} vs a median of "
+                f"{np.nanmedian(self.antenna_rchisq['after']):.3g})"
+            )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             net = np.nanmean(self.applied_log, axis=1)
@@ -562,6 +600,7 @@ class BayesGainResult:
                 "influence_best_model": self.influence,
             },
             "antenna_rchisq": self.antenna_rchisq,
+            "antenna_mismatch": self.antenna_mismatch,
             "runs": self.runs,
             "applied": self.applied,
             "elapsed_s": self.elapsed,
@@ -826,6 +865,7 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
            "before": {"chisq": ref["chisq_before"], "ndata": ref["ndata"]},
            "naive_gscale": {"chisq": ref["chisq"], "ndata": ref["ndata"]}}
     ant_after = ref["antenna_rchisq"]
+    mis_after = ref["antenna_mismatch"]
     if state is not None:
         fac = np.exp(np.where(np.isfinite(applied), applied, 0.0))
         state._core.apply_gain_factors(np.ascontiguousarray(fac, np.float32))
@@ -833,12 +873,14 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
         d = state.moddif()
         fit["bayes"] = {"chisq": d["chisq"], "ndata": d["ndata"]}
         ant_after, _ = _antenna_chisq(state)
+        mis_after = _antenna_mismatch(state)
     antenna_rchisq = {"before": ref["antenna_rchisq_before"],
                       "naive": ref["antenna_rchisq"], "after": ant_after}
+    antenna_mismatch = {"naive": ref["antenna_mismatch"], "after": mis_after}
 
     runs = [{k: v for k, v in r.items()
              if k not in ("logg", "state", "antenna_rchisq_before",
-                          "antenna_rchisq", "antenna_nvis")}
+                          "antenna_rchisq", "antenna_nvis", "antenna_mismatch")}
             for r in sorted(results, key=lambda r: (
                 mi[r["model"]], -1 if r["exclude"] is None else ai[r["exclude"]]))]
 
@@ -863,6 +905,7 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
         p_correction=p1, applied_log=applied,
         applied_sigma=np.sqrt(np.maximum(applied_var, 0.0)),
         influence=influence, antenna_rchisq=antenna_rchisq, fit=fit,
+        antenna_mismatch=antenna_mismatch,
     )
     if apply:
         fac = np.exp(np.where(np.isfinite(applied), applied, 0.0))

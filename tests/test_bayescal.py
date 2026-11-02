@@ -243,3 +243,24 @@ def test_writes_report_figure_and_table(corrupted_uvfits_file, tmp_path):
 
     if pytest.importorskip("matplotlib"):
         assert os.path.getsize(prefix + ".png") > 10000
+
+
+def test_station_mismatch_does_not_follow_sensitivity():
+    """The same 10% model error on every baseline: chi-squared grows with a station's weight, the mismatch not."""
+    from types import SimpleNamespace
+    from difmapy.bayescal import _antenna_chisq, _antenna_mismatch
+    rng = np.random.default_rng(3)
+    sens = np.array([30.0, 1.0, 1.0, 0.5])             # station 0 a phased array, 30x the weight of the others
+    a1, a2 = np.triu_indices(4, 1)
+    a1, a2 = np.repeat(a1, 400), np.repeat(a2, 400)
+    model = np.ones((a1.size, 2), complex)
+    wt = (1e4 * sens[a1] * sens[a2])[:, None] * np.ones((1, 2))
+    sigma = 1 / np.sqrt(wt)
+    vis = 1.1 * model + sigma * (rng.normal(size=model.shape) + 1j * rng.normal(size=model.shape))
+    core = SimpleNamespace(stream_vis=lambda: (vis, wt), stream_model=lambda: model,
+                           selection=lambda: {"if_used": [True, True]}, rows=lambda: (None, a1, a2))
+    o = SimpleNamespace(_core=core, antennas=["YY", "EF", "MC", "T6"])
+    chi, _ = _antenna_chisq(o)
+    mis = _antenna_mismatch(o)
+    assert np.argmax(chi) == 0 and chi[0] > 2 * np.median(chi)
+    assert np.allclose(mis, 0.1, rtol=0.05)

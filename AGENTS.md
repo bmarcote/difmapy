@@ -527,6 +527,40 @@ number of workers (a test pins it). Things that look odd but are meant:
   inside an `rc_context` that turns `text.usetex` off: with LaTeX on,
   every "%" in a label starts a comment and truncates it.
 
+## Lessons from the vlbipy AI mode (EB104G, 2026-10-30)
+
+vlbipy's AI mode (`vlbipy.ai`, see vlbipy's `docs/usage/ai.md`) reduced the EVN experiment EB104G end to end and
+traced every residual amplitude problem of the calibrated calibrators to its cause. What it means for difmapy:
+
+- **difmap gains are per station, not per hand.** `selfcal`/`gscale`/`bayes_gscale` solve one gain for RR and
+  LL together (Stokes I), so an RCP/LCP amplitude offset (EB104G after the a-priori calibration: UR -12%, O8
+  -6%, SR -5%, from a wrong DPFU/Tsys of one receptor) is invisible to them and survives every self-cal round.
+  It has to be corrected before the data reach difmapy (vlbipy levels the hands in its scalar bandpass,
+  `level_hands`). Do not "fix" difmapy to solve per hand: the model is Stokes I.
+- **`bayes_gscale(per_if=True)` on a weak station is noise.** T6 on a fringe finder with 5 scans got 5.3-7.6
+  across 8 IFs; carried to every field, that is up to 18% subband steps. When the subbands are levelled
+  upstream at high SNR (vlbipy's scalar bandpass), call it with `per_if=False` (vlbipy's default since this
+  date, `[selfcal].bayes_per_if`).
+- **The Bayesian shrinkage leaves 10-15% deficits alone by design** (`prior_sigma = 0.1`): a subband or station
+  that low is "as calibrated" for the model, which is why a low lowest subband was never corrected by it. That is
+  the scalar bandpass's job, not gscale's.
+- **`selfcal(amp=True)` with the default `float_scale=False` breaks on one far-off station.** The scale is held
+  by the *mean* gain of each IF (`norm_cors`), the same flaw `bayes_gscale` works around for `gscale`: on EB104G
+  T6 asked for x2.8 (up to x12.7) and pulled every other station to x0.65-0.8 - the weighted chi-squared went up
+  60x, at any solint, amp-only or amp+phase. With `float_scale=True` the same solve lowers it by 46%. Anything that
+  solves time-dependent amplitudes and normalises per station afterwards should float the scale.
+- **`bayes_gscale` is constant in time.** A station whose sensitivity changes during the run (EB104G: T6 fell x4
+  on both calibrators, JB +-30% with 9-11% scan-to-scan jumps, both with nominal Tsys) keeps that time
+  dependence. vlbipy now follows it with `selfcal(amp=True, phase=False, solint="scan")` against the converged
+  model, accepted when the fit improves by 1%, reduced to one curve per station (median over IFs) divided by its
+  median over time, and written through `savecaltable(..., solutions=sol)` with
+  `sol = io.solutions.from_gain_table(obs, since=snapshot)` - so the Bayesian level stays and only the shape is
+  added (`vlbipy.backends.difmap.time_amplitude_selfcal`).
+- SFXC channels are correlated (adjacent-channel noise correlation 0.50, windowed FFT): a noise estimate from
+  channel-to-channel differences is ~3x too small in variance, and a channel average is sqrt(2) noisier than
+  `sigma / sqrt(nchan)`. Anything in difmapy that estimates noise across channels of unaveraged SFXC data must
+  account for it (difmapy averages channels per IF on load, so its weights are not affected).
+
 ## Known behaviour worth remembering
 
 - **Only the inner quarter of a map is meaningful.** Outside it the

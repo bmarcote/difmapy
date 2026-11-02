@@ -81,6 +81,11 @@ prior sigma 10%):
 - **Leave-one-out influence**: how much each station's gain moves when
   another is left out of the model.
 - **Station fit**: each station's reduced chi-squared before and after.
+  The chi-squared grows with a station's sensitivity (the same fractional
+  model error costs a phased array or a 100-m dish far more of it), so the
+  "worst-fitting station" of the findings is ranked instead by the model
+  mismatch: the rms of `V - M` beyond the thermal noise, as a fraction of
+  `|M|` (`antenna_mismatch` in the result and its JSON).
 
 ## What it writes
 
@@ -118,3 +123,20 @@ With `prefix`:
 :   `False` to look at the result without changing the data.
 
 All the parameters are in the [reference](../reference/bayescal.md).
+
+## What it cannot correct
+
+`bayes_gscale` solves what `gscale` solves, with error bars, so it shares its blind spots:
+
+- **The two hands.** One gain per station serves RR and LL together, so an RCP/LCP amplitude offset (a wrong
+  Tsys or DPFU of one receptor) is invisible to it. Level the hands before the data reach difmapy - vlbipy does
+  it in its scalar bandpass.
+- **Time.** The corrections are constant over the observation. A station whose sensitivity changes during the
+  run keeps that change; follow it with `selfcal(amp=True, phase=False, solint="scan")` on a well-modelled
+  calibrator, and keep the Bayesian level by normalising those solutions to their median over time before
+  exporting them (`savecaltable(..., solutions=...)`).
+- **Small offsets, on purpose.** An offset within `prior_sigma` is left alone: the data cannot tell it from the
+  calibration's own scatter. A subband 10% low is not corrected here; level the subbands upstream.
+- **Weak stations per IF.** With `per_if=True`, a station with little signal gets one noisy estimate per IF, and
+  the table carries that noise to every source it is applied to. When the subbands are already level, prefer
+  `per_if=False`.
