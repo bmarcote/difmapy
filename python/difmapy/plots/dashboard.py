@@ -21,6 +21,8 @@ __all__ = ["Dashboard", "dashboard"]
 #: Source models `bayes_gscale` may compare, as the Bayes row offers
 #: them, and which of them are ticked to begin with.
 BAYES_MODELS = (("clean", False), ("gauss1", True), ("gauss2", True), ("gauss3", True))
+#: Taper value the Taper card offers while no taper is set (the taper at the radius typed next to it).
+DEFAULT_TAPER_VALUE = 0.5
 
 #: Terminal escape codes (the bold of the modelfit report), which the
 #: output tab shows as plain text.
@@ -348,6 +350,8 @@ class Dashboard(PlotWindow):
         img = QtWidgets.QHBoxLayout()
         img.setSpacing(10)
         self.uv_edits = {}
+        # Fields typed into but not applied yet: the periodic sync must not overwrite them.
+        self._uv_typed = set()
 
         def uv_card(name, apply, fields):
             card, lay, button = _action_card(name, apply)
@@ -357,6 +361,7 @@ class Dashboard(PlotWindow):
                 e.setPlaceholderText(placeholder)
                 e.setToolTip(tip)
                 e.returnPressed.connect(lambda: apply())
+                e.textEdited.connect(lambda _text, k=key: self._uv_typed.add(k))
                 self.uv_edits[key] = e
                 row.addLayout(_labelled(label, e), 1)
             lay.addLayout(row)
@@ -370,7 +375,7 @@ class Dashboard(PlotWindow):
             ("uvmin", "Min", "0", "shortest UV radius imaged: M-lambda, or with a unit (500k)"),
             ("uvmax", "Max", "no limit", "longest UV radius imaged; empty for no limit")))
         self.uvtaper_button = uv_card("Taper", self.run_uvtaper, (
-            ("value", "Value", "none", "the taper at the radius, between 0 and 1; empty for no taper"),
+            ("value", "Value", "none", "the taper at the radius, between 0 and 1 (default 0.5); empty for no taper"),
             ("radius", "Radius", "", "UV radius where the taper falls to the value: M-lambda, or with a unit")))
         col.addLayout(img)
         self._sync_uv_fields()
@@ -390,7 +395,7 @@ class Dashboard(PlotWindow):
         return page
 
     def _sync_uv_fields(self):
-        """Show the observation's UV range and taper in the Main tab (fields being typed in are left alone), so that a change made in the map panel or at the prompt shows here too."""
+        """Show the observation's UV range and taper in the Main tab, so that a change made in the map panel or at the prompt shows here too. A field typed into is left alone until its card is applied (`_uv_typed`), not only while it has the focus: moving to the next field, or to the button, must not wipe what was typed. Without a taper the value field offers `DEFAULT_TAPER_VALUE`."""
         from difmapy.units import format_uvdist
 
         obs = self.obs
@@ -400,11 +405,11 @@ class Dashboard(PlotWindow):
         values = {
             "uvmin": format_uvdist(obs._uvmin) if obs._uvmin else "",
             "uvmax": format_uvdist(obs._uvmax) if obs._uvmax else "",
-            "value": f"{obs._gauval:g}" if taper else "",
+            "value": f"{obs._gauval:g}" if taper else f"{DEFAULT_TAPER_VALUE:g}",
             "radius": format_uvdist(obs._gaurad) if taper else "",
         }
         for key, e in self.uv_edits.items():
-            if not e.hasFocus() and e.text() != values[key]:
+            if key not in self._uv_typed and not e.hasFocus() and e.text() != values[key]:
                 e.setText(values[key])
 
     def _make_output(self):
@@ -591,6 +596,7 @@ class Dashboard(PlotWindow):
 
         def go():
             self.obs.uvrange(lo, hi)
+            self._uv_typed.difference_update(("uvmin", "uvmax"))
             self._uv_report("uvrange")
             return True
 
@@ -607,6 +613,7 @@ class Dashboard(PlotWindow):
             # Read inside the run, so a typo is reported rather than raised.
             value = float(text or 0.0)
             self.obs.uvtaper(value, radius if value else 0.0)
+            self._uv_typed.difference_update(("value", "radius"))
             self._uv_report("uvtaper")
             return True
 
@@ -818,6 +825,8 @@ SAVERS = {
                  _native_suffix(".G", ".TASAV.FITS"), lambda obs, p: obs.savecaltable(p)),
     "flags": ("Flags", "Save the flags added in the session", "All files (*)",
               _native_suffix(".flagcmd", ".FG.TASAV.FITS"), lambda obs, p: obs.wflags(p)),
+    "corrections": ("Gain corrections", "Save the amplitude corrections per station and IF", "JSON (*.json)",
+                    ".corrections.json", lambda obs, p: obs.wcorrections(p)),
     "session": ("Whole session", "Save the whole session (prefix)", "All files (*)", "",
                 _save_session),
 }

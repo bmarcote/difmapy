@@ -173,6 +173,8 @@ class Observation:
         self._flags_at_load = None
         #: Width in seconds of the time-averaging bins, if averaged.
         self._aver_time = None
+        #: The last `bayes_gscale` result whose corrections were applied (written by `wcorrections`), or None.
+        self._bayes_result = None
         #: After channel averaging: the first and last *original* global
         #: channel behind each channel, and the original channel counts.
         self._chan_origin = None
@@ -1820,6 +1822,32 @@ class Observation:
         used = np.asarray(self._core.gains_used()).reshape(nt, nif, nant)
         amp = np.asarray(amp, dtype=np.float64).reshape(nt, nif, nant)
         return np.where(used, amp, fill), used
+
+    def wcorrections(self, path, quiet=True):
+        """Write the amplitude corrections per station and IF to a JSON file: the accumulated gains (`station_gains` with ``per_if=True``: the factors the data are multiplied by, 1.0 without a solution) and, after a `bayes_gscale` that applied its corrections, what it applied (``"bayes_gscale"``: one factor per IF, null without a solution; see `BayesGainResult.corrections_record`).
+
+        Parameters
+        ----------
+        path : str
+            The JSON file to write.
+        quiet : bool, default True
+            Return None. ``False`` returns the record written.
+
+        Returns
+        -------
+        dict | None
+            With ``quiet=False``: the record (``source``, ``antennas``, ``if_freqs_hz``, ``convention``, ``corrections`` and, when there is one, ``bayes_gscale``).
+        """
+        gains = self.station_gains(per_if=True)
+        record = {"source": self.source, "antennas": list(gains),
+                  "if_freqs_hz": [float(f) for (f, _, _) in self._core.ifs],
+                  "convention": "amplitude factor the visibilities of the station are multiplied by, accumulated over "
+                                "the session; 1.0 = no correction (or no solution). CASA tables store the reciprocal.",
+                  "corrections": gains}
+        if self._bayes_result is not None:
+            record["bayes_gscale"] = self._bayes_result.corrections_record()
+        write_json(path, record)
+        return self._done(record, quiet)
 
     def station_gains(self, per_if=False, outfile=None):
         """The accumulated amplitude gain corrections per station: the factors difmapy multiplies the data by (`savecaltable` writes their reciprocal for CASA). A station with no solution reports 1.0, since its data is passed through unchanged.
@@ -3522,6 +3550,7 @@ class Observation:
         * ``<prefix>.ms`` - for an observation that came from a Measurement Set, so a session that started from CASA can go back to it. Unaveraged data go into a copy of the originating MS (calibrated visibilities in CORRECTED_DATA, current flags in FLAG). Data averaged in time or frequency, on load or later, get a new MS with the averaged rows and, if channels were averaged, updated spectral windows (see `difmapy.io.ms.save_averaged_ms`).
         * ``<prefix>.G`` or ``<prefix>.TASAV.FITS`` - the calibration table of the gains accumulated in the session, as `savecaltable` writes it for the data's own format (CASA for a Measurement Set, AIPS for UVFITS), once any self-calibration has been applied.
         * ``<prefix>.flagcmd`` or ``<prefix>.FG.TASAV.FITS`` - the flags added in the session, as `wflags` writes them for the data's own format (a CASA flag-command list for a Measurement Set, an AIPS FG table for UVFITS), once any have been.
+        * ``<prefix>.corrections.json`` - the amplitude corrections per station and IF (`wcorrections`), once any self-calibration or `bayes_gscale` has been applied.
         * ``<prefix>.fits`` - the restored CLEAN map (`wmap`), once there is a model; it is restored with the current beam if it has not been yet.
         * ``<prefix>.robust-2.fits`` ... ``<prefix>.robust+2.fits`` - the restored map once for each robustness mapplot offers (-2, -1, 0, +1, +2), each with that weighting's own estimated beam, written alongside ``<prefix>.fits``. They are imaged on a copy, so the session's weighting and maps are untouched.
 
@@ -3539,7 +3568,7 @@ class Observation:
         Returns
         -------
         dict | None
-            With ``quiet=False``, the files written, by kind (``"uvf"``, ``"ms"``, ``"mod"``, ``"win"``, ``"par"``, ``"caltable"``, ``"flags"``, ``"image"``, and ``"images"``, the list of per-weighting maps).
+            With ``quiet=False``, the files written, by kind (``"uvf"``, ``"ms"``, ``"mod"``, ``"win"``, ``"par"``, ``"caltable"``, ``"flags"``, ``"corrections"``, ``"image"``, and ``"images"``, the list of per-weighting maps).
         """
         import json
 
@@ -3571,6 +3600,10 @@ class Observation:
         files["par"] = f"{prefix}.par.json"
         files["caltable"] = self._save_caltable(prefix, caltable)
         files["flags"] = self._save_flagtable(prefix, flags)
+        _, solved = self._gain_amps()
+        if solved.any() or self._bayes_result is not None:
+            self.wcorrections(f"{prefix}.corrections.json")
+            files["corrections"] = f"{prefix}.corrections.json"
         files["image"], files["images"] = self._save_image(prefix, image)
         files = {k: v for k, v in files.items() if v}
         if verbose:

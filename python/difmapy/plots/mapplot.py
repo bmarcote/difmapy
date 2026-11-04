@@ -258,6 +258,8 @@ class MapPlot(PlotWindow):
         # UV range and taper, typed in M-lambda (or with a unit, "500k");
         # Enter applies them and re-images.
         self.uv_edits = {}
+        # Fields typed into but not applied yet: a refresh must not overwrite them.
+        self._uv_typed = set()
         if not self.uv_controls:
             row.addStretch(1)
             return bar
@@ -268,6 +270,7 @@ class MapPlot(PlotWindow):
             e.setToolTip(tip)
             e.setPlaceholderText(placeholder)
             e.returnPressed.connect(self._uv_entered)
+            e.textEdited.connect(lambda _text, k=key: self._uv_typed.add(k))
             self.uv_edits[key] = e
             return e
 
@@ -279,7 +282,7 @@ class MapPlot(PlotWindow):
         row.addWidget(QtWidgets.QLabel("M\u03bb"))
         row.addSpacing(14)
         row.addWidget(QtWidgets.QLabel("Taper:"))
-        row.addWidget(field("value", 44, "taper value at the radius, 0-1; empty for no taper", "none"))
+        row.addWidget(field("value", 44, "taper value at the radius, 0-1 (default 0.5); empty for no taper", "none"))
         row.addWidget(QtWidgets.QLabel("at"))
         row.addWidget(field("radius", 56, "UV radius where the taper falls to the value (M-lambda, or with a unit)"))
         row.addWidget(QtWidgets.QLabel("M\u03bb"))
@@ -288,22 +291,25 @@ class MapPlot(PlotWindow):
         return bar
 
     def _sync_uv(self):
-        """Show the UV range and taper the observation is using, including one set at the prompt (a field being typed in is left alone)."""
+        """Show the UV range and taper the observation is using, including one set at the prompt. A field typed into is left alone until Enter applies it (not only while it has the focus); without a taper the value field offers `DEFAULT_TAPER_VALUE`."""
+        from difmapy.plots.dashboard import DEFAULT_TAPER_VALUE
+
         obs = self.obs
         taper = 0.0 < obs._gauval < 1.0 and obs._gaurad > 0.0
         values = {
             "uvmin": format_uvdist(obs._uvmin) if obs._uvmin else "",
             "uvmax": format_uvdist(obs._uvmax) if obs._uvmax else "",
-            "value": f"{obs._gauval:g}" if taper else "",
+            "value": f"{obs._gauval:g}" if taper else f"{DEFAULT_TAPER_VALUE:g}",
             "radius": format_uvdist(obs._gaurad) if taper else "",
         }
         for key, edit in self.uv_edits.items():
-            if not edit.hasFocus():
+            if key not in self._uv_typed and not edit.hasFocus():
                 edit.setText(values[key])
 
     def _uv_entered(self):
         text = {k: e.text().strip() for k, e in self.uv_edits.items()}
         try:
+            self._uv_typed.clear()
             self.set_uvrange(text["uvmin"] or 0.0, text["uvmax"] or 0.0, refresh=False)
             self.set_uvtaper(text["value"] or 0.0, text["radius"] or 0.0)
         except (ValueError, RuntimeError) as exc:

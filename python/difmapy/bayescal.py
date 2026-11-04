@@ -35,6 +35,26 @@ __all__ = ["bayes_gscale", "BayesGainResult", "DEFAULT_MODELS"]
 DEFAULT_MODELS = ("gauss1", "gauss2", "gauss3")
 DEFAULT_CLEAN_NITER = 200
 
+#: Colours of the final corrections table: (largest ``|factor - 1|`` of the tier, ANSI colour code) - green within
+#: 10%, yellow within 20%, red beyond.
+CORRECTION_COLOURS = ((0.10, "32"), (0.20, "33"), (math.inf, "31"))
+
+
+def _colour_output() -> bool:
+    """Whether the output can show colours: a terminal or a Jupyter cell, but not a file or a pipe."""
+    import sys
+
+    out = sys.stdout
+    tty = out.isatty() and os.environ.get("TERM") != "dumb" and not os.environ.get("NO_COLOR")
+    return bool(tty or type(out).__module__.startswith("ipykernel"))
+
+
+def correction_colour(factor) -> str:
+    """ANSI colour code of an amplitude correction factor (see `CORRECTION_COLOURS`), judged on the value shown (3 decimals)."""
+    deviation = abs(round(float(factor), 3) - 1.0)
+    return next(code for bound, code in CORRECTION_COLOURS if deviation < bound - 1e-9 or math.isinf(bound))
+
+
 # Free parameters that each difmap free-parameter bit stands for
 # (flux, x+y, major, ratio, phi, spectral index).
 _BIT_NPAR = {1: 1, 2: 2, 4: 1, 8: 1, 16: 1, 32: 1}
@@ -563,6 +583,41 @@ class BayesGainResult:
                          + (", per IF." if not shared else "."))
         return "\n".join(lines)
 
+    def corrections_table(self, colour=None) -> str:
+        """The corrections applied as a plain table: one row per station, one column per IF, the factor only (no uncertainties), ``-`` where a station has no solution. With `colour` (default: when the output can show it) each value is green within 10% of 1, yellow within 20% and red beyond."""
+        colour = _colour_output() if colour is None else bool(colour)
+        width = 9
+        header = f"  {'station':<9}" + "".join(f"{self._if_label(i):>{width}}" for i in range(len(self.if_freqs)))
+        freqs = f"  {'':<9}" + "".join(f"{f / 1e9:>{width - 1}.3f}G" for f in self.if_freqs)
+        lines = ["Amplitude corrections applied per station and IF (factors multiply the data; "
+                 "green within 10%, yellow within 20%, red beyond):", header, freqs]
+        for a, name in enumerate(self.antennas):
+            cells = []
+            for i in range(len(self.if_freqs)):
+                lg = self.applied_log[i, a]
+                if not np.isfinite(lg):
+                    cells.append(f"{'-':>{width}}")
+                    continue
+                factor = math.exp(lg)
+                cell = f"{factor:>{width}.3f}"
+                cells.append(f"\033[{correction_colour(factor)}m{cell}\033[0m" if colour else cell)
+            lines.append(f"  {name:<9}" + "".join(cells))
+        return "\n".join(lines)
+
+    def corrections_record(self) -> dict:
+        """The corrections applied, as plain data (what `write` saves as ``<prefix>.corrections.json``): per station, one factor per IF (None = no solution), with the IF frequencies and the colour tiers of `corrections_table`."""
+        return {
+            "source": self.source,
+            "antennas": list(self.antennas),
+            "if_freqs_hz": [float(f) for f in self.if_freqs],
+            "convention": "amplitude factor the visibilities of the station are multiplied by; null = no solution "
+                          "(left at 1). CASA tables store the reciprocal.",
+            "applied": bool(self.applied),
+            "corrections": {name: [math.exp(lg) if np.isfinite(lg) else None for lg in self.applied_log[:, a]]
+                            for a, name in enumerate(self.antennas)},
+            "tiers": {"good": "|factor - 1| < 0.10", "warn": "|factor - 1| < 0.20", "bad": "otherwise"},
+        }
+
     def __str__(self):
         return self.summary()
 
@@ -614,7 +669,7 @@ class BayesGainResult:
         return plot_bayes_gscale(self, path=path, show=show)
 
     def write(self, prefix, obs=None, outformat=None, verbose=True, **kwargs):
-        """Write ``<prefix>.json`` (the report), ``<prefix>.png`` (the diagnostics) and, given the observation, the calibration table of the corrections (`savecaltable` with these constant gains; extra keyword arguments go to it). Returns the paths written."""
+        """Write ``<prefix>.json`` (the report), ``<prefix>.corrections.json`` (the corrections applied, per station and IF: `corrections_record`), ``<prefix>.png`` (the diagnostics) and, given the observation, the calibration table of the corrections (`savecaltable` with these constant gains; extra keyword arguments go to it). Returns the paths written."""
         files = {}
         self.files = files
         parent = os.path.dirname(os.fspath(prefix))
@@ -630,6 +685,8 @@ class BayesGainResult:
         # MS for a CASA table, say) does not lose it.
         files["json"] = f"{prefix}.json"
         write_json(files["json"], self.to_dict())
+        files["corrections"] = f"{prefix}.corrections.json"
+        write_json(files["corrections"], self.corrections_record())
         if obs is not None:
             files["caltable"] = self.save_caltable(
                 obs, prefix, outformat=outformat, verbose=verbose, **kwargs)
@@ -913,12 +970,15 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
         obs._core.apply_gain_factors(np.ascontiguousarray(fac, np.float32))
         obs._dirty()
         res.applied = True
+        obs._bayes_result = res
     res.elapsed = time.perf_counter() - t_start
     if prefix:
         extra = {k: v for k, v in (("ms", ms), ("uvfits", uvfits)) if v}
         res.write(prefix, obs=obs, outformat=outformat, verbose=verbose, **extra)
     if verbose:
         print(res.summary())
+        print()
+        print(res.corrections_table())
         if res.files:
             print("Wrote " + ", ".join(
                 p if isinstance(p, str) else ", ".join(p)

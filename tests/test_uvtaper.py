@@ -181,5 +181,28 @@ def test_dashboard_uv_rows(obs):
     assert "uvtaper" in d.output.toPlainText()
     obs.uvtaper()                                   # from the prompt ...
     d._sync_uv_fields()
-    assert d.uv_edits["value"].text() == ""         # ... shows in the dashboard
+    assert d.uv_edits["value"].text() == "0.5"      # ... shows in the dashboard, with the default value offered
+    assert d.uv_edits["radius"].text() == ""
+    d.close()
+
+
+def test_dashboard_keeps_typed_uv_fields_until_applied(obs):
+    """What is typed survives the periodic sync after the field loses the focus, until the card is applied."""
+    from difmapy.plots.dashboard import Dashboard
+
+    d = Dashboard(obs)
+    d.uv_edits["radius"].textEdited.emit("12")       # what typing does (setText does not emit textEdited)
+    d.uv_edits["radius"].setText("12")
+    d.uv_edits["uvmax"].textEdited.emit("40")
+    d.uv_edits["uvmax"].setText("40")
+    d._sync_uv_fields()
+    assert d.uv_edits["radius"].text() == "12" and d.uv_edits["uvmax"].text() == "40"
+    d.uvtaper_button.click()
+    assert (obs._gauval, obs._gaurad) == (0.5, 1.2e7)
+    assert obs._uvmax == 0.0                         # the UV range card was not applied ...
+    d._sync_uv_fields()
+    assert d.uv_edits["uvmax"].text() == "40"        # ... so its typed value stays
+    obs.uvtaper(0.3, 5)
+    d._sync_uv_fields()
+    assert d.uv_edits["value"].text() == "0.3"       # an applied card follows the observation again
     d.close()
