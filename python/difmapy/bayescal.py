@@ -191,14 +191,18 @@ def _antenna_mismatch(o):
 # ----------------------------------------------------------------------
 
 
-def _median_normalised(logg):
-    """Log-gains ``[nif, nant]`` shifted so that the median station of each IF has no correction.
+def _median_normalised(logg, anchor=None):
+    """Log-gains ``[nif, nant]`` shifted so that the median station of each IF has no correction - the median of
+    the `anchor` stations (indices; `bayes_gscale`'s ``fixed``) where any of them has an estimate in that IF.
 
     gscale keeps the data's flux scale by setting the *mean* gain amplitude of every IF to one (difmap's ``norm_cors``), so a single station that is far off - one that needs x4 in the two IFs it has data in - pulls every other station of those IFs down with it (to x0.57 for eight stations), and leaving it out of the model does not help: it is still in the normalisation. The median station is not moved by it.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         centre = np.nanmedian(logg, axis=1, keepdims=True)
+        if anchor:
+            held = np.nanmedian(logg[:, list(anchor)], axis=1, keepdims=True)
+            centre = np.where(np.isfinite(held), held, centre)
     return logg - np.where(np.isfinite(centre), centre, 0.0)
 
 
@@ -237,7 +241,8 @@ def _one_run(base, spec, exclude, st):
         chi_before, _ = _antenna_chisq(o)
         # The median renormalisation is done here, on the floating-scale
         # solution; difmap's own (the mean) is gscale's.
-        median_norm = not st["float_scale"] and st["norm"] == "median"
+        anchor = st.get("anchor") or []
+        median_norm = bool(anchor) or (not st["float_scale"] and st["norm"] == "median")
         g = o.gscale(float_scale=st["float_scale"] or median_norm, quiet=False,
                      verbose=False, mapstats=False)
         after = o.moddif()
@@ -247,7 +252,7 @@ def _one_run(base, spec, exclude, st):
         with np.errstate(invalid="ignore", divide="ignore"):
             logg = np.where(amp > 0, np.log(amp), np.nan)
         if median_norm:
-            logg = _median_normalised(logg)
+            logg = _median_normalised(logg, anchor)
         if not np.isfinite(after["chisq"]):
             raise RuntimeError("the fit statistics are not finite")
         out.update(
@@ -412,7 +417,8 @@ class BayesGainResult:
 
     def _normalisation_findings(self) -> list[str]:
         """The stations that would have dragged a mean renormalisation of the flux scale (difmap's) by more than 5% in some IF on their own: in each such IF, the station without which the drag would be less than half, with its difmap gscale there, what every other station would have been scaled by, and what was applied to it instead (a station the data do not constrain gets a wild gscale and is left alone)."""
-        if self.settings.get("float_scale") or self.settings.get("norm", "mean") != "median":
+        if not self.settings.get("fixed") and (self.settings.get("float_scale")
+                                               or self.settings.get("norm", "mean") != "median"):
             return []
         dragged: dict = {}
         for i, row in enumerate(np.asarray(self.naive, float)):
@@ -431,7 +437,8 @@ class BayesGainResult:
                 + ", ".join(f"x{c:.2f} in {self._if_label(i)}" for i, c, _ in items)
                 + ", and its mean renormalisation of the flux scale would have scaled every other station "
                 "there by " + ", ".join(f"x{d:.2f}" for _, _, d in items)
-                + " - the median station holds the scale instead; applied to it: "
+                + (f" - {', '.join(self.settings['fixed'])} hold the scale instead (held); applied to it: "
+                   if self.settings.get("fixed") else " - the median station holds the scale instead; applied to it: ")
                 + ", ".join(f"x{math.exp(self.applied_log[i, a]):.2f} (P = {self.p_correction[i, a]:.2f})"
                             for i, _, _ in items)
                 for a, items in dragged.items()]
@@ -541,7 +548,9 @@ class BayesGainResult:
             "* off its calibration, P >= 0.95; ? probably, P >= 0.75;",
             f"a-priori accuracy {100 * self.settings['prior_sigma']:.0f}%, left alone within it"
             + (f"; the subbands follow their own estimates around the station's level, shrunk with a "
-               f"{100 * self.settings['if_sigma']:.0f}% prior" if self.settings.get("if_sigma") else "") + "):",
+               f"{100 * self.settings['if_sigma']:.0f}% prior" if self.settings.get("if_sigma") else "")
+            + (f"; held, and holding the flux scale: {', '.join(self.settings['fixed'])}"
+               if self.settings.get("fixed") else "") + "):",
             f"  {'station':<9}" + "".join(f"{c:>{width}}" for c, _ in cols)
             + f"{'rchi2 before':>14}{'after':>8}",
         ]
@@ -757,8 +766,8 @@ def _combine_ifs(mean, var):
 
 
 def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0, jackknife=True,
-                 per_if=True, if_sigma=None, float_scale=False, norm="median", nloop=2, solint=0.0,
-                 clean_gain=0.05, sigma_floor=0.01, model_sigma=None, timeavg=None,
+                 per_if=True, if_sigma=None, fixed=None, float_scale=False, norm="median", nloop=2,
+                 solint=0.0, clean_gain=0.05, sigma_floor=0.01, model_sigma=None, timeavg=None,
                  workers=None, apply=True, prefix=None, outformat=None,
                  ms=None, uvfits=None, plot=None,
                  quiet=True, verbose=True) -> BayesGainResult:
@@ -778,6 +787,8 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
         True (the default): every IF gets its own correction, as `gscale` solves them, with its own uncertainty and P(needed) - the summary, the figure and the tables show and apply one per station and IF. False: the IFs' estimates are combined into one correction per station, applied to every IF.
     if_sigma : float | None
         With `per_if`: decide each station's level as ``per_if=False`` does (one Bayes factor on its IF-combined estimate), then add each IF's departure from that combined estimate, shrunk by a Gaussian prior of this width - the scatter of the subband levels the a-priori calibration leaves (0.1: 10%). A departure measured to much better than `if_sigma` is applied in full, so a subband 10% low on a bright calibrator is levelled even where the station as a whole is within `prior_sigma`; one buried in its noise is not, so a weak station gets one level, not one noisy value per IF. An IF without an estimate gets the station's level. None (the default): every IF is judged on its own, with the station-level test.
+    fixed : sequence of str | None
+        Stations whose amplitudes are already right (e-MERLIN antennas set against a flux calibrator's model, say): they get no correction, and the flux scale of every IF is held by them - the median of their estimates there is set to one, in place of the median station's (`norm` and `float_scale` give way) - so the other stations are scaled to them, as difmap's amplitude self-calibration does with antennas fixed by `selfant`. An IF none of them has data in keeps the median station. They are still in the source models and the leave-one-out runs.
     float_scale : bool
         False keeps the data's flux scale (see `norm`); True lets it float onto the model's.
     norm : {"median", "mean"}
@@ -827,6 +838,10 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
     if if_sigma is not None and not float(if_sigma) > 0:
         raise ValueError("if_sigma must be positive (or None)")
     subbands = bool(per_if) and if_sigma is not None
+    unknown = [n for n in (fixed or []) if n not in obs.antennas]
+    if unknown:
+        raise ValueError(f"fixed: unknown station(s) {', '.join(map(str, unknown))}; the array is "
+                         f"{', '.join(obs.antennas)}")
     if norm not in ("median", "mean"):
         raise ValueError(f"norm must be 'median' or 'mean', got {norm!r}")
 
@@ -851,8 +866,9 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
                 if present[i] and n not in base.ignored]
     subsets = [None] + (excluded if jackknife else [])
 
+    held = [names.index(n) for n in dict.fromkeys(fixed or [])]
     st = {"nloop": int(nloop), "solint": solint, "clean_gain": float(clean_gain),
-          "float_scale": bool(float_scale), "norm": norm, "keep": True}
+          "float_scale": bool(float_scale), "norm": norm, "keep": True, "anchor": held}
     jobs = [(s, e) for s in specs for e in subsets]
     nworkers = max(1, min(int(workers or os.cpu_count() or 1), len(jobs)))
     if verbose:
@@ -940,6 +956,11 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
         applied, applied_var = applied + off, applied_var + off_var
         post_mean, post_var = post_mean + off, post_var + off_var
         mean, var = if_mean, if_var
+    if held:
+        # Held stations are right by definition: no correction (where they have data), and P(off) = 0.
+        applied[:, held] = np.where(np.isfinite(applied[:, held]), 0.0, np.nan)
+        applied_var[:, held] = np.where(np.isfinite(applied_var[:, held]), 0.0, np.nan)
+        p1[:, held] = np.where(np.isfinite(p1[:, held]), 0.0, np.nan)
 
     best = int(np.argmax(prob))
     naive = logg[best, 0]
@@ -981,6 +1002,7 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
                   "outlier_sigma": float(outlier_sigma),
                   "jackknife": bool(jackknife), "per_if": bool(per_if),
                   "if_sigma": None if if_sigma is None else float(if_sigma),
+                  "fixed": [names[a] for a in held],
                   "float_scale": bool(float_scale), "norm": norm, "nloop": int(nloop),
                   "solint": solint, "clean_gain": float(clean_gain),
                   "sigma_floor": float(sigma_floor),

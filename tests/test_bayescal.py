@@ -190,6 +190,25 @@ def test_subbands_are_levelled_around_the_station_level(per_if_errors):
         o.bayes_gscale(if_sigma=0.0, **kw)
 
 
+def test_held_stations_get_nothing_and_hold_the_flux_scale(corrupted_uvfits_file):
+    """fixed: AN1 is taken as right (it is x1.40 against the median station AN4): it gets no correction, and the
+    estimates of every IF are scaled to it rather than to the median station - so AN4, now 1/1.40 off, is corrected
+    and the scale of the data moves onto AN1's."""
+    path, gerr = corrupted_uvfits_file
+    o = _load(path)
+    r = o.bayes_gscale(models=MODELS, fixed=["AN1"], quiet=False, verbose=False, plot=False, apply=False)
+    expected = _expected(gerr) / _expected(gerr)[1]
+    np.testing.assert_allclose(np.exp(np.median(r.naive, axis=0)), expected, rtol=2e-3)
+    np.testing.assert_array_equal(r.factors[:, 1], 1.0)
+    assert (r.p_correction[:, 1] == 0).all() and (r.applied_sigma[:, 1] == 0).all()
+    assert (r.p_correction[:, 4] > 0.95).all()
+    np.testing.assert_allclose(r.factors[:, 4], expected[4], rtol=0.02)
+    assert r.settings["fixed"] == ["AN1"] and "held, and holding the flux scale: AN1" in r.summary()
+    assert not any("median station holds the scale" in f for f in r.findings())
+    with pytest.raises(ValueError, match="unknown station"):
+        o.bayes_gscale(models=("point1",), fixed=["XX"], quiet=False, verbose=False, plot=False, apply=False)
+
+
 def test_leaves_well_calibrated_data_alone(uvfits_file):
     o = _load(uvfits_file)
     r = o.bayes_gscale(models=MODELS, quiet=False, verbose=False, plot=False)

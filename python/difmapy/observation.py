@@ -1751,7 +1751,7 @@ class Observation:
             self._print_fit(res)
         return self._done(res, quiet, outfile)
 
-    def bayes_gscale(self, models=("gauss1", "gauss2", "gauss3"), prior_sigma=0.10, outlier_sigma=1.0, jackknife=True, per_if=True, if_sigma=None, float_scale=False, norm="median", nloop=2, solint=0.0, clean_gain=0.05, sigma_floor=0.01, model_sigma=None, timeavg=None, workers=None, apply=True, prefix=None, outformat=None, ms=None, uvfits=None, plot=None, quiet=True, verbose=True):
+    def bayes_gscale(self, models=("gauss1", "gauss2", "gauss3"), prior_sigma=0.10, outlier_sigma=1.0, jackknife=True, per_if=True, if_sigma=None, fixed=None, float_scale=False, norm="median", nloop=2, solint=0.0, clean_gain=0.05, sigma_floor=0.01, model_sigma=None, timeavg=None, workers=None, apply=True, prefix=None, outformat=None, ms=None, uvfits=None, plot=None, quiet=True, verbose=True):
         """Bayesian amplitude calibration of every station: `gscale` with each station left out of the source model in turn, several source models weighed against each other, and the result shrunk towards the a-priori calibration. A station within its a-priori accuracy (`prior_sigma`) is left alone; one clearly off it gets its correction almost in full (`outlier_sigma`). The flux scale of each IF is kept by its median station, not by the mean gain as `gscale` does, which one station far off its calibration drags. See `difmapy.bayescal` for the method.
 
         Parameters
@@ -1768,6 +1768,8 @@ class Observation:
             One correction per station and IF; ``False`` combines the IFs into one per station.
         if_sigma : float | None, default None
             With `per_if`: decide each station's level on its IF-combined estimate and add each IF's departure from it, shrunk by a Gaussian prior of this width (0.1: subbands within ~10% of each other) - levels the subbands of well-measured stations, keeps one level for weak ones. ``None`` judges every IF on its own.
+        fixed : list of str | None, default None
+            Stations whose amplitudes are already right: no correction for them, and each IF's flux scale is held by them instead of the median station, so the others are scaled to them (difmap's amplitude self-calibration with `selfant`-fixed antennas).
         float_scale : bool, default False
             Let the flux scale float onto the model's instead of keeping the data's.
         norm : str, default "median"
@@ -1812,7 +1814,7 @@ class Observation:
 
         return bayes_gscale(
             self, models=models, prior_sigma=prior_sigma, outlier_sigma=outlier_sigma, jackknife=jackknife,
-            per_if=per_if, if_sigma=if_sigma, float_scale=float_scale, norm=norm, nloop=nloop, solint=solint,
+            per_if=per_if, if_sigma=if_sigma, fixed=fixed, float_scale=float_scale, norm=norm, nloop=nloop, solint=solint,
             clean_gain=clean_gain, sigma_floor=sigma_floor, model_sigma=model_sigma, timeavg=timeavg,
             workers=workers, apply=apply, prefix=prefix, outformat=outformat,
             ms=ms, uvfits=uvfits, plot=plot, quiet=quiet, verbose=verbose)

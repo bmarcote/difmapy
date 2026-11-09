@@ -572,7 +572,9 @@ them into one correction per station. With `if_sigma` (e.g. 0.1) each
 station's level is decided once on its IFs together, and every IF
 follows its own estimate around it, shrunk by a Gaussian prior of that
 width: well-measured subband steps are levelled, a weak station's
-per-IF noise collapses to one level.
+per-IF noise collapses to one level. `fixed` stations (already right: e-MERLIN
+antennas set against 3C286, say) get no correction and hold the flux
+scale of every IF, so the others are scaled to them.
 
 1. **Leave one station out.** For each station (and once for the full
    array) the source model is rebuilt with that station ignored, phase

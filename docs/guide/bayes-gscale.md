@@ -74,6 +74,11 @@ of width `if_sigma`. A subband step measured to much better than `if_sigma` is l
 station left alone as a whole; the per-IF estimates of a weak station, which are noise, collapse to its one
 level. An IF without an estimate gets the station's level.
 
+`fixed` names stations whose amplitudes are already right - e-MERLIN antennas set against 3C286's model, say.
+They get no correction, and every IF's flux scale is held by them (the median of their estimates there is set to
+one, in place of the median station's), so the other stations are scaled to them: what difmap's amplitude
+self-calibration does with antennas fixed by `selfant`. They still take part in the source models.
+
 ## The diagnostics
 
 ![The bayes_gscale diagnostic figure](../images/bayes_gscale.png){ loading=lazy }
