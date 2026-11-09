@@ -4,7 +4,7 @@
 
 1. **Leave one station out.** For every station `a` (and once with the full array) the source model is rebuilt with `a` ignored, phase self-calibrating as it goes. `a` is then brought back, phase self-calibrated against that fixed model, and the whole array `gscale`d. The correction this gives `a` comes from a model it had no say in. The runs that leave out the *other* stations give a jackknife spread for it; and where leaving `a` out moves its own estimate, that shift is counted as systematic uncertainty too, since it can mean either that the full-array model had absorbed the station's error or that the station's baselines reach spatial frequencies no other station constrains.
 2. **Compare source models.** The same is done for several model families - one to a few Gaussians or point sources fitted with `modelfit` (the default: one to three Gaussians), or CLEAN - and the full-array runs are weighed against each other by the Bayesian information criterion, ``BIC = chisq / s^2 + k ln(n)``, with `k` the model's parameter count and `s^2` the reduced chi-squared of the best of them (the data weights of VLBI are rarely on an absolute scale, and this is the usual way of not trusting them for it). ``exp(-BIC/2)``, normalised, is each model's posterior probability, and the corrections are averaged over models with those weights.
-3. **Correct only what is off.** Each station and IF is either *as calibrated* - its true log-amplitude error drawn from a Gaussian of width `prior_sigma`, the a-priori calibration accuracy (~10% for the EVN) - or *off* - drawn from a much wider one, `outlier_sigma` (a factor of a few: a wrong SEFD, a dead receptor averaged in, a pointing problem). The Bayes factor between the two gives the probability that it is off. An error within the a-priori accuracy is left alone, since the data cannot tell it from the calibration's own scatter and correcting it would only move the good stations; one clearly beyond it gets its estimate almost in full, since the wide prior hardly shrinks it. The correction applied is the posterior average over both: zero if as calibrated, the posterior mean if off.
+3. **Correct only what is off.** Each station and IF is either *as calibrated* - its true log-amplitude error drawn from a Gaussian of width `prior_sigma`, the a-priori calibration accuracy (~10% for the EVN) - or *off* - drawn from a much wider one, `outlier_sigma` (a factor of a few: a wrong SEFD, a dead receptor averaged in, a pointing problem). The Bayes factor between the two gives the probability that it is off. An error within the a-priori accuracy is left alone, since the data cannot tell it from the calibration's own scatter and correcting it would only move the good stations; one clearly beyond it gets its estimate almost in full, since the wide prior hardly shrinks it. The correction applied is the posterior average over both: zero if as calibrated, the posterior mean if off. With ``per_if`` and an `if_sigma`, the test is made once per station on its IF-combined estimate, and the subbands are levelled around the result: each IF's departure from the station's estimate is added, shrunk by a Gaussian prior of width `if_sigma` (in full when measured well, not at all when in the noise).
 4. **Keep the flux scale with the median station.** `gscale` keeps the data's flux scale by setting the mean gain amplitude of every IF to one (difmap's ``norm_cors``), so one station far off its a-priori calibration drags every other station of its IFs with it - and leaving it out of the model cannot show it, since it is still in the normalisation. Each run therefore solves with a floating scale and then sets the correction of the median station of every IF to one (``norm="mean"`` restores difmap's behaviour); the findings name a station that would have dragged the mean.
 
 The likelihoods are Gaussian throughout (in log amplitude for the gains), which is what makes each step closed-form and the whole thing cheap enough to run on every station: every run is independent, works on its own copy of the observation, and the heavy lifting (imaging, CLEAN, model fitting, self-calibration) releases the GIL, so the runs go in parallel threads.
@@ -155,6 +155,10 @@ def _antenna_chisq(o):
         return chi / (2.0 * cnt), cnt.astype(int)
 
 
+#: Fraction of the thermal noise power the model must reach on a station's baselines for its mismatch to be defined.
+MIN_MODEL_POWER = 0.01
+
+
 def _antenna_mismatch(o):
     """Model mismatch per station as a fraction of the model amplitude: the rms of ``V - M`` beyond the thermal
     noise, over the rms of ``M``, on every baseline it is on.
@@ -174,8 +178,12 @@ def _antenna_mismatch(o):
     nant = len(o.antennas)
     excess = np.bincount(a1, r2 - 2.0 * n, nant) + np.bincount(a2, r2 - 2.0 * n, nant)
     power = np.bincount(a1, m2, nant) + np.bincount(a2, m2, nant)
+    count = np.bincount(a1, n, nant) + np.bincount(a2, n, nant)
+    # A model far below the noise on a station's baselines (its data flagged but for a few points, or a source
+    # it does not see) makes the fraction meaningless - 3e11 on EM178 - so it is undefined there: the model
+    # has to carry at least MIN_MODEL_POWER of the thermal noise power (2 per visibility in units of weight).
     with np.errstate(invalid="ignore", divide="ignore"):
-        return np.where(power > 0, np.sqrt(np.maximum(excess, 0.0) / power), np.nan)
+        return np.where(power > MIN_MODEL_POWER * 2.0 * count, np.sqrt(np.maximum(excess, 0.0) / power), np.nan)
 
 
 # ----------------------------------------------------------------------
@@ -471,7 +479,7 @@ class BayesGainResult:
                     "uncertainty"
                 )
         out += self._normalisation_findings()
-        if self.antenna_mismatch:
+        if self.antenna_mismatch and np.isfinite(np.asarray(self.antenna_mismatch["after"], float)).any():
             # Ranked by the fractional mismatch: chi-squared would name the most sensitive station.
             mis = np.asarray(self.antenna_mismatch["after"], float)
             worst = int(np.nanargmax(np.nan_to_num(mis, nan=-np.inf)))
@@ -531,7 +539,9 @@ class BayesGainResult:
             "",
             "Station corrections (factors multiply the data; +- 1 sigma; "
             "* off its calibration, P >= 0.95; ? probably, P >= 0.75;",
-            f"a-priori accuracy {100 * self.settings['prior_sigma']:.0f}%, left alone within it):",
+            f"a-priori accuracy {100 * self.settings['prior_sigma']:.0f}%, left alone within it"
+            + (f"; the subbands follow their own estimates around the station's level, shrunk with a "
+               f"{100 * self.settings['if_sigma']:.0f}% prior" if self.settings.get("if_sigma") else "") + "):",
             f"  {'station':<9}" + "".join(f"{c:>{width}}" for c, _ in cols)
             + f"{'rchi2 before':>14}{'after':>8}",
         ]
@@ -678,7 +688,7 @@ class BayesGainResult:
         try:
             self.plot(path=f"{prefix}.png", show=False)
             files["plot"] = f"{prefix}.png"
-        except ImportError as exc:
+        except Exception as exc:  # noqa: BLE001 - a figure that cannot be drawn must not lose the report or table
             if verbose:
                 print(f"bayes_gscale: no diagnostic plot ({exc})")
         # The report first, so that a table that cannot be written (no
@@ -715,6 +725,17 @@ class BayesGainResult:
         return written
 
 
+def _if_offsets(mean, var, centre, if_sigma):
+    """Each IF's departure from its station's IF-combined estimate `centre`, shrunk by a Gaussian prior of width `if_sigma`: the posterior mean ``d s^2 / (s^2 + var)`` and its variance. Zero where the IF has no estimate."""
+    s2 = float(if_sigma) ** 2
+    d = mean - centre
+    ok = np.isfinite(d) & np.isfinite(var)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        off = np.where(ok, d * s2 / (s2 + var), 0.0)
+        off_var = np.where(ok, s2 * var / (s2 + var), 0.0)
+    return off, off_var
+
+
 def _combine_ifs(mean, var):
     """One estimate per station from its per-IF ones: the inverse-variance mean, with the variance of fully correlated estimates (they share a model) plus the scatter between IFs."""
     w = np.where(np.isfinite(mean) & np.isfinite(var) & (var > 0), 1 / var, 0.0)
@@ -736,7 +757,7 @@ def _combine_ifs(mean, var):
 
 
 def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0, jackknife=True,
-                 per_if=True, float_scale=False, norm="median", nloop=2, solint=0.0,
+                 per_if=True, if_sigma=None, float_scale=False, norm="median", nloop=2, solint=0.0,
                  clean_gain=0.05, sigma_floor=0.01, model_sigma=None, timeavg=None,
                  workers=None, apply=True, prefix=None, outformat=None,
                  ms=None, uvfits=None, plot=None,
@@ -755,6 +776,8 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
         Do the leave-one-station-out runs. Without them each station's estimate comes from the full-array model and its uncertainty from the spread between models only.
     per_if : bool
         True (the default): every IF gets its own correction, as `gscale` solves them, with its own uncertainty and P(needed) - the summary, the figure and the tables show and apply one per station and IF. False: the IFs' estimates are combined into one correction per station, applied to every IF.
+    if_sigma : float | None
+        With `per_if`: decide each station's level as ``per_if=False`` does (one Bayes factor on its IF-combined estimate), then add each IF's departure from that combined estimate, shrunk by a Gaussian prior of this width - the scatter of the subband levels the a-priori calibration leaves (0.1: 10%). A departure measured to much better than `if_sigma` is applied in full, so a subband 10% low on a bright calibrator is levelled even where the station as a whole is within `prior_sigma`; one buried in its noise is not, so a weak station gets one level, not one noisy value per IF. An IF without an estimate gets the station's level. None (the default): every IF is judged on its own, with the station-level test.
     float_scale : bool
         False keeps the data's flux scale (see `norm`); True lets it float onto the model's.
     norm : {"median", "mean"}
@@ -801,6 +824,9 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
         raise ValueError("prior_sigma must be positive")
     if outlier_sigma <= prior_sigma:
         raise ValueError("outlier_sigma must be larger than prior_sigma")
+    if if_sigma is not None and not float(if_sigma) > 0:
+        raise ValueError("if_sigma must be positive (or None)")
+    subbands = bool(per_if) and if_sigma is not None
     if norm not in ("median", "mean"):
         raise ValueError(f"norm must be 'median' or 'mean', got {norm!r}")
 
@@ -891,7 +917,8 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
                                      + (np.nan_to_num(loo) - mean) ** 2)
                                 ).sum(axis=0) / sw, np.nan)
     var = var + _model_variance(model_sigma, names, nif)
-    if not per_if:
+    if_mean, if_var = mean, var
+    if not per_if or subbands:
         mean, var = _combine_ifs(mean, var)
 
     # The two hypotheses: as calibrated (errors within the a-priori
@@ -907,6 +934,12 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
         p1 = 0.5 * (1.0 + np.tanh(0.5 * ln_bf))   # logistic, overflow-free
         applied = p1 * post_mean
         applied_var = p1 * (post_var + post_mean ** 2) - applied ** 2
+    if subbands:
+        # The station's level is decided; its subbands follow their own estimates around it.
+        off, off_var = _if_offsets(if_mean, if_var, mean, float(if_sigma))
+        applied, applied_var = applied + off, applied_var + off_var
+        post_mean, post_var = post_mean + off, post_var + off_var
+        mean, var = if_mean, if_var
 
     best = int(np.argmax(prob))
     naive = logg[best, 0]
@@ -947,6 +980,7 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
         settings={"models": model_names, "prior_sigma": float(prior_sigma),
                   "outlier_sigma": float(outlier_sigma),
                   "jackknife": bool(jackknife), "per_if": bool(per_if),
+                  "if_sigma": None if if_sigma is None else float(if_sigma),
                   "float_scale": bool(float_scale), "norm": norm, "nloop": int(nloop),
                   "solint": solint, "clean_gain": float(clean_gain),
                   "sigma_floor": float(sigma_floor),
@@ -986,7 +1020,7 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
     if plot or (plot is None and not prefix and verbose):
         try:
             res.plot(show=True)
-        except ImportError as exc:
+        except (ImportError, ValueError) as exc:
             if verbose:
                 print(f"bayes_gscale: no diagnostic plot ({exc})")
     return None if quiet else res

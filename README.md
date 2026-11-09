@@ -568,7 +568,11 @@ default): the summary has one column per IF with the correction, its
 1-sigma uncertainty and a mark where it is needed (`*`, P >= 0.95) or
 probably needed (`?`, P >= 0.75), the findings name the IFs, and the
 figure shows each station's IFs side by side. `per_if=False` combines
-them into one correction per station.
+them into one correction per station. With `if_sigma` (e.g. 0.1) each
+station's level is decided once on its IFs together, and every IF
+follows its own estimate around it, shrunk by a Gaussian prior of that
+width: well-measured subband steps are levelled, a weak station's
+per-IF noise collapses to one level.
 
 1. **Leave one station out.** For each station (and once for the full
    array) the source model is rebuilt with that station ignored, phase

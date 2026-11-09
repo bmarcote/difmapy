@@ -165,6 +165,31 @@ def test_one_correction_for_all_ifs_averages_them(per_if_errors):
     assert "all IFs" in r.summary()
 
 
+def test_subbands_are_levelled_around_the_station_level(per_if_errors):
+    """if_sigma: each station's level is decided once, on its IF-combined estimate (as per_if=False does), and its
+    subbands follow their own estimates around it, each departure shrunk by the if_sigma prior - in full when
+    measured well (here the data's own subband steps of 30-75%), not at all when the estimates are noise (AN0 with a
+    model uncertainty of a factor e: one level in both IFs)."""
+    o, err = per_if_errors
+    kw = dict(models=("point1",), quiet=False, verbose=False, plot=False, apply=False)
+    shared = o.bayes_gscale(per_if=False, **kw)
+    r = o.bayes_gscale(if_sigma=0.1, **kw)
+    truth = 1.0 / err
+    truth /= np.median(truth, axis=1, keepdims=True)
+    np.testing.assert_allclose(r.factors[1] / r.factors[0], truth[1] / truth[0], rtol=0.02)
+    # On top of the station level per_if=False gives, by the shrunk departure from the combined estimate.
+    shrink = 0.1 ** 2 / (0.1 ** 2 + r.sigma ** 2)
+    np.testing.assert_allclose(np.log(r.factors), np.log(shared.factors) + shrink * (r.mean - shared.mean), atol=1e-6)
+    assert (r.p_correction[0] == r.p_correction[1]).all()          # one decision per station
+    assert r.settings["if_sigma"] == 0.1 and "IF1" in r.summary() and "10% prior" in r.summary()
+
+    noisy = o.bayes_gscale(if_sigma=0.1, model_sigma={"AN0": 1.0}, **kw)
+    assert noisy.factors[0, 0] == pytest.approx(noisy.factors[1, 0], rel=0.01)
+    np.testing.assert_allclose(noisy.factors[1, 1:] / noisy.factors[0, 1:], truth[1, 1:] / truth[0, 1:], rtol=0.02)
+    with pytest.raises(ValueError):
+        o.bayes_gscale(if_sigma=0.0, **kw)
+
+
 def test_leaves_well_calibrated_data_alone(uvfits_file):
     o = _load(uvfits_file)
     r = o.bayes_gscale(models=MODELS, quiet=False, verbose=False, plot=False)
@@ -264,3 +289,21 @@ def test_station_mismatch_does_not_follow_sensitivity():
     mis = _antenna_mismatch(o)
     assert np.argmax(chi) == 0 and chi[0] > 2 * np.median(chi)
     assert np.allclose(mis, 0.1, rtol=0.05)
+
+
+def test_a_figure_without_stations_does_not_lose_the_report(corrupted_uvfits_file, tmp_path):
+    """No station with a correction (its data all flagged but a few points): the figure has nothing to draw, which
+    must not cost the report and the table (EM178, inverse phase referencing: the self-calibration of the target
+    failed with numpy's "zero-size array to reduction operation fmin")."""
+    import dataclasses
+    pytest.importorskip("matplotlib")
+    path, _ = corrupted_uvfits_file
+    o = _load(path)
+    r = o.bayes_gscale(models=("point1",), quiet=False, verbose=False, plot=False, apply=False)
+    empty = dataclasses.replace(r, applied_log=np.full_like(r.applied_log, np.nan),
+                                applied_sigma=np.full_like(r.applied_sigma, np.nan))
+    with pytest.raises(ValueError, match="no station has a correction"):
+        empty.plot(show=False)
+    prefix = str(tmp_path / "empty")
+    files = empty.write(prefix, verbose=False)
+    assert "plot" not in files and os.path.exists(prefix + ".json") and os.path.exists(prefix + ".corrections.json")

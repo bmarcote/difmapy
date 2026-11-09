@@ -68,6 +68,12 @@ prior sigma 10%):
 
 `per_if=False` combines the IFs into one correction per station.
 
+`if_sigma` (e.g. 0.1) sits between the two: each station's level is decided once, on its IF-combined
+estimate, and every IF follows its own estimate around that level, its departure shrunk by a Gaussian prior
+of width `if_sigma`. A subband step measured to much better than `if_sigma` is levelled in full, even on a
+station left alone as a whole; the per-IF estimates of a weak station, which are noise, collapse to its one
+level. An IF without an estimate gets the station's level.
+
 ## The diagnostics
 
 ![The bayes_gscale diagnostic figure](../images/bayes_gscale.png){ loading=lazy }
@@ -136,7 +142,8 @@ All the parameters are in the [reference](../reference/bayescal.md).
   calibrator, and keep the Bayesian level by normalising those solutions to their median over time before
   exporting them (`savecaltable(..., solutions=...)`).
 - **Small offsets, on purpose.** An offset within `prior_sigma` is left alone: the data cannot tell it from the
-  calibration's own scatter. A subband 10% low is not corrected here; level the subbands upstream.
+  calibration's own scatter. With `per_if=True` alone a subband 10% low is not corrected either; `if_sigma`
+  levels it when it is well measured.
 - **Weak stations per IF.** With `per_if=True`, a station with little signal gets one noisy estimate per IF, and
-  the table carries that noise to every source it is applied to. When the subbands are already level, prefer
-  `per_if=False`.
+  the table carries that noise to every source it is applied to. Give an `if_sigma` (or, when the subbands are
+  already level, use `per_if=False`).

@@ -88,6 +88,10 @@ def _draw(res, path, show):
 
     has = np.isfinite(res.applied_log).any(axis=0)
     idx = np.nonzero(has)[0]
+    if not len(idx):
+        # Every station's data flagged but for a few points (EM178, inverse phase referencing: the target's
+        # fringe fit kept 396 of 480k visibilities): nothing to draw, and the axes limits have no data either.
+        raise ValueError("no station has a correction to draw")
     names = [res.antennas[i] for i in idx]
     x = np.arange(len(idx))
     bi = int(np.argmax(res.model_prob))
