@@ -1134,6 +1134,13 @@ class FlagPlotBase(PlotWindow):
             return np.ones(d["wt"].shape, dtype=bool)
         return np.asarray(d["group"]) == panel.group
 
+    def _shown_mask(self, d):
+        """The points whose colour group is not switched off in the legend: edits act on what is drawn, so a hidden IF is never flagged by a box drawn over it."""
+        if not self._hidden_groups:
+            return np.ones(d["wt"].shape, dtype=bool)
+        keys = np.asarray(self.colors.keys(d), dtype=int)
+        return ~np.isin(keys, sorted(self._hidden_groups))
+
     def _add_item(self, panel, item):
         panel.plot.addItem(item)
         self._items.append((item, panel.plot))
@@ -1257,7 +1264,7 @@ class FlagPlotBase(PlotWindow):
         d = self._data
         y = d[panel.key]
         inside = (d["x"] >= x0) & (d["x"] <= x1) & (y >= y0) & (y <= y1)
-        inside &= self._panel_mask(panel, d)
+        inside &= self._panel_mask(panel, d) & self._shown_mask(d)
         # Flag only currently-good points; unflag only flagged ones.
         inside &= (d["wt"] > 0) if flag else (d["wt"] < 0)
         idx = np.nonzero(inside)[0]
@@ -1266,7 +1273,7 @@ class FlagPlotBase(PlotWindow):
     def _flag_nearest(self, panel, x, y, flag):
         d = self._data
         cand = (d["wt"] > 0) if flag else (d["wt"] < 0)
-        cand &= self._panel_mask(panel, d)
+        cand &= self._panel_mask(panel, d) & self._shown_mask(d)
         if not cand.any():
             return 0
         (xr0, xr1), (yr0, yr1) = panel.vb.viewRange()

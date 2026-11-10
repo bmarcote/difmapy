@@ -42,6 +42,10 @@ concatenated.
     Q, U and V stay strict, since a missing hand cannot be guessed for
     polarization.
 
+!!! note "An IF keeps its unflagged channels"
+
+    Each IF's visibility is the average of its selected channels that are not flagged, so flagging some channels of an IF lowers its weight but does not flag it. Only when every channel with data is flagged is the IF flagged. Difmap flags the IF as soon as one of its channels is.
+
 ## Averaging on load
 
 Averaging a long, finely sampled observation as it is read makes every

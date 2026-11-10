@@ -31,6 +31,10 @@ use [`ignore`](selfcal.md#setting-a-station-aside) instead.
 | ++x++ | show or hide the flagged points (hidden by default) |
 | ++space++ (`vplot`) | flag the displayed baseline, or every baseline of its first antenna |
 
+Edits act only on what is drawn: an IF switched off in `vplot`'s legend is not flagged by a box drawn over it.
+
+`tplot` takes the same ++shift++/++ctrl++ + drag and undo keys: the box flags (unflags) every baseline of each station whose row it covers, in the selected IFs, at the integrations inside it.
+
 A plain drag and the wheel keep their usual pan and zoom. Undo is
 exact: each edit stores the affected rows of the FLAG column before and
 after, so it restores what was there even where the edit overlapped data

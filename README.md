@@ -27,6 +27,11 @@ Differences from the original by design:
   polarization. Output images declare Stokes I. `Q`, `U` and `V` remain
   strict, since a missing hand cannot be guessed for polarization.
   Intensity is also loaded by default if not specified.
+* **An IF stays good while any of its channels is**: the channel average
+  that forms each IF's visibility is taken over the unflagged channels
+  only. difmap flags the whole IF when one selected channel is flagged
+  (and deletes it when one is deleted); here the IF is flagged only when
+  every channel with data is.
 * reads **UVFITS and Measurement Sets** (both single-source)
 * **flags are stored in an explicit FLAG column**, the MS convention,
   and can be written straight back into the MS with `save_flags()`
@@ -304,6 +309,8 @@ Interactive flagging (`radplot`, `uvplot`, `vplot`): **Shift+drag**
 sweeps a box to flag, **Ctrl+drag** unflags, `f`/`F` act on the nearest
 point, **Ctrl+Z** / **Ctrl+Shift+Z** (or Ctrl+Y) undo and redo the last
 edit, and `x` shows or hides the flagged points (hidden by default).
+A box acts only on what is drawn: IFs switched off in the legend are
+left alone.
 Plain drag/wheel keep pyqtgraph's pan/zoom, and `h` shows the full key
 legend of whichever plot is in front. In `vplot` the space bar switches
 flagging between the displayed baseline and every baseline of its first
@@ -311,7 +318,9 @@ antenna; each baseline's amplitude and phase panels are framed together
 by a heavy border, and the time axis (and `u`) always spans the whole
 observation. `tplot` marks an integration blue when all of a station's
 baselines are unflagged and orange when some are flagged, as difmap
-does.
+does; Shift+drag (Ctrl+drag) over it flags (unflags) every baseline of
+the stations whose rows the box covers, at the integrations inside it,
+with the same Ctrl+Z undo.
 
 Plots against time (`vplot`, `tplot`, `corplot`, `cpplot`) cut out any
 gap between integrations longer than 10% of the observation, so scans

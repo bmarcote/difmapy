@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore
 
 from difmapy.plots.base import (
     FLAG_COLOR,
+    EditHistory,
     FastScatter,
     FluxAxis,
     PlotWindow,
@@ -220,10 +222,12 @@ class TPlot(PlotWindow):
     def __init__(self, obs):
         super().__init__("difmapy tplot")
         self.obs = obs
+        self.history = EditHistory(obs)
         self.glw = pg.GraphicsLayoutWidget()
         self.glw.setBackground("w")
         self.setCentralWidget(self.glw)
         self.plot = None
+        self._times = None
         self.refresh()
 
     def view_boxes(self):
@@ -256,14 +260,20 @@ class TPlot(PlotWindow):
         return good, flagged.reshape(nt, nant)
 
     def refresh(self):
+        # Keep the view the user zoomed to across an edit: the plot is
+        # rebuilt, but the data's time axis has not changed.
+        view = None if self.plot is None else self.plot.vb.viewRange()
         self.glw.clear()
         obs = self.obs
         core = obs._core
         good, flagged = self.sampling()
         gaps = TimeGaps.of(obs)
         times = gaps.compress(np.asarray(core.times()) / 3600.0)
+        self._times = times
         names = list(core.antenna_names)
-        self.plot = p = self.glw.addPlot()
+        vb = SelectViewBox()
+        vb.sigSelected.connect(self._on_selected)
+        self.plot = p = self.glw.addPlot(viewBox=vb)
         install_time_axis(p, gaps)
         p.setLabel("bottom", "Time (hours)")
         p.setLabel("left", "Antenna")
@@ -291,6 +301,8 @@ class TPlot(PlotWindow):
         ax.setTicks([[(i, n) for i, n in enumerate(names)], []])
         ax.setWidth(max(48, 9 * max((len(n) for n in names), default=4)))
         p.setYRange(-0.5, len(names) - 0.5)
+        if view is not None:
+            p.vb.setRange(xRange=view[0], yRange=view[1], padding=0)
         dead = [n for n, c in zip(names, nsamp) if c == 0]
         self.statusBar().showMessage(
             "blue: unflagged | orange: partly flagged"
@@ -299,10 +311,71 @@ class TPlot(PlotWindow):
             + " | h: help"
         )
 
+    def default_y_range(self, vb):
+        return (-0.5, len(self.obs._core.antenna_names) - 0.5)
+
+    # ---- flagging -----------------------------------------------------
+
+    def box_rows(self, x0, x1, y0, y1):
+        """The stream rows behind the marks inside a box: every baseline of each antenna whose row lies in [y0, y1], at every integration whose (gap-compressed) time lies in [x0, x1]."""
+        core = self.obs._core
+        nant = len(core.antenna_names)
+        ants = [i for i in range(nant) if y0 <= i <= y1]
+        if not ants or self._times is None:
+            return np.zeros(0, dtype=int)
+        _, a1, a2, *_ = core.rows()
+        a1 = np.asarray(a1, dtype=int)
+        a2 = np.asarray(a2, dtype=int)
+        tidx = np.asarray(core.time_index(), dtype=int)
+        x = np.asarray(self._times)[tidx]
+        m = (x >= x0) & (x <= x1) & (np.isin(a1, ants) | np.isin(a2, ants))
+        return np.nonzero(m)[0]
+
+    def apply_box(self, x0, x1, y0, y1, flag) -> int:
+        """Flag (or unflag) everything of the antennas inside the box, in the selected IFs and channels, at the integrations inside it. Returns the number of samples changed; undoable with Ctrl+Z."""
+        rows = self.box_rows(x0, x1, y0, y1)
+        if rows.size == 0:
+            return 0
+        n = self.history.apply([(rows, None, bool(flag))])
+        self.refresh()
+        if n:
+            self._changed()
+        return n
+
+    def _on_selected(self, x0, x1, y0, y1, flag):
+        n = self.apply_box(x0, x1, y0, y1, flag)
+        self.statusBar().showMessage(
+            f"{'flagged' if flag else 'unflagged'} {n} samples | h: help")
+
+    def _undo_redo(self, redo):
+        n = self.history.redo() if redo else self.history.undo()
+        self.refresh()
+        if n is not None:
+            self._changed()
+        what = "redo" if redo else "undo"
+        self.statusBar().showMessage(
+            f"nothing to {what}" if n is None
+            else f"{'redid' if redo else 'undid'} an edit of {n} samples")
+
+    def keyPressEvent(self, ev):
+        mods = ev.modifiers()
+        ctrl = bool(mods & QtCore.Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & QtCore.Qt.KeyboardModifier.ShiftModifier)
+        if ctrl and ev.key() == QtCore.Qt.Key.Key_Z:
+            self._undo_redo(redo=shift)
+        elif ctrl and ev.key() == QtCore.Qt.Key.Key_Y:
+            self._undo_redo(redo=True)
+        else:
+            super().keyPressEvent(ev)
+
     def key_help(self):
         return [
             ("", "one row per antenna, one mark per integration with data"),
             ("", "blue: all its baselines unflagged; orange: some flagged"),
+            ("shift+drag", "flag every baseline of the antennas in the box"),
+            ("ctrl+drag", "unflag every baseline of the antennas in the box"),
+            ("ctrl+z / ctrl+shift+z", "undo / redo the last flag edit"),
+            ("drag / wheel", "pan / zoom"),
         ]
 
 

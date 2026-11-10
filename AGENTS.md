@@ -89,7 +89,9 @@ Note the MS contains autocorrelations; both loaders drop them.
 - Stream semantics (channel averaging, pol combination, weight signs)
   are exact ports of difmap's ob_select()/obpol.c — see comments in
   `crates/difmap-core/src/stream.rs`. Do not "fix" them without
-  checking the difmap sources in `difmap-master/`.
+  checking the difmap sources in `difmap-master/`. The one exception is
+  how flagged/deleted channels enter the IF average (see "Deliberate
+  deviations from difmap").
 - Briggs robust weighting (`InvertPars.robust`) supersedes
   `binwid`/`errpow` when set: it reuses difmap's own UV bin array, but
   sums the natural weights per bin instead of counting points. R = -2
@@ -146,6 +148,11 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
   after), so a gscale following a selfcal is not confused by the
   calibration already in the table. `station_gains()` instead reports
   the accumulated state, with 1.0 for stations with no solution.
+- Plot flag edits (box, nearest point) act only on drawn points:
+  `FlagPlotBase._shown_mask` drops colour groups switched off in the
+  legend (a hidden IF in vplot). `tplot` box-flags too (Shift/Ctrl+drag,
+  `TPlot.box_rows`): every baseline of the stations whose row centre is
+  in the box, all selected IFs, with its own `EditHistory`.
 - `FlagPlotBase` subclasses supply `_collect()` returning parallel
   arrays keyed by panel quantity (`amp`, `phase`, ...), plus `wt`,
   `row`, `cif` and, for paged plots, `group` (which panel row a point
@@ -390,6 +397,13 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
 - `load()`/`observe()` selects Stokes I on load; difmap's `observe`
   selects nothing. `stokes=None` restores the old behaviour, and the
   CLI's `--stokes none` goes through the same path.
+- The channel average that forms each stream IF (`stream.rs`
+  `average_row`) is over the *unflagged* channels only (the user's
+  request, 2026-11-10): the IF is good while any selected channel is,
+  flagged (mean of the flagged channels, negative weight) only when all
+  channels with data are, deleted only when none has data. difmap's
+  ob_select flags the IF on one flagged channel and deletes it on one
+  deleted channel. `tests/synthetic.rs::flagged_channels_average` pins it.
 - `select("I")` uses difmap's permissive `pi` combination
   (`PolOp::PseudoI`), not strict (RR+LL)/2: a visibility survives when
   only one parallel hand is usable. `Stokes::PI` is a legacy alias and

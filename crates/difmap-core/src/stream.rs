@@ -12,10 +12,15 @@
 //!   (equivalent to OB_GETIF), kept up to date incrementally,
 //! * `model`: the model visibilities per (row, IF).
 //!
-//! Channel averaging semantics are an exact port of ob_select()
-//! (obutil.c): unweighted mean of the channel visibilities, combined
-//! weight npts^2 / sum(1/wt); deletion of any selected channel deletes
-//! the output; a flagged channel flags the output.
+//! Channel averaging follows ob_select() (obutil.c) - unweighted mean
+//! of the channel visibilities, combined weight npts^2 / sum(1/wt) -
+//! with one deliberate deviation: the mean is taken over the
+//! *unflagged* channels only, so an IF stays good as long as any of
+//! its selected channels is. difmap flags the whole IF when one
+//! channel is flagged (and deletes it when one is deleted). Only when
+//! every channel with data is flagged is the output flagged (the mean
+//! of those channels, negative weight), and only when none has data is
+//! it deleted.
 
 use crate::obs::Observation;
 use crate::stokes::{Cvis, PolOp, Stokes};
@@ -280,31 +285,32 @@ fn average_row(
         if if_ranges[cif].is_empty() {
             continue;
         }
-        let mut sum_re = 0.0f32;
-        let mut sum_im = 0.0f32;
-        let mut var_sum = 0.0f32; // sum of 1/wt
-        let mut npts = 0u32;
-        let mut flagged = false;
-        let mut deleted = false;
-        'ranges: for &(ca, cb) in &if_ranges[cif] {
+        // [0]: unflagged channels, [1]: flagged ones. Deleted channels
+        // (zero weight) are absent and count in neither.
+        let mut sum_re = [0.0f32; 2];
+        let mut sum_im = [0.0f32; 2];
+        let mut var_sum = [0.0f32; 2]; // sum of 1/wt
+        let mut npts = [0u32; 2];
+        for &(ca, cb) in &if_ranges[cif] {
             for ch in ca..=cb {
                 ob.pvis(row, band.coff + ch, pvis);
-                let mut cur = polop.get(pvis);
+                let cur = polop.get(pvis);
                 if cur.wt == 0.0 {
-                    deleted = true;
-                    break 'ranges;
+                    continue;
                 }
-                if cur.wt < 0.0 {
-                    flagged = true;
-                    cur.wt = -cur.wt;
-                }
-                npts += 1;
-                sum_re += cur.re;
-                sum_im += cur.im;
-                var_sum += 1.0 / cur.wt;
+                let k = usize::from(cur.wt < 0.0);
+                npts[k] += 1;
+                sum_re[k] += cur.re;
+                sum_im[k] += cur.im;
+                var_sum[k] += 1.0 / cur.wt.abs();
             }
         }
-        out[cif] = if deleted || var_sum == 0.0 || npts == 0 {
+        // Average the unflagged channels if there are any; otherwise
+        // the flagged ones, and the result is flagged.
+        let k = if npts[0] > 0 { 0 } else { 1 };
+        let flagged = k == 1;
+        let (sum_re, sum_im, var_sum, npts) = (sum_re[k], sum_im[k], var_sum[k], npts[k]);
+        out[cif] = if var_sum == 0.0 || npts == 0 {
             Cvis::default()
         } else {
             let n = npts as f32;

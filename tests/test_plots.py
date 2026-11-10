@@ -1240,3 +1240,47 @@ def test_cpplot_computes_only_the_page_it_shows(obs):
     assert q._items == [(0, 1, 2)] and len(q._plots) == 1
     p.close()
     q.close()
+
+
+def test_vplot_box_skips_hidden_ifs(obs):
+    """A box drawn with an IF switched off in the legend flags only the IFs that are drawn."""
+    v = VPlot(obs, nplot=1)
+    v._toggle_group(1, False)  # hide IF 2
+    panel = v._panels[0]
+    n = v._apply_box(panel, -1e9, 1e9, -1e9, 1e9, flag=True)
+    assert n > 0
+    d = v._data
+    assert (d["wt"][d["cif"] == 0] < 0).all()
+    assert (d["wt"][d["cif"] == 1] > 0).all()
+    # The nearest-point flag ignores the hidden IF as well.
+    v._toggle_group(1, True)
+    v._toggle_group(0, False)  # now only IF 2 is drawn
+    assert v._flag_nearest(panel, 0.0, 0.0, flag=True) > 0
+    d = v._data
+    assert (d["cif"][d["wt"] < 0] == 0).sum() == (d["cif"] == 0).sum()
+    assert (d["wt"][d["cif"] == 1] < 0).sum() >= 1
+    v.close()
+
+
+def test_tplot_box_flags_the_antennas_inside(obs):
+    """A Shift-drag box on tplot flags every baseline of the antennas whose rows it covers, at the integrations inside it; Ctrl+Z undoes it."""
+    from difmapy.plots.diagnostics import TPlot
+
+    t = TPlot(obs)
+    good0, _ = t.sampling()
+    ia = 1
+    x = np.asarray(t._times)
+    xmid = float(np.median(x))
+    n = t.apply_box(xmid, float(x.max()) + 1, ia - 0.3, ia + 0.3, flag=True)
+    assert n > 0
+    good, _ = t.sampling()
+    late = x >= xmid
+    assert (good[late, ia] == 0).all()
+    assert (good[~late, ia] == good0[~late, ia]).all()
+    # The other antennas lose only their baseline to `ia`.
+    others = [i for i in range(good.shape[1]) if i != ia]
+    assert (good[late][:, others] == good0[late][:, others] - 1).all()
+    t._undo_redo(redo=False)
+    good, _ = t.sampling()
+    assert (good == good0).all()
+    t.close()

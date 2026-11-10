@@ -196,17 +196,36 @@ fn flagged_channels_average() {
     for p in 0..npol {
         ob.flag[p] = true; // row 0, gchan 0
     }
+    let full = Stream::select(&synthetic_obs(1.0, 0.0, 0.0), Stokes::I, &[]).expect("select I");
     let stream = Stream::select(&ob, Stokes::I, &[]).expect("select I");
-    // Row 0 IF 0 is flagged (one flagged channel flags the average, as
-    // in difmap); IF 1 is unaffected.
-    assert!(stream.vis[0].wt < 0.0);
+    // Row 0 IF 0 stays good (deliberate deviation from difmap, which
+    // flags the IF when one channel is): the average is over the three
+    // unflagged channels, so it carries 3/4 of the weight. IF 1 is
+    // unaffected.
+    assert!(stream.vis[0].wt > 0.0);
+    assert!((stream.vis[0].wt / full.vis[0].wt - 0.75).abs() < 1e-4);
     assert!(stream.vis[1].wt > 0.0);
-    // A deleted channel (zero weight) deletes the averaged visibility.
+    // A deleted channel (zero weight) is absent: the IF keeps the rest.
     for p in 0..npol {
         ob.vis[npol + p].wt = 0.0; // row 0, gchan 1
     }
     let stream = Stream::select(&ob, Stokes::I, &[]).expect("select I");
+    assert!((stream.vis[0].wt / full.vis[0].wt - 0.5).abs() < 1e-4);
+    // Only when every channel with data is flagged is the IF flagged...
+    for k in 0..4 * npol {
+        ob.flag[k] = true; // row 0, gchan 0..3
+    }
+    let stream = Stream::select(&ob, Stokes::I, &[]).expect("select I");
+    assert!(stream.vis[0].wt < 0.0);
+    // (the mean of the three flagged channels that have data)
+    assert!((stream.vis[0].wt.abs() / full.vis[0].wt - 0.75).abs() < 1e-4);
+    // ... and deleted only when none has data.
+    for k in 0..4 * npol {
+        ob.vis[k].wt = 0.0;
+    }
+    let stream = Stream::select(&ob, Stokes::I, &[]).expect("select I");
     assert_eq!(stream.vis[0].wt, 0.0);
+    let ob = synthetic_obs(1.0, 0.0, 0.0);
 
     // Restricting the channel selection to IF 2 only (gchan 4..7)
     // excludes IF 1 from the stream.
