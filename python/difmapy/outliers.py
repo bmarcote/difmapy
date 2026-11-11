@@ -1,10 +1,11 @@
 """Antenna-based outlier flagging of visibilities (the "smart outliers" flagger).
 
-Shared by difmapy (Shift+S, then a drag, on a data plot) and vlbipy (``vlbipy flag smart-outliers`` and the
-flagging passes of its dask-ms pipeline). Pure numpy: a caller bins its visibilities into a :class:`VisGrid`
-(baseline x subband x channel block x correlation x time bin) and turns the masks of :func:`find_outliers` into
-flags. Its origin is Cormac Reynolds' AIPS UVFND + ``flagsum.py`` recipe: find the outlying visibilities, see
-which antenna is common to most of them, and flag that antenna over the time range they span.
+Shared by difmapy (``Observation.smartflag``, and Shift+S, then a drag, on a data plot) and vlbipy (``vlbipy flag
+smart-outliers`` and the flagging passes of its dask-ms pipeline). Pure numpy: a caller bins its visibilities into
+a :class:`VisGrid` (baseline x subband x channel block x correlation x time bin) and turns the masks of
+:func:`find_outliers` into flags. Its origin is Cormac Reynolds' AIPS UVFND + ``flagsum.py`` recipe: find the
+outlying visibilities, see which antenna is common to most of them, and flag that antenna over the time range
+they span.
 
 Model
 -----
@@ -71,6 +72,20 @@ the channel blocks of the subband through every cell where the antenna's statist
 ``smooth_bins``, stays beyond ``edge_sigma`` (hysteresis thresholding). An antenna flagged over most channel blocks of a subband
 at one time loses the whole subband, and over most subbands all of them (``broadband_fraction``).
 
+Selections
+----------
+Cells picked out by hand (:attr:`VisGrid.selected`: a box drawn on a plot) are outliers by definition, whatever
+their departures: they are kept out of every reference, level and noise estimate, and in an antenna's statistic
+each counts as a departure without bound, on the side its other baselines lean to. One selected baseline thus
+moves the median of each of its antennas by one place, and the antenna whose other baselines depart with it is
+the one at fault; an antenna most of whose baselines are selected is at fault outright (the "antenna common to
+most" of the recipe). Only the antennas of a selected baseline, and only where it is selected, may be blamed,
+and below ``antenna_sigma``: the test runs on the cells selected, not on every cell of the data, so for the
+same number of false blames as a search of everything the threshold drops towards ``sigma`` as the selection
+shrinks (:func:`selection_sigma`). A blamed antenna's flag grows from there as above, on every baseline, inside
+or outside the selection, its growth judged on its unselected baselines. Whatever selected cell no antenna
+explains is flagged on its own baseline; nothing outside the selection is flagged on a baseline alone.
+
 Iterations
 ----------
 Flags change the statistics, so the model is fitted again on what is left. The departures inside scans are
@@ -89,7 +104,8 @@ from typing import Optional
 
 import numpy as np
 
-__all__ = ["OutlierSettings", "VisGrid", "OutlierResult", "find_outliers", "sigma_radius", "flag_runs"]
+__all__ = ["OutlierSettings", "VisGrid", "OutlierResult", "find_outliers", "sigma_radius", "selection_sigma",
+           "flag_runs"]
 
 logger = logging.getLogger(__name__)
 
@@ -108,10 +124,12 @@ class OutlierSettings:
     Attributes
     ----------
     sigma : float
-        Threshold of an outlying visibility (cell): left out of its neighbours' references, counted as an
-        outlier, and the only cells a ``restrict`` selection lets seed a flag.
+        Threshold of an outlying visibility (cell): left out of its neighbours' references and counted as an
+        outlier. With a selection (:attr:`VisGrid.selected`), also the lowest antenna threshold
+        (:func:`selection_sigma`).
     antenna_sigma : float
-        Threshold of the combined statistic of an antenna's baselines that flags the antenna.
+        Threshold of the combined statistic of an antenna's baselines that flags the antenna. A selection lowers
+        it towards ``sigma`` (:func:`selection_sigma`).
     edge_sigma : float
         Growth threshold of a flagged region: its start and end, where the fault rises and decays.
     baseline_sigma : float
@@ -222,9 +240,11 @@ class VisGrid:
         ``(ntime,)`` scan of every bin; the bins of one scan are contiguous.
     nant : int
         Number of antennas.
-    restrict : numpy.ndarray, optional
-        bool, ``vis`` shape: only outliers in these cells may start a flag (the regions they seed still grow
-        outside). None: everywhere.
+    selected : numpy.ndarray, optional
+        bool, ``vis`` shape: cells picked out by hand as outliers (a box drawn on a plot). They are outliers by
+        definition: kept out of every reference, level and noise estimate, always flagged, and the only cells a
+        flag may start from - the antenna behind them is looked for and its flag grows from there (see the module
+        notes). None: a search of all the data.
     """
 
     vis: np.ndarray
@@ -234,7 +254,7 @@ class VisGrid:
     times: np.ndarray
     segment: np.ndarray
     nant: int
-    restrict: Optional[np.ndarray] = None
+    selected: Optional[np.ndarray] = None
 
     def __post_init__(self) -> None:
         self.vis = np.asarray(self.vis, dtype=np.complex64)
@@ -256,10 +276,10 @@ class VisGrid:
             raise ValueError("VisGrid: baselines must join two different antennas in range(nant)")
         if self.times.size != ntime or self.segment.size != ntime:
             raise ValueError(f"VisGrid: {ntime} time bins but {self.times.size} times, {self.segment.size} scans")
-        if self.restrict is not None:
-            self.restrict = np.asarray(self.restrict, dtype=bool)
-            if self.restrict.shape != self.vis.shape:
-                raise ValueError(f"VisGrid: restrict {self.restrict.shape} does not match vis {self.vis.shape}")
+        if self.selected is not None:
+            self.selected = np.asarray(self.selected, dtype=bool)
+            if self.selected.shape != self.vis.shape:
+                raise ValueError(f"VisGrid: selected {self.selected.shape} does not match vis {self.vis.shape}")
 
 
 @dataclass
@@ -333,6 +353,32 @@ def sigma_radius(sigma: float) -> float:
     tail = math.erfc(x)
     log_tail = math.log(tail) if tail > 0.0 else -x * x - math.log(x * math.sqrt(math.pi))
     return math.sqrt(-2.0 * log_tail)
+
+
+def _gaussian_tail(sigma: float) -> float:
+    """Probability that a 1-D unit Gaussian exceeds ``sigma`` in absolute value."""
+    return math.erfc(sigma / math.sqrt(2.0))
+
+
+def selection_sigma(settings: "OutlierSettings", cells: int, selected: int) -> float:
+    """The antenna threshold (1-D sigma) of a selection of ``selected`` antenna cells out of ``cells`` with data.
+
+    A search of all the data blames an antenna at ``antenna_sigma``, which noise alone passes with a tail
+    probability ``p`` in each of ``cells`` tests. A selection tests only its own cells, so the same number of false
+    blames allows a tail ``p x cells / selected`` in each: the threshold is the sigma of that tail, never below
+    ``sigma`` (a small box) nor above ``antenna_sigma`` (a box over everything).
+    """
+    low, high = min(settings.sigma, settings.antenna_sigma), float(settings.antenna_sigma)
+    if selected <= 0:
+        return high
+    tail = _gaussian_tail(high) * max(int(cells), 1) / int(selected)
+    if tail >= _gaussian_tail(low):
+        return low
+    a, b = low, high                                    # erfc decreases: bisect for the sigma of that tail
+    for _ in range(60):
+        middle = 0.5 * (a + b)
+        a, b = (middle, b) if _gaussian_tail(middle) > tail else (a, middle)
+    return 0.5 * (a + b)
 
 
 def _numpy_median(values: np.ndarray, lower: bool) -> tuple[np.ndarray, np.ndarray]:
@@ -808,7 +854,8 @@ def _bin_noise(part: np.ndarray, unit: np.ndarray, seg: _Segments) -> np.ndarray
     with np.errstate(invalid="ignore", divide="ignore"):
         scan_noise, _ = _gather_median(np.abs(part) / unit, seg.gather)
     noise, _ = _gather_median(scan_noise, seg.window)
-    return np.where(noise >= 0, noise / GAUSSIAN_MAD, np.nan)[:, seg.index] * unit
+    with np.errstate(invalid="ignore"):                       # no noise x no data (unit inf): NaN, as it should be
+        return np.where(noise >= 0, noise / GAUSSIAN_MAD, np.nan)[:, seg.index] * unit
 
 
 def _scores(vis: np.ndarray, count: np.ndarray, flagged: np.ndarray, seg: _Segments,
@@ -891,8 +938,17 @@ def _scores(vis: np.ndarray, count: np.ndarray, flagged: np.ndarray, seg: _Segme
     return radial, tangential
 
 
+def _outlying(values: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """``values`` ``(nant, slots, *cell)`` with the ``mask`` slots made infinite, on the side the other slots of the
+    antenna lean to (their median's sign; + when there are none)."""
+    lean, _ = _median(np.moveaxis(np.where(mask, np.nan, values), 1, -1))
+    side = np.where(lean < 0, -np.inf, np.inf).astype(values.dtype)
+    return np.where(mask, side[:, None], values)
+
+
 def _blame(radial: np.ndarray, tangential: np.ndarray, tables: tuple, threshold: float,
-           min_baselines: int) -> tuple[np.ndarray, np.ndarray]:
+           min_baselines: int, allowed: Optional[np.ndarray] = None,
+           known: Optional[np.ndarray] = None) -> tuple[np.ndarray, np.ndarray]:
     """Which antenna explains the departures of every cell, and every antenna's statistic.
 
     Parameters
@@ -905,6 +961,13 @@ def _blame(radial: np.ndarray, tangential: np.ndarray, tables: tuple, threshold:
         Radius beyond which an antenna statistic is an outlier.
     min_baselines : int
         Baselines with data an antenna needs in a cell to be blamed there.
+    allowed : numpy.ndarray, optional
+        bool ``(nant, *cell)``: the only antennas that may be blamed in each cell (None: any).
+    known : numpy.ndarray, optional
+        bool ``(nbl, *cell)``: baselines that are outliers by definition (a selection; their parts are NaN). To
+        blame, each counts as a departure without bound, on the side the antenna's other baselines lean to: one
+        such baseline moves the median by one place, so its other baselines decide which of its two antennas is
+        at fault, and an antenna most of whose baselines are known is blamed outright.
 
     Returns
     -------
@@ -913,7 +976,7 @@ def _blame(radial: np.ndarray, tangential: np.ndarray, tables: tuple, threshold:
     antenna_score : numpy.ndarray
         ``(nant, *cell)`` radius of the antenna statistic (medians of both parts over its baselines, the phase
         part sign-turned, times ``sqrt(2 n / pi)``), its baselines to blamed antennas left out (NaN where it has
-        fewer than ``min_baselines``).
+        fewer than ``min_baselines``); ``known`` baselines do not count in it.
     """
     baselines, partners, signs = tables
     nant = baselines.shape[0]
@@ -924,24 +987,36 @@ def _blame(radial: np.ndarray, tangential: np.ndarray, tables: tuple, threshold:
         return np.moveaxis(_gather(np.moveaxis(values, 0, -1), baselines), (-2, -1), (0, 1))
 
     amplitude, phase = per_antenna(radial), per_antenna(tangential) * signs[expand]
+    mine = None if known is None else per_antenna(known.astype(np.float32)) == 1.0
+
+    def statistic(gone: np.ndarray, outliers: bool) -> np.ndarray:
+        amplitude_part, phase_part = np.where(gone, np.nan, amplitude), np.where(gone, np.nan, phase)
+        if outliers:
+            amplitude_part, phase_part = _outlying(amplitude_part, mine & ~gone), _outlying(phase_part, mine & ~gone)
+        median_amplitude, n = _median(np.moveaxis(amplitude_part, 1, -1))
+        median_phase, _ = _median(np.moveaxis(phase_part, 1, -1))
+        with np.errstate(invalid="ignore"):
+            score = np.hypot(median_amplitude, median_phase) * np.sqrt(2.0 * n / np.pi)
+        return np.where(n >= min_baselines, score, np.nan).astype(np.float32)
+
     blamed = np.zeros((nant,) + cell, dtype=bool)
     padded = np.concatenate([blamed, np.zeros((1,) + cell, dtype=bool)])      # partner -1 -> never blamed
     antenna_score = np.full(blamed.shape, np.nan, dtype=np.float32)
     for _ in range(nant):
         padded[:-1] = blamed
         gone = padded[partners]
-        median_amplitude, n = _median(np.moveaxis(np.where(gone, np.nan, amplitude), 1, -1))
-        median_phase, _ = _median(np.moveaxis(np.where(gone, np.nan, phase), 1, -1))
-        with np.errstate(invalid="ignore"):
-            antenna_score = np.hypot(median_amplitude, median_phase) * np.sqrt(2.0 * n / np.pi)
-        antenna_score = np.where(n >= min_baselines, antenna_score, np.nan).astype(np.float32)
-        candidate = np.where(blamed, -np.inf, np.nan_to_num(antenna_score, nan=-np.inf))
+        antenna_score = statistic(gone, mine is not None)
+        excluded = blamed if allowed is None else blamed | ~allowed
+        candidate = np.where(excluded, -np.inf, np.nan_to_num(antenna_score, nan=-np.inf))
         best = np.argmax(candidate, axis=0)
         top = np.take_along_axis(candidate, best[None], axis=0)[0]
         hit = top > threshold
         if not hit.any():
             break
         blamed |= (np.arange(nant).reshape((nant,) + (1,) * hit.ndim) == best[None]) & hit[None]
+    if mine is not None:
+        padded[:-1] = blamed
+        antenna_score = statistic(padded[partners], False)
     return blamed, antenna_score
 
 
@@ -1038,7 +1113,8 @@ def find_outliers(grid: VisGrid, settings: Optional[OutlierSettings] = None) -> 
     Returns
     -------
     OutlierResult
-        The antenna and baseline flags (nothing is flagged in cells without data).
+        The antenna and baseline flags (nothing is flagged in cells without data). With a selection
+        (``grid.selected``), every selected cell with data is flagged, by an antenna or on its own baseline.
     """
     settings = settings or OutlierSettings()
     nbl, nspw, nblock, ncorr, ntime = grid.vis.shape
@@ -1055,28 +1131,35 @@ def find_outliers(grid: VisGrid, settings: Optional[OutlierSettings] = None) -> 
     edge = _limit(settings.edge_sigma, phases)
     single = _limit(settings.baseline_sigma, phases) if settings.baseline_sigma > 0 else np.inf
     has_data = _per_antenna_any(grid.count > 0, grid.ant1, grid.ant2, grid.nant)  # (nant, nspw, nblock, ncorr, ntime)
+    if grid.selected is not None:
+        touched_all = _per_antenna_any(grid.selected & (grid.count > 0), grid.ant1, grid.ant2, grid.nant)
+        blame = _limit(selection_sigma(settings, int(has_data.sum()), int(touched_all.sum())), phases)
     for spw in range(nspw):
         vis, count = grid.vis[:, spw], grid.count[:, spw]
-        restrict = grid.restrict[:, spw] if grid.restrict is not None else None
+        selected = grid.selected[:, spw] & (count > 0) if grid.selected is not None else None
         scans = False
         for iteration in range(1, int(settings.max_iterations) + 1):
             flagged = baseline_flags[:, spw] | antenna_flags[grid.ant1, spw] | antenna_flags[grid.ant2, spw]
-            radial, tangential = _scores(vis, count, flagged, seg, settings, scans=scans, threshold=threshold)
+            # A selection is outliers already: out of every reference, level and noise, as if flagged, and counted
+            # by `_blame` as departures without bound. Only the antennas of a selected baseline not explained yet,
+            # and only there, may be blamed - at `selection_sigma`, since the test runs on those cells alone.
+            known = None if selected is None else selected & ~flagged
+            radial, tangential = _scores(vis, count, flagged if known is None else flagged | known, seg, settings,
+                                         scans=scans, threshold=threshold)
             if not phases:
                 tangential = np.where(np.isfinite(radial), 0.0, np.nan).astype(np.float32)
             score = np.hypot(radial, tangential)
-            blamed, antenna_score = _blame(radial, tangential, tables, blame, int(settings.min_baselines))
+            allowed = None if known is None else _per_antenna_any(known, grid.ant1, grid.ant2, grid.nant)
+            seeds, antenna_score = _blame(radial, tangential, tables, blame, int(settings.min_baselines), allowed,
+                                          known)
             smoothed = _smooth_time(antenna_score, seg, int(settings.smooth_bins))
-            seeds = blamed
-            if restrict is not None:
-                seeds &= _per_antenna_any(restrict & (score > threshold), grid.ant1, grid.ant2, grid.nant)
             candidate = (smoothed > edge) | antenna_flags[:, spw]
             grown = _dilate_time(_grow(seeds, candidate, seg), seg, int(settings.margin_bins))
             new_antenna = grown & has_data[:, spw] & ~antenna_flags[:, spw]
             covered = flagged | new_antenna[grid.ant1] | new_antenna[grid.ant2]
-            new_baseline = (score > single) & ~covered
-            if restrict is not None:
-                new_baseline &= restrict
+            # The selected cells no antenna explains are flagged on their own baselines once the antennas are done:
+            # until then they still count for their antennas' statistics.
+            new_baseline = (score > single) & ~covered if selected is None else np.zeros_like(covered)
             antenna_flags[:, spw] |= new_antenna
             baseline_flags[:, spw] |= new_baseline
             result.history.append({"spw": spw, "iteration": iteration, "scans": scans,
@@ -1094,4 +1177,7 @@ def find_outliers(grid: VisGrid, settings: Optional[OutlierSettings] = None) -> 
             else:
                 scans = True
     result.antenna_flags = _broadband(antenna_flags, has_data, float(settings.broadband_fraction))
+    if grid.selected is not None:
+        selected = grid.selected & (grid.count > 0)
+        result.baseline_flags |= selected & ~result.antenna_flags[grid.ant1] & ~result.antenna_flags[grid.ant2]
     return result

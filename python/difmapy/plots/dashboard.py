@@ -1,6 +1,6 @@
 """The dashboard: every view of a session in one window, kept in step.
 
-Four panels: the time and frequency views of the visibilities (vplot, tplot, possm) top left, the uv-distance views and the gain corrections (radplot, projplot, corplot) top right, the map (mapplot) bottom left, and the controls bottom right - loading a file, the calibration commands, and an output tab that shows everything the session prints, with buttons to save its products.
+Four panels: the time and frequency views of the visibilities (vplot, tplot, possm) top left, the uv-distance views and the gain corrections (radplot, projplot, corplot) top right, the map (mapplot) bottom left, and the controls bottom right - loading a file, the smart flagger, the calibration commands, and an output tab that shows everything the session prints, with buttons to save its products.
 
 The plots are the ordinary plot windows, embedded: they keep their keys, flagging and status lines. Whatever changes the data or the model in one of them - a flag edit, a CLEAN, a fit - or from the controls reloads the others, as ``r`` would; a plot in a tab that is not shown is reloaded when its tab is next opened.
 """
@@ -293,6 +293,29 @@ class Dashboard(PlotWindow):
         row.addWidget(self.load_button, 0, QtCore.Qt.AlignmentFlag.AlignBottom)
         lay.addLayout(row)
         col.addWidget(data)
+
+        # -- flagging: the smart flagger over all the data (a box in a
+        # plot, after Shift+S, does it for a selection) --
+        col.addWidget(_section("FLAGGING"))
+        card, lay, self.smartflag_button = _action_card("Smart flag", self.run_smartflag)
+        self.smartflag_button.setToolTip(
+            "smartflag: find the antennas (and baselines) whose data depart from the rest, in all the data, "
+            "and flag them over the time of the fault")
+        row = QtWidgets.QHBoxLayout()
+        self.smart_phase_check = QtWidgets.QCheckBox("Test phases")
+        self.smart_phase_check.setChecked(True)
+        self.smart_phase_check.setToolTip("test the phases as well as the amplitudes (untick for amplitudes only)")
+        row.addWidget(self.smart_phase_check, 0, QtCore.Qt.AlignmentFlag.AlignBottom)
+        self.smart_sigma_edit = QtWidgets.QLineEdit()
+        self.smart_sigma_edit.setPlaceholderText("5")
+        self.smart_sigma_edit.setToolTip("threshold of an antenna's combined statistic, in Gaussian sigmas")
+        self.smart_sigma_edit.returnPressed.connect(lambda: self.run_smartflag())
+        row.addLayout(_labelled("Antenna sigma", self.smart_sigma_edit), 1)
+        lay.addLayout(row)
+        hint = QtWidgets.QLabel("all the data; Shift+S and a box in vplot or radplot flags a selection")
+        hint.setObjectName("hint")
+        lay.addWidget(hint)
+        col.addWidget(card)
 
         # -- calibration: one card per command, its options under it --
         col.addWidget(_section("CALIBRATION"))
@@ -631,6 +654,22 @@ class Dashboard(PlotWindow):
                  if 0.0 < obs._gauval < 1.0 and obs._gaurad > 0.0 else "no taper")
         print(f"{what}: uv range {format_uvdist(obs._uvmin)} M-lambda to {hi}, {taper}; "
               f"beam {bmaj:.4g} x {bmin:.4g} mas at {bpa:.4g} deg")
+
+    def run_smartflag(self):
+        """Run `smartflag` over all the data, testing the phases if "Test phases" is ticked, with the antenna sigma typed (empty: 5)."""
+        if self.obs is None:
+            self._ensure_tee()
+            print("smartflag: no data loaded")
+            return None
+        use_phases = self.smart_phase_check.isChecked()
+        text = self.smart_sigma_edit.text().strip()
+
+        def go():
+            # Read inside the run, so a typo is reported rather than raised.
+            antenna_sigma = float(text) if text else 5.0
+            return self.obs.smartflag(use_phases=use_phases, antenna_sigma=antenna_sigma, quiet=False)
+
+        return self._run("smartflag", go)
 
     def run_selfcal(self):
         """Self-calibrate with what the Selfcal card says: phase and/or amplitude, at the solution interval typed (minutes as a bare number, or a string with a unit, or "scan"; empty for one solution per integration), and - with "Converge with modelfit", the default - alternating with `modelfit` until the fit converges (`selfcal(converge=True)`). That needs components with free parameters; a model of CLEAN components alone gets one selfcal round, with a note saying so."""

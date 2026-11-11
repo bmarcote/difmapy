@@ -2534,6 +2534,51 @@ class Observation:
         self._dirty()
         return self._done(n, quiet)
 
+    def smartflag(self, use_phases=True, sigma=3.0, antenna_sigma=5.0, baseline_sigma=5.0, settings=None, quiet=True, verbose=True):
+        """Find and flag outliers in all the data, antenna by antenna (the "smart outliers" flagger of `difmapy.outliers`).
+
+        Every baseline and IF of the data as shown (calibration, Stokes selection and flags applied), one time bin per integration, is compared with a smooth model: each integration with the others of its scan, each scan with the trend of the other scans. A fault is nearly always one antenna's and shows on all its baselines at once, so the departures are combined per antenna: an antenna whose baselines depart together beyond `antenna_sigma` is flagged on all of them, over the time range of the fault, rising and decaying edges included (and in every IF when it is out in most of them). A departure no antenna explains is flagged on its own baseline beyond `baseline_sigma`.
+
+        In a visibility plot (radplot, projplot, uvplot, vplot), Shift+S and then a box flags a selection the same way: the points in the box are taken as outliers, and the antenna behind them is flagged over the time of the fault.
+
+        Parameters
+        ----------
+        use_phases : bool, default True
+            Test the phases as well as the amplitudes. ``False`` tests the amplitudes only, for phases that cannot be followed even within a scan.
+        sigma : float, default 3.0
+            Departure (in Gaussian sigmas) of an outlying visibility: it is left out of its neighbours' references.
+        antenna_sigma : float, default 5.0
+            Threshold of an antenna's combined statistic that flags the antenna. It is tested on every antenna, IF and integration, hence higher than `sigma`.
+        baseline_sigma : float, default 5.0
+            Departure flagged on its own baseline when no antenna explains it; 0 never flags a baseline alone.
+        settings : dict | None, default None
+            Further settings of `difmapy.outliers.OutlierSettings` (``edge_sigma``, ``floor``, ``phase_floor``, ``trend_minutes``, ...).
+        quiet : bool, default True
+            Return None. ``False`` returns the summary dict.
+        verbose : bool, default True
+            Print what was flagged.
+
+        Returns
+        -------
+        dict | None
+            With ``quiet=False``: `samples` (visibilities newly flagged, one per row and IF), `antennas` (station name -> samples flagged on its baselines because the station was at fault) and `alone` (samples flagged on their own baseline).
+        """
+        from difmapy.smartflag import apply_ops, describe, smart_flag_ops
+
+        options = {"sigma": float(sigma), "antenna_sigma": float(antenna_sigma),
+                   "baseline_sigma": float(baseline_sigma), **dict(settings or {})}
+        ops, summary = smart_flag_ops(self, use_phases=use_phases, settings=options)
+        if ops:
+            apply_ops(self, ops)
+        if verbose:
+            print("smartflag: " + (f"flagged {describe(self, summary)}" if ops else "no outliers found"))
+        names = self.antennas
+        report = {"samples": summary["samples"],
+                  "antennas": {names[a] if 0 <= a < len(names) else str(a): n
+                               for a, n in summary["antennas"].items()},
+                  "alone": summary["alone"]}
+        return self._done(report, quiet)
+
     # ------------------------------------------------------------------
     # ignoring stations
     # ------------------------------------------------------------------

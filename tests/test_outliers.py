@@ -6,6 +6,8 @@ elevation-like trend, antenna gains and Gaussian noise; faults are injected on t
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -36,7 +38,7 @@ def _grid(*, seed: int = 1, snr: float = 20.0, rotate: bool = False) -> dict:
 
 def _run(data: dict, **settings) -> tuple[VisGrid, outliers.OutlierResult]:
     grid = VisGrid(data["vis"], np.ones(data["vis"].shape), data["ant1"], data["ant2"], data["times"],
-                   data["segment"], NANT, restrict=data.get("restrict"))
+                   data["segment"], NANT, selected=data.get("selected"))
     return grid, find_outliers(grid, OutlierSettings(**settings))
 
 
@@ -137,16 +139,69 @@ def test_a_phase_excursion_of_raw_data_is_found_through_the_wander():
     assert not amplitude_only.antenna_flags[3][..., 53:57].any()
 
 
-def test_a_selection_only_seeds_flags_inside_it():
+# ---------------------------------------------------------------------------
+# Selections (cells picked out by hand as outliers)
+# ---------------------------------------------------------------------------
+def _select(data: dict, baseline: tuple, spw: int, bins) -> np.ndarray:
+    """Select every block and hand of one baseline and subband over the given bins."""
+    selected = np.zeros(data["vis"].shape, dtype=bool)
+    index = np.flatnonzero((data["ant1"] == baseline[0]) & (data["ant2"] == baseline[1]))[0]
+    selected[index, spw, ..., bins] = True
+    data["selected"] = selected
+    return selected
+
+
+def test_a_selection_blames_the_antenna_whose_other_baselines_depart_and_nothing_elsewhere():
     data = _grid()
-    data["vis"][_baselines_of(data, 2), 0, :, :, 33] *= 4.0
+    data["vis"][_baselines_of(data, 2), 0, :, :, 33] *= 4.0               # outside the selection: left alone
     data["vis"][_baselines_of(data, 4), 0, :, :, 233] *= 4.0
-    restrict = np.zeros(data["vis"].shape, dtype=bool)
-    restrict[..., 200:260] = True
-    data["restrict"] = restrict
-    _, result = _run(data)
+    _select(data, (1, 4), 0, slice(233, 234))
+    grid, result = _run(data)
     assert result.antenna_flags[4, 0, ..., 233].all()
-    assert not result.antenna_flags[2].any()
+    assert not result.antenna_flags[1].any() and not result.antenna_flags[2].any()
+    assert not result.baseline_flags.any()
+
+
+def test_a_selection_over_clean_data_flags_exactly_the_selection():
+    data = _grid()
+    selected = _select(data, (0, 5), 1, slice(100, 110))
+    grid, result = _run(data)
+    assert not result.antenna_flags.any()
+    np.testing.assert_array_equal(result.cell_flags(grid), selected)
+
+
+def test_a_selection_finds_a_mild_fault_a_search_of_all_the_data_leaves_alone():
+    """A drop on all of antenna 3's baselines that its statistic puts between `sigma` and `antenna_sigma`."""
+    data = _grid()
+    data["vis"][_baselines_of(data, 3), 0, :, :, 152:154] *= 0.86
+    grid, everything = _run(data)
+    assert not everything.antenna_flags[3][..., 152:154].any()
+    _select(data, (0, 3), 0, slice(152, 154))
+    grid, selection = _run(data)
+    assert selection.antenna_flags[3, 0, ..., 152:154].all()
+    assert not selection.antenna_flags[0].any()
+
+
+def test_an_antenna_most_of_whose_baselines_are_selected_is_blamed_outright():
+    """All of antenna 6's baselines picked at one bin, whatever the data say there: the antenna is at fault."""
+    data = _grid()
+    selected = np.zeros(data["vis"].shape, dtype=bool)
+    selected[_baselines_of(data, 6), 1, :, :, 77] = True
+    data["selected"] = selected
+    grid, result = _run(data)
+    assert result.antenna_flags[6, 1, ..., 77].all()
+    assert not np.delete(result.antenna_flags, 6, axis=0).any()
+
+
+def test_the_selection_threshold_falls_from_antenna_sigma_to_sigma_as_the_selection_shrinks():
+    settings = OutlierSettings()
+    assert outliers.selection_sigma(settings, 10 ** 6, 10 ** 6) == pytest.approx(settings.antenna_sigma)
+    assert outliers.selection_sigma(settings, 10 ** 6, 0) == settings.antenna_sigma
+    assert outliers.selection_sigma(settings, 10 ** 5, 10) == settings.sigma
+    middle = outliers.selection_sigma(settings, 10 ** 6, 10 ** 3)
+    assert settings.sigma < middle < settings.antenna_sigma
+    tail = math.erfc(settings.antenna_sigma / math.sqrt(2)) * 10 ** 3        # same false blames as everything
+    assert math.erfc(middle / math.sqrt(2)) == pytest.approx(tail, rel=1e-6)
 
 
 def test_compiled_and_numpy_medians_agree(monkeypatch):

@@ -20,7 +20,7 @@ import sys
 # The observation methods exposed as bare, difmap-like commands.
 COMMANDS = (
     # selection and data
-    "select", "header", "flag", "unflag", "ignore", "unignore",
+    "select", "header", "flag", "unflag", "smartflag", "ignore", "unignore",
     "save_flags", "wflags", "uvaver", "chanaver",
     "savecaltable", "gain_snapshot",
     # imaging setup

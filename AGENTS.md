@@ -689,6 +689,20 @@ traced every residual amplitude problem of the calibrated calibrators to its cau
   Checks and numbers: vlbipy `docs/smart_outliers_appendix.md`.
 - `floor` (5%), `phase_floor` (10 deg), `scan_floor` (20%) keep bright sources' residual calibration errors out;
   noise-free data (noise 0) are judged by the floors alone.
+- `Observation.smartflag()` (dashboard: Smart flag) searches the whole stream as one grid (one bin per
+  integration, scans from gaps) and applies the result with `smartflag.apply_ops` - no undo history, like `flag`.
+  Its results are bit for bit those of the search before selections existed.
 - GUI: `_VisPlot` (radplot/vplot/projplot) Shift+S arms `SelectViewBox.armed`; the next drag (any modifier) goes
-  to `smartflag.smart_flag_ops` (whole stream as one grid, one bin per integration, scans from gaps, the box only
-  seeds via `VisGrid.restrict`); one `EditHistory.apply`, so one undo. Tests: `test_smartflag.py`.
+  to `smartflag.smart_flag_ops` with the box as `VisGrid.selected`; one `EditHistory.apply`, so one undo.
+  The user's rule (2026-11-11): **everything in the box is an outlier and is flagged**; the flagger only decides
+  which antenna is behind it. An earlier version let the box merely seed a normal search, and on real data it
+  usually reported "no outlier among the selected points". Selected cells are treated as flagged in `_scores` (out
+  of every reference, level and noise: their own scores, against a scan-median fallback, were unreliable and
+  once blamed the wrong end of a baseline), and `_blame(known=...)` counts each as a departure without bound on
+  the side the antenna's other baselines lean to - so the other baselines decide between the two ends, and an
+  antenna with most baselines selected is blamed outright. Only antennas of a still-unexplained selected baseline
+  may be blamed, at `outliers.selection_sigma` (from `antenna_sigma` for a box over everything down to `sigma`
+  for a small one, at the same expected number of false blames); growth uses the unselected baselines only.
+  Selected cells left unexplained become baseline flags at the end. Tests: `test_smartflag.py` (source at the
+  phase centre: the default 4.7 mas offset turns the phases so fast that the noise-free file scores 2-3.6 sigma
+  on clean baselines) and the selection tests on noisy grids in `test_outliers.py`.

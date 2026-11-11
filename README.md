@@ -311,13 +311,21 @@ point, **Ctrl+Z** / **Ctrl+Shift+Z** (or Ctrl+Y) undo and redo the last
 edit, and `x` shows or hides the flagged points (hidden by default).
 A box acts only on what is drawn: IFs switched off in the legend are
 left alone. **Shift+S**, then a drag (no modifier needed, orange box),
-*smart-flags* the box instead: the points in it seed
-`difmapy.outliers` on the whole stream, which traces their outliers to
-the antenna common to most of its baselines (or to one baseline) and
-flags that antenna over the time range of the fault, its rising and
-decaying edges included, on every baseline and IF; on a phase panel the
-phases are tested too, elsewhere the amplitudes only. One Ctrl+Z takes it
-back; Esc (or Shift+S again) cancels an armed selection.
+*smart-flags* the box instead: every point in it is taken as an outlier
+and flagged, and `difmapy.outliers`, run on the whole stream, looks for
+the antenna behind them - of the two of a selected baseline, the one
+whose other baselines depart with it; an antenna most of whose baselines
+are in the box, outright - and flags that antenna on every baseline over
+the time range of the fault, its rising and decaying edges included. A
+point no antenna explains is flagged on its own. On a phase panel the
+phases are tested too, elsewhere the amplitudes only. One Ctrl+Z takes
+it back; Esc (or Shift+S again) cancels an armed selection.
+`obs.smartflag()` (the dashboard's **Smart flag**) runs the same
+flagger over all the data instead, flagging the antennas whose baselines
+depart together beyond `antenna_sigma` (5) and single baselines beyond
+`baseline_sigma` (5); a box lowers the antenna threshold towards
+`sigma` (3) as it shrinks, keeping the expected number of wrongly
+blamed antennas no higher than such a search makes.
 Plain drag/wheel keep pyqtgraph's pan/zoom, and `h` shows the full key
 legend of whichever plot is in front. In `vplot` the space bar switches
 flagging between the displayed baseline and every baseline of its first
@@ -822,7 +830,9 @@ one - a flag edit, a CLEAN, a fit - reloads the others, as `r` would
 **Main** is a column of cards, each command's options under its
 button: **File...** (the platform's own open dialog: a UVFITS file, or a
 Measurement Set - entering its folder picks it) with optional
-`timeavg`/`freqavg` and **Load**; **Selfcal** (phase and/or amplitude,
+`timeavg`/`freqavg` and **Load**; **Smart flag** (`smartflag` over all
+the data, testing the phases unless unticked, at the antenna sigma
+typed); **Selfcal** (phase and/or amplitude,
 at a solution interval; by default converging with `modelfit`, as
 `selfcal(converge=True)`, when the model has components to fit),
 **Gscale** (float scale on by default) and
@@ -883,7 +893,7 @@ peak position and flux, model components, total flux, residual rms.
 ### Other commands
 
 `shift`/`unshift`, `resoff`/`clroff`, `uvaver`, `uvtaper`, `uvrange`,
-`uvzero`, `gscale`, `station_gains`, `uncalib`, `selfant`,
+`uvzero`, `gscale`, `station_gains`, `uncalib`, `selfant`, `smartflag`,
 `clrmod`, `clearmodel`, `auto_mapsize`, `estimated_resolution`,
 `mapinfo`, `noise_stats`, `wmodel`/`rmodel`, `wwins`/`rwins`, `wobs`,
 `wdmap`, `wbeam`, `imstat`, `spectrum`, `closure_phases`, `specplot`,

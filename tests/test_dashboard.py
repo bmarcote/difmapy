@@ -204,16 +204,16 @@ def test_controls_are_cards_and_output_has_a_save_heading(dash):
     from pyqtgraph.Qt import QtWidgets
 
     cards = dash.tabs.findChildren(QtWidgets.QFrame, "card")
-    # data, selfcal, gscale, bayes, uv range, taper, and the save buttons
-    assert len(cards) == 7
-    for button in (dash.selfcal_button, dash.gscale_button, dash.bayes_button,
+    # data, smart flag, selfcal, gscale, bayes, uv range, taper, and the save buttons
+    assert len(cards) == 8
+    for button in (dash.smartflag_button, dash.selfcal_button, dash.gscale_button, dash.bayes_button,
                    dash.uvrange_button, dash.uvtaper_button):
         card = button.parentWidget()
         assert card.objectName() == "card"
         # The button heads its card, the options are under it.
         assert card.layout().itemAt(0).widget() is button
     titles = [l.text() for l in dash.tabs.findChildren(QtWidgets.QLabel, "sectionTitle")]
-    assert "SAVE:" in titles
+    assert "SAVE:" in titles and "FLAGGING" in titles
     from pyqtgraph.Qt import QtWidgets as W
 
     assert "QFrame#card" in W.QApplication.instance().styleSheet()   # styled

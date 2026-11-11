@@ -30,6 +30,7 @@ use [`ignore`](selfcal.md#setting-a-station-aside) instead.
 | ++ctrl+z++ / ++ctrl+shift+z++ | undo / redo the last edit |
 | ++x++ | show or hide the flagged points (hidden by default) |
 | ++space++ (`vplot`) | flag the displayed baseline, or every baseline of its first antenna |
+| ++shift+s++, then drag | smart flag: the box, and the antenna behind it (see below) |
 
 Edits act only on what is drawn: an IF switched off in `vplot`'s legend is not flagged by a box drawn over it.
 
@@ -39,6 +40,52 @@ A plain drag and the wheel keep their usual pan and zoom. Undo is
 exact: each edit stores the affected rows of the FLAG column before and
 after, so it restores what was there even where the edit overlapped data
 that were already flagged.
+
+## Smart flagging
+
+A fault is nearly always one antenna's - a receiver, a pointing, a
+slew, interference at one site - and shows on all of its baselines at
+once. The smart flagger (`difmapy.outliers`) compares every baseline
+and IF with a smooth model (each integration with the others of its
+scan, each scan with the trend of the others), combines the departures
+per antenna, and flags the antenna at fault on every baseline, over the
+time range of the fault with its rising and decaying edges.
+
+### All the data
+
+```python
+obs.smartflag()                        # antennas beyond 5 sigma, single baselines beyond 5 sigma
+obs.smartflag(use_phases=False)        # amplitudes only
+obs.smartflag(antenna_sigma=4, quiet=False)
+# {'samples': 417, 'antennas': {'EF': 133, 'HH': 210, ...}, 'alone': 0}
+```
+
+It prints what it flagged: the stations at fault, with the samples
+flagged on their baselines, and the samples flagged on a single
+baseline. The dashboard's **Smart flag** button runs it.
+
+### A box in a plot
+
+In `radplot`, `projplot`, `uvplot` and `vplot`, ++shift+s++ arms a
+smart selection: the next drag (no modifier needed) draws an orange box,
+and ++esc++ cancels. Every point in the box is taken as an outlier and
+flagged, whatever the model makes of it. The flagger then looks for the
+antenna behind them:
+
+- of the two antennas of a selected baseline, the one whose *other*
+  baselines depart with it is at fault, so a box over the bad points of
+  one baseline in `vplot` flags the right antenna on all its baselines;
+- an antenna most of whose baselines are in the box is at fault
+  outright;
+- a point no antenna explains is flagged on its own baseline.
+
+The antenna's flag then grows over the time range of the fault, inside
+or outside the box. The bar for blaming an antenna is lower than in a
+search of all the data: from 5 sigma for a box over everything to
+3 sigma for a small one, so that a box never blames more antennas
+wrongly than a search of all the data would. On a phase panel the
+phases are tested too, elsewhere the amplitudes only. One ++ctrl+z++
+takes the whole edit back.
 
 ## Keeping the flags
 

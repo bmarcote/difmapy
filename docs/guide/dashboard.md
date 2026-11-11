@@ -38,6 +38,7 @@ itself) catches up with changes made from the prompt.
 | **File...**, path | the file to load; the button opens the platform's own dialog, for a UVFITS file or a Measurement Set (entering the MS folder picks it, as does its `table.dat`) |
 | timeavg, freqavg | optional averaging on load, as `load(timeavg=, freqavg=)` takes it: a time with a unit (`10s`, `2min`), and a channel count or `all` |
 | **Load** | loads the file and rebuilds every plot for it; at the prompt the new data becomes `obs` |
+| **Smart flag** | [`smartflag`](flagging.md#smart-flagging) over all the data: testing the phases too unless **Test phases** is unticked, at the antenna sigma typed (5 when empty). A box in a plot after ++shift+s++ does the same for a selection |
 | **Selfcal** | `selfcal` with phase and/or amplitude, as ticked (phase by default), at the solution interval typed: minutes as a bare number, a string with a unit (`30s`), `scan`, or empty for one solution per integration. With **Converge with modelfit** (on by default) it alternates with `modelfit` until the fit stops improving, as `selfcal(converge=True)`; a model of CLEAN components alone has nothing to fit, and gets one selfcal round |
 | **Gscale** | `gscale`, with `float_scale` as ticked (on by default) |
 | **Bayes** | `bayes_gscale` over the source models ticked: `clean`, `gauss1`, `gauss2`, `gauss3` (the Gaussians by default) |
