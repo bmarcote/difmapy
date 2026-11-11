@@ -107,6 +107,36 @@ def test_a_phase_jump_counts_only_when_phases_are_tested():
     assert not amplitude_only.antenna_flags[6, 1, :, 0, 204].any()
 
 
+def _wander(data: dict, degrees: float, seed: int = 7) -> dict:
+    """Antenna phases that random-walk by ``degrees`` per bin, as the atmosphere moves uncalibrated data."""
+    rng = np.random.default_rng(seed)
+    walk = np.cumsum(rng.normal(0.0, np.radians(degrees), (NANT, NSCAN * NBIN)), axis=1)
+    data["vis"] = data["vis"] * np.exp(1j * (walk[data["ant1"]] - walk[data["ant2"]]))[:, None, None, None, :]
+    return data
+
+
+def test_wandering_raw_phases_neither_flag_clean_data_nor_hide_an_amplitude_drop():
+    # 6 deg per bin and antenna: twice the thermal phase scatter, which the phase part's own noise takes up (one
+    # noise shared by both parts let this scatter hide a quarter of the drop).
+    data = _wander(_grid(rotate=True), 6.0)
+    grid, clean = _run(data, align_phases=True)
+    assert clean.summary(grid)["fraction"] < 1e-3
+    data["vis"][_baselines_of(data, 5), :, :, :, 153:157] *= 0.7
+    _, result = _run(data, align_phases=True)
+    assert result.antenna_flags[5][..., 153:157].all()
+
+
+def test_a_phase_excursion_of_raw_data_is_found_through_the_wander():
+    data = _wander(_grid(rotate=True), 6.0)
+    mine = _baselines_of(data, 3)
+    turn = np.where(data["ant1"][mine] == 3, 1.0, -1.0) * np.radians(60.0)     # V = g1 conj(g2)
+    data["vis"][mine, :, :, :, 53:57] *= np.exp(1j * turn)[:, None, None, None, None]
+    _, with_phases = _run(data, align_phases=True)
+    assert with_phases.antenna_flags[3][..., 53:57].all()
+    _, amplitude_only = _run(data, align_phases=True, use_phases=False)
+    assert not amplitude_only.antenna_flags[3][..., 53:57].any()
+
+
 def test_a_selection_only_seeds_flags_inside_it():
     data = _grid()
     data["vis"][_baselines_of(data, 2), 0, :, :, 33] *= 4.0

@@ -22,8 +22,12 @@ statistics are done on the complex visibilities themselves:
   scans of the series: a local linear fit with tricube weights out to ``trend_minutes`` on either side, with
   bisquare weights (first from the median of the other scans) so that a bad scan drags neither its own trend
   nor its neighbours' (a median alone would be biased wherever the trend is steep, the ends of the track first);
-* both dispersions are robust (median radius over the Rayleigh median ``sqrt(2 ln 2)`` of a unit
-  complex Gaussian); the bin noise is followed in time over the trend window, so a rising Tsys is not an outlier;
+* every departure is split along the reference (its amplitude part: the projection, unbiased and Gaussian at
+  any signal-to-noise ratio, unlike ``|V| - |M|``) and across it (its phase part), and each part has its own
+  robust dispersion (Gaussian MAD): the phases of raw or phase-referenced data scatter more than their
+  amplitudes (atmosphere, ionosphere), and one scale for both would let that scatter blunt the amplitude test.
+  The bin noise is followed in time over the trend window, so a rising Tsys or a worsening atmosphere is not
+  an outlier;
 * amplitude departures smaller than ``floor`` (bins) or ``scan_floor`` (scans) times the reference amplitude,
   and phase departures smaller than ``phase_floor`` degrees, are never outliers: on a bright source the thermal
   noise is so small that the residual gain and phase changes any calibration leaves would otherwise exceed it.
@@ -37,10 +41,12 @@ threshold radius of a complex residual is the one with the same tail probability
 (:func:`sigma_radius`; 3 sigma is a radius of 3.44 per-component sigmas).
 
 Raw data (before any fringe fit) rotate in phase within a scan: with ``align_phases`` every scan of every
-series is first rotated by its mean bin-to-bin phase step and its mean phase, so it follows the same model.
-Their phases still wander antenna by antenna (atmosphere, clocks) until the calibration takes that out, which
-is no defect: ``use_phases = False`` makes every test on the amplitude part alone (one dimension, so the
-thresholds are the sigmas themselves).
+series is first rotated by its mean bin-to-bin phase step (a per-baseline fringe rate; a delay is a constant
+phase per channel block) and its mean phase, so it follows the same model. What their phases still do -
+wander antenna by antenna with the atmosphere - is measured as the phase part's own noise, so raw data are
+tested on the complex values too. ``use_phases = False`` tests the amplitude part alone, as ``|V| - |M|``
+(one dimension, so the thresholds are the sigmas themselves), for phases that cannot be followed at all.
+The checks behind these choices are in vlbipy's ``docs/smart_outliers_appendix.md``.
 
 Antennas
 --------
@@ -139,8 +145,9 @@ class OutlierSettings:
     align_phases : bool
         Rotate every scan of every series by its phase rate and mean phase first (raw, unfringe-fitted data).
     use_phases : bool
-        Test the phase (tangential) part of the departures too; False: the amplitude part only (raw data, whose
-        antenna phases wander until they are calibrated).
+        Test the complex departures: the amplitude part as the projection on the reference, and the phase
+        (tangential) part, each with its own noise. False: the amplitude part only, as ``|V| - |M|``, for phases
+        that cannot be followed even within a scan.
     """
 
     sigma: float = 3.0
@@ -679,8 +686,8 @@ def _local_trend(level_re: np.ndarray, level_im: np.ndarray, seg: _Segments,
     min_scans : int
         Other scans with data and weight a scan needs to be compared with the trend.
     phases : bool
-        Departures as complex radii (True), or as differences of amplitudes, ``|L| - |T|`` (the phases of the
-        scans are not to be trusted), with the spread their MAD.
+        Departures split along and across the trend (:func:`_parts`), each part with its own spread (True), or
+        the differences of amplitudes alone, ``|L| - |T|`` (the phases of the scans are not to be trusted).
 
     Returns
     -------
@@ -691,14 +698,23 @@ def _local_trend(level_re: np.ndarray, level_im: np.ndarray, seg: _Segments,
         where it is extrapolated (the first and last scans), adds to a departure.
     trend_re, trend_im : numpy.ndarray
         ``(S, nscan)`` the trend.
-    spread : numpy.ndarray
-        ``(S,)`` median of ``|departure| / factor`` over the Rayleigh median (the Gaussian MAD without ``phases``;
-        NaN when there is none).
+    spread_radial, spread_tangential : numpy.ndarray
+        ``(S,)`` Gaussian MAD of the amplitude and phase parts of ``departure / factor`` (NaN when there is none;
+        without ``phases`` both are the amplitude part's).
     """
-    def size(dep_re, dep_im, ref_re, ref_im):
-        if phases:
-            return np.hypot(dep_re, dep_im)
-        return np.abs(np.hypot(dep_re + ref_re, dep_im + ref_im) - np.hypot(ref_re, ref_im))
+    def parts(dep_re, dep_im, ref_re, ref_im):
+        along, across, _ = _parts(dep_re, dep_im, ref_re, ref_im, phases=phases)
+        return along, (across if phases else along)
+
+    def spreads(along, across):
+        return tuple(np.where((n > 0) & (m >= 0), m / GAUSSIAN_MAD, np.nan)
+                     for m, n in (_median(np.abs(along)), _median(np.abs(across))))
+
+    def size(along, across, spread_radial, spread_tangential):
+        # Departure radius in units of each part's spread, so the bisquare weights see both parts alike.
+        with np.errstate(invalid="ignore", divide="ignore"):
+            along, across = along / spread_radial[:, None], across / spread_tangential[:, None]
+        return np.hypot(along, across) if phases else np.abs(along)
 
     scale = RAYLEIGH_MEDIAN if phases else GAUSSIAN_MAD
     valid = np.isfinite(level_re) & np.isfinite(level_im)
@@ -707,9 +723,9 @@ def _local_trend(level_re: np.ndarray, level_im: np.ndarray, seg: _Segments,
     support = valid.astype(np.float64) @ (weights > 0).T
     median_re, _ = _gather_median(level_re, seg.others)
     median_im, _ = _gather_median(level_im, seg.others)
-    departure = size(level_re - median_re, level_im - median_im, median_re, median_im)
-    robust = _bisquare(departure, scale)
-    spread = np.full(valid.shape[0], np.nan)
+    along, across = parts(level_re - median_re, level_im - median_im, median_re, median_im)
+    robust = _bisquare(size(along, across, *spreads(along, across)), scale)
+    spread_radial = spread_tangential = np.full(valid.shape[0], np.nan)
     factor = np.ones(valid.shape)
     for _ in range(2):
         mass = valid * robust
@@ -729,12 +745,12 @@ def _local_trend(level_re: np.ndarray, level_im: np.ndarray, seg: _Segments,
                                       sy / np.where(s0 > 0, s0, np.nan)))
         compared = valid & (support >= min_scans) & (s0 > 0)
         factor = np.sqrt(1.0 + leverage)
-        departure = np.where(compared, size(level_re - trend[0], level_im - trend[1], trend[0], trend[1]), np.nan)
-        median, n = _median(departure / factor)
-        spread = np.where((n > 0) & (median >= 0), median / scale, np.nan)
-        robust = _bisquare(departure / factor, scale)
+        along, across = parts(level_re - trend[0], level_im - trend[1], trend[0], trend[1])
+        along, across = np.where(compared, along, np.nan) / factor, np.where(compared, across, np.nan) / factor
+        spread_radial, spread_tangential = spreads(along, across)
+        robust = _bisquare(size(along, across, spread_radial, spread_tangential), scale)
     return (np.where(compared, level_re - trend[0], np.nan), np.where(compared, level_im - trend[1], np.nan), factor,
-            trend[0], trend[1], spread)
+            trend[0], trend[1], spread_radial, spread_tangential)
 
 
 def _bisquare(departure: np.ndarray, scale: float = RAYLEIGH_MEDIAN) -> np.ndarray:
@@ -746,15 +762,14 @@ def _bisquare(departure: np.ndarray, scale: float = RAYLEIGH_MEDIAN) -> np.ndarr
     return np.where(np.isfinite(u), np.where(u < 1.0, (1.0 - u * u) ** 2, 0.0), 1.0)
 
 
-def _components(deviation_re, deviation_im, reference_re, reference_im, noise, amplitude_floor: float,
-                phase_floor: float, *, phases: bool = True) -> tuple[np.ndarray, np.ndarray]:
-    """Amplitude (radial) and phase (tangential) parts of a complex deviation along its reference, in units of noise.
+def _parts(deviation_re, deviation_im, reference_re, reference_im, *, phases: bool = True) -> tuple:
+    """Amplitude (along the reference) and phase (across it) parts of a complex deviation ``V - M``, unscaled.
 
-    ``noise`` is the thermal tolerance (same for both parts); the radial part also tolerates ``amplitude_floor``
-    times the reference amplitude, the tangential part ``phase_floor`` degrees of it. A reference of no amplitude
-    has no direction: the real axis is used then. Without ``phases`` the radial part is the difference of the
-    amplitudes, ``|V| - |M|``: the projection would count a phase rotation as a loss of amplitude
-    (``cos(delta) - 1``), and raw phases wander.
+    With ``phases`` the amplitude part is the projection of ``V - M`` on the direction of ``M``: unbiased and
+    Gaussian at any signal-to-noise ratio. Without, it is the difference of the amplitudes, ``|V| - |M|`` (biased
+    upwards at low signal-to-noise, Rician), which a rotation of the phase does not change: the projection would
+    count one as a loss of amplitude (``cos(delta) - 1``). A reference of no amplitude has no direction: the real
+    axis is used then. Returns ``(along, across, amplitude)``, the last ``|M|``.
     """
     with np.errstate(invalid="ignore", divide="ignore"):
         amplitude = np.hypot(reference_re, reference_im)
@@ -764,9 +779,36 @@ def _components(deviation_re, deviation_im, reference_re, reference_im, noise, a
             along = deviation_re * cos + deviation_im * sin
         else:
             along = np.hypot(deviation_re + reference_re, deviation_im + reference_im) - amplitude
-        radial = along / np.hypot(noise, amplitude_floor * amplitude)
-        tangential = (deviation_im * cos - deviation_re * sin) / np.hypot(noise, np.radians(phase_floor) * amplitude)
+        across = deviation_im * cos - deviation_re * sin
+    return along, across, amplitude
+
+
+def _components(deviation_re, deviation_im, reference_re, reference_im, noise_radial, noise_tangential,
+                amplitude_floor: float, phase_floor: float, *, phases: bool = True) -> tuple[np.ndarray, np.ndarray]:
+    """Amplitude (radial) and phase (tangential) parts of a complex deviation along its reference, in units of noise.
+
+    Each part has its own noise (:func:`_parts` for what the parts are): the phases of uncalibrated or
+    phase-referenced data wander (atmosphere, ionosphere) by more than the thermal noise, their amplitudes do
+    not, and a scale shared by both would let the phase scatter blunt the amplitude test. The radial part also
+    tolerates ``amplitude_floor`` times the reference amplitude, the tangential part ``phase_floor`` degrees of it.
+    """
+    along, across, amplitude = _parts(deviation_re, deviation_im, reference_re, reference_im, phases=phases)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        radial = along / np.hypot(noise_radial, amplitude_floor * amplitude)
+        tangential = across / np.hypot(noise_tangential, np.radians(phase_floor) * amplitude)
     return radial.astype(np.float32), tangential.astype(np.float32)
+
+
+def _bin_noise(part: np.ndarray, unit: np.ndarray, seg: _Segments) -> np.ndarray:
+    """Noise of one part of every bin's ``V - M`` (``(S, ntime)``): its Gaussian MAD per scan, in units of one
+    sample's (``unit``), followed in time as the median over the trend window, times the bin's ``unit``.
+
+    Noise-free data (a model, a simulation) have no noise: 0 then, so the floors alone set the tolerance.
+    """
+    with np.errstate(invalid="ignore", divide="ignore"):
+        scan_noise, _ = _gather_median(np.abs(part) / unit, seg.gather)
+    noise, _ = _gather_median(scan_noise, seg.window)
+    return np.where(noise >= 0, noise / GAUSSIAN_MAD, np.nan)[:, seg.index] * unit
 
 
 def _scores(vis: np.ndarray, count: np.ndarray, flagged: np.ndarray, seg: _Segments,
@@ -817,37 +859,32 @@ def _scores(vis: np.ndarray, count: np.ndarray, flagged: np.ndarray, seg: _Segme
             reference_re = np.where(missing, scan_re[:, seg.index], reference_re)
             reference_im = np.where(missing, scan_im[:, seg.index], reference_im)
             precision = np.where(missing, scan_count, precision)
-        deviation = np.hypot(real - reference_re, imag - reference_im)
         with np.errstate(invalid="ignore", divide="ignore"):
             # Noise of V - M in units of one sample's: the bin's own n samples and the reference's (a median of
             # the estimators: (pi/2) over their summed precision).
             unit = np.sqrt(1.0 / c + 0.5 * np.pi / np.where(precision > 0, precision, np.nan))
-            amplitude = np.hypot(reference_re, reference_im)
-            # The noise is measured on what is tested: the complex radius, or (phases not trusted) the amplitude
-            # difference, whose scatter the wandering phases of raw data do not inflate.
-            size = deviation if phases else np.abs(np.hypot(real, imag) - amplitude)
-        scan_noise, _ = _gather_median(size / unit, seg.gather)
-        noise, _ = _gather_median(scan_noise, seg.window)
-        # Noise-free data (a model, a simulation) have no noise: the floors alone set the tolerance then.
-        noise = np.where(noise >= 0, noise / (RAYLEIGH_MEDIAN if phases else GAUSSIAN_MAD), np.nan)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            tolerance = np.hypot(noise[:, seg.index] * unit, float(settings.floor) * amplitude)
-        if attempt == 0:
-            usable = np.where(size / tolerance > threshold, 0, usable)
-    if not scans:
+        # Each part's noise is measured on that part: the phases of raw or phase-referenced data scatter more than
+        # their amplitudes (atmosphere), and must widen the phase tolerance only.
+        along, across, _ = _parts(real - reference_re, imag - reference_im, reference_re, reference_im, phases=phases)
+        noise_radial = _bin_noise(along, unit, seg)
+        noise_tangential = _bin_noise(across, unit, seg) if phases else noise_radial
         radial, tangential = _components(real - reference_re, imag - reference_im, reference_re, reference_im,
-                                         noise[:, seg.index] * unit, float(settings.floor),
-                                         float(settings.phase_floor), phases=bool(settings.use_phases))
-    else:
+                                         noise_radial, noise_tangential, float(settings.floor),
+                                         float(settings.phase_floor), phases=phases)
+        if attempt == 0:
+            size = np.hypot(radial, tangential) if phases else np.abs(radial)
+            usable = np.where(size > threshold, 0, usable)
+    if scans:
         level_re, _ = _gather_median(real, seg.gather)
         level_im, _ = _gather_median(imag, seg.gather)
-        dep_re, dep_im, factor, trend_re, trend_im, spread = _local_trend(level_re, level_im, seg,
-                                                                          int(settings.min_trend_scans), phases=phases)
-        n_scans = np.count_nonzero(np.isfinite(dep_re), axis=1)
-        spread = np.where(n_scans >= settings.min_scans, spread, np.nan)
-        radial, tangential = _components(dep_re, dep_im, trend_re, trend_im, spread[:, None] * factor,
-                                         float(settings.scan_floor), float(settings.phase_floor),
-                                         phases=bool(settings.use_phases))
+        dep_re, dep_im, factor, trend_re, trend_im, spread_radial, spread_tangential = _local_trend(
+            level_re, level_im, seg, int(settings.min_trend_scans), phases=phases)
+        enough = np.count_nonzero(np.isfinite(dep_re), axis=1) >= settings.min_scans
+        spread_radial = np.where(enough, spread_radial, np.nan)
+        spread_tangential = np.where(enough, spread_tangential, np.nan)
+        radial, tangential = _components(dep_re, dep_im, trend_re, trend_im, spread_radial[:, None] * factor,
+                                         spread_tangential[:, None] * factor, float(settings.scan_floor),
+                                         float(settings.phase_floor), phases=phases)
         radial, tangential = radial[:, seg.index], tangential[:, seg.index]
     radial = np.where(valid, radial, np.nan).reshape(shape)
     tangential = np.where(valid, tangential, np.nan).reshape(shape)
