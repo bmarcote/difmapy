@@ -15,6 +15,7 @@ from difmapy.plots.base import (
 )
 
 import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore
 
 __all__ = ["RadPlot", "UVPlot", "VPlot", "radplot", "projplot", "uvplot", "vplot"]
 
@@ -83,11 +84,64 @@ def _place_corner(vb, item, pad=6):
 
 
 class _VisPlot(FlagPlotBase):
-    """Shared behaviour of the visibility scatter plots: amplitude and phase panels, and the model overplotted where one is defined."""
+    """Shared behaviour of the visibility scatter plots: amplitude and phase panels, and the model overplotted where one is defined.
+
+    Shift+S arms a smart-flag selection: the next drag hands the points inside the box to :func:`difmapy.smartflag.smart_flag_ops`, which traces their outliers to the antennas (or baselines) behind them and flags those over the time range of the fault; one undo step takes it back.
+    """
 
     def __init__(self, obs, title, quantity="ap", colorby="spw", legend=False):
         self.quantities = _quantities(quantity)
+        self._smart_armed = False
         super().__init__(obs, title, colorby=colorby, legend=legend)
+
+    def key_help(self):
+        return super().key_help() + [
+            ("S, then drag", "smart flag: the antennas behind the outliers in the box, over the time of the fault"),
+        ]
+
+    def keyPressEvent(self, ev):
+        if ev.text() == "S":
+            self.arm_smart(not self._smart_armed)
+        elif self._smart_armed and ev.key() == QtCore.Qt.Key.Key_Escape:
+            self.arm_smart(False)
+        else:
+            super().keyPressEvent(ev)
+
+    def arm_smart(self, armed=True):
+        """Make the next drag on any panel a smart-flag selection (or cancel that)."""
+        self._smart_armed = bool(armed)
+        for vb in self.view_boxes():
+            vb.armed = self._smart_armed
+        self._message("smart flag: drag a box over the outliers (Esc cancels)" if armed else self._status())
+
+    def _on_selected(self, panel, x0, x1, y0, y1, flag):
+        if not self._smart_armed:
+            return super()._on_selected(panel, x0, x1, y0, y1, flag)
+        self.arm_smart(False)
+        self._message(self._smart_box(panel, x0, x1, y0, y1))
+
+    def _smart_box(self, panel, x0, x1, y0, y1) -> str:
+        """Smart-flag the outliers among the good points inside the box; returns the status message."""
+        from difmapy.smartflag import smart_flag_ops
+        d = self._data
+        y = d[panel.key]
+        inside = (d["x"] >= x0) & (d["x"] <= x1) & (y >= y0) & (y <= y1)
+        inside &= self._panel_mask(panel, d) & self._shown_mask(d) & (d["wt"] > 0)
+        idx = np.nonzero(inside)[0]
+        if not idx.size:
+            return "smart flag: no unflagged point in the box"
+        ops, summary = smart_flag_ops(self.obs, d["row"][idx], d["cif"][idx], use_phases=(panel.key == "phase"))
+        if not ops:
+            return f"smart flag: no outlier among the {idx.size} selected points"
+        n = self.history.apply(ops)
+        self.refresh()
+        self._changed()
+        names = self.obs.antennas
+        who = ", ".join(names[a] if 0 <= a < len(names) else str(a) for a in summary["antennas"])
+        return (f"smart flag: flagged {n} samples"
+                + (f" (antennas {who})" if who else "")
+                + (f", {summary['baselines']} baseline(s) on their own" if summary["baselines"] else "")
+                + " | ctrl+z undoes")
 
     def _vis_columns(self, d):
         """amp/phase (and their model counterparts) from complex data."""

@@ -36,6 +36,8 @@ IF_COLORS = [
 ]
 FLAG_COLOR = (220, 40, 40)
 UNFLAG_COLOR = (40, 160, 40)
+#: rubber band of a smart-flag (Shift+S) selection
+SMART_COLOR = (230, 140, 0)
 HIGHLIGHT_COLOR = (255, 140, 0)
 MODEL_COLOR = (214, 30, 30)
 #: The frame drawn round the panels of one baseline (vplot, possm).
@@ -327,7 +329,7 @@ class FluxAxis(pg.AxisItem):
 class SelectViewBox(pg.ViewBox):
     """A ViewBox that reports Shift/Ctrl rubber-band drags.
 
-    Plain drags keep pyqtgraph's usual pan/zoom behaviour; holding Shift (flag) or Ctrl (unflag) instead sweeps out a selection box and emits `sigSelected(x0, x1, y0, y1, flag)` on release.
+    Plain drags keep pyqtgraph's usual pan/zoom behaviour; holding Shift (flag) or Ctrl (unflag) instead sweeps out a selection box and emits `sigSelected(x0, x1, y0, y1, flag)` on release. While `armed` (Shift+S on a visibility plot) the next drag selects whatever the modifiers, drawn in `SMART_COLOR`, and is reported as a flag selection.
     """
 
     sigSelected = QtCore.Signal(float, float, float, float, bool)
@@ -339,12 +341,14 @@ class SelectViewBox(pg.ViewBox):
         self._sel_rect = None
         #: identifies the panel this view box belongs to (set by the window)
         self.panel = None
+        #: the next drag is a smart-flag selection (set and cleared by the window)
+        self.armed = False
 
     def mouseDragEvent(self, ev, axis=None):
         mods = ev.modifiers()
         shift = bool(mods & QtCore.Qt.KeyboardModifier.ShiftModifier)
         ctrl = bool(mods & QtCore.Qt.KeyboardModifier.ControlModifier)
-        if not (shift or ctrl):
+        if not (shift or ctrl or self.armed):
             self._clear_rect()
             return super().mouseDragEvent(ev, axis=axis)
 
@@ -352,14 +356,10 @@ class SelectViewBox(pg.ViewBox):
         pos = self.mapToView(ev.pos())
         if ev.isStart():
             self._sel_origin = (pos.x(), pos.y())
-            self._sel_flag = shift
+            self._sel_flag = shift or self.armed
             self._sel_rect = QtWidgets.QGraphicsRectItem()
-            self._sel_rect.setPen(
-                pg.mkPen(
-                    FLAG_COLOR if shift else UNFLAG_COLOR,
-                    style=QtCore.Qt.PenStyle.DashLine,
-                )
-            )
+            color = SMART_COLOR if self.armed else (FLAG_COLOR if shift else UNFLAG_COLOR)
+            self._sel_rect.setPen(pg.mkPen(color, style=QtCore.Qt.PenStyle.DashLine))
             self.addItem(self._sel_rect, ignoreBounds=True)
         if self._sel_origin is None:
             return

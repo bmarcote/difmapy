@@ -310,7 +310,14 @@ sweeps a box to flag, **Ctrl+drag** unflags, `f`/`F` act on the nearest
 point, **Ctrl+Z** / **Ctrl+Shift+Z** (or Ctrl+Y) undo and redo the last
 edit, and `x` shows or hides the flagged points (hidden by default).
 A box acts only on what is drawn: IFs switched off in the legend are
-left alone.
+left alone. **Shift+S**, then a drag (no modifier needed, orange box),
+*smart-flags* the box instead: the points in it seed
+`difmapy.outliers` on the whole stream, which traces their outliers to
+the antenna common to most of its baselines (or to one baseline) and
+flags that antenna over the time range of the fault, its rising and
+decaying edges included, on every baseline and IF; on a phase panel the
+phases are tested too, elsewhere the amplitudes only. One Ctrl+Z takes it
+back; Esc (or Shift+S again) cancels an armed selection.
 Plain drag/wheel keep pyqtgraph's pan/zoom, and `h` shows the full key
 legend of whichever plot is in front. In `vplot` the space bar switches
 flagging between the displayed baseline and every baseline of its first

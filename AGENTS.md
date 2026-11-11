@@ -657,3 +657,25 @@ traced every residual amplitude problem of the calibrated calibrators to its cau
   when it detects kitty-graphics support (iTerm2, kitty, WezTerm), so
   every plot returned at the difmapy prompt also dumped a picture under
   it. `IPYTHON_KITTY_GRAPHICS=0` turns that IPython feature off globally.
+
+## Smart outlier flagging (`outliers.py`, `smartflag.py`, 2026-11-11)
+
+- `outliers.find_outliers(VisGrid, OutlierSettings)` is shared with vlbipy (`vlbipy flag smart-outliers`,
+  `solvers/smart_outliers.py`, which bins the MS into the grid). Pure numpy, optional numba kernels
+  (`$DIFMAPY_NUMBA=0` turns them off; the numpy path gives identical flags, `test_outliers.py`).
+- Model per series (baseline x IF x channel block x hand): a bin against the median of linear estimators from the
+  other bins of its scan (amplitude from their plain median, so slews stand out, phase from the drift); a scan
+  level against a robust local-linear trend of the *other* scans (tricube, `trend_minutes`, leverage-normalised).
+  Excluding the cell under test from its own reference is essential: with 5-10 bins a self-inclusive median
+  under-estimates the noise and flags pure noise by the percent.
+- Antenna statistic: medians over its baselines of the amplitude and sign-turned phase parts x `sqrt(2n/pi)`,
+  blamed beyond `antenna_sigma` (5: ~1 false seed per million antenna cells, so the refits converge); greedy, a
+  blamed antenna's baselines leave its partners' statistics. Growth by hysteresis (`edge_sigma`), so a strong
+  fault also takes about one bin either side.
+- `use_phases=False` (raw data, phase-referenced targets without phase self-cal): the radial part is
+  `|V| - |M|` and the noise its MAD; a projection would turn phase wander into amplitude loss.
+- `floor` (5%), `phase_floor` (10 deg), `scan_floor` (20%) keep bright sources' residual calibration errors out;
+  noise-free data (noise 0) are judged by the floors alone.
+- GUI: `_VisPlot` (radplot/vplot/projplot) Shift+S arms `SelectViewBox.armed`; the next drag (any modifier) goes
+  to `smartflag.smart_flag_ops` (whole stream as one grid, one bin per integration, scans from gaps, the box only
+  seeds via `VisGrid.restrict`); one `EditHistory.apply`, so one undo. Tests: `test_smartflag.py`.
