@@ -13,6 +13,20 @@ the estimated resolution, and prints the beam it is showing
 (`verbose=False` prints nothing). The title over the image names the
 file the data came from (`obs.filename`), then the image shown.
 
+## The view
+
+The window opens on a field **ten beams across** (the major axis of
+the beam), not on the whole map - at the automatic size that is
+hundreds of beams wide. The field is centred on the phase centre, or on
+the source when it lies outside that: the brightest model component,
+or with no model the map peak if it reaches 6 times the noise (a
+phase-referenced target away from the phase centre is then on screen,
+a noise spike is not chased). It never reaches past the valid inner
+quarter of the map. The mouse wheel zooms and a drag pans; ++z++ or
+++u++ come back to this view, and a CLEAN or a re-image keeps whatever
+zoom you chose. A double-click window is a tenth of the displayed field
+across.
+
 ![The restored map with contours](../images/mapplot_color.png){ loading=lazy }
 
 ## Keys
@@ -30,7 +44,7 @@ file the data came from (`obs.filename`), then the image shown.
 | ++l++ | logarithmic or linear colour scale |
 | ++g++ | pseudo-colour or grey scale (black and white) |
 | ++k++ | contours on the restored map on / off |
-| ++z++ / ++u++ | restore the y / x axis range |
+| ++z++ / ++u++ | back to the default view (ten beams across) |
 | ++r++ | reload the plot from the data |
 | ++x++ | close and report the image properties |
 | ++h++ / ++q++ | key legend / close |

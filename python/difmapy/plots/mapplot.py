@@ -1,5 +1,7 @@
 """Interactive map display with CLEAN windows and model editing; difmap mapplot (also spelled ``maplot``).
 
+The map opens on a field about ten beams across, centred on the phase centre, or on the source when it lies outside that (see `MapPlot.default_view`); the mouse wheel and a drag zoom and pan, and ``u``/``z`` come back to it.
+
 Interaction:
 
 * double-click: add a CLEAN window centered on the cursor (drag its corner handles to resize; drag its body to move)
@@ -204,6 +206,10 @@ class MapPlot(PlotWindow):
         self.plot.scene().sigMouseMoved.connect(self._mouse_moved)
         self.plot.scene().sigMouseClicked.connect(self._mouse_clicked)
         self.refresh()
+        # Open on the source rather than the whole field; refreshes keep
+        # whatever view there is, so a CLEAN or re-image does not undo a
+        # zoom. A new observation (the dashboard) builds a new window.
+        self.reset_ranges()
         if self.verbose:
             self.report_beam()
 
@@ -423,6 +429,55 @@ class MapPlot(PlotWindow):
 
     def view_boxes(self):
         return [self.plot.vb]
+
+    #: The map opens on a field this many beam widths across (the major axis of the restoring beam, or of the estimated one), and ``u``/``z`` go back to it.
+    VIEW_BEAMS = 10.0
+    #: How many times the residual noise the map peak has to reach for the default view to follow it outside that field (with no model to say where the source is).
+    VIEW_PEAK_SNR = 6.0
+
+    def default_view(self):
+        """The field the map opens on, and that ``u`` and ``z`` go back to, as ``((east_min, east_max), (south, north))`` in mas; None (the whole map) when there is no beam to go by.
+
+        It is `VIEW_BEAMS` beam widths across, centred on the phase centre - unless the source lies outside such a field (a target away from the phase centre), in which case it is centred on the source: the brightest model component, or with no model the peak of the residual map when it reaches `VIEW_PEAK_SNR` times the noise. The dirty beam is always shown at the centre. The field never extends further from its centre than the valid inner quarter of the map does, which on a small map can make it the whole valid area.
+        """
+        obs = self.obs
+        try:
+            bmaj = float((obs._restore_beam or obs.estimated_beam)[0])
+        except (RuntimeError, ValueError, TypeError, IndexError):
+            return None
+        if not np.isfinite(bmaj) or bmaj <= 0.0:
+            return None
+        half = 0.5 * self.VIEW_BEAMS * bmaj
+        hx = min(half, 0.5 * abs(obs.extent[0]))
+        hy = min(half, 0.5 * abs(obs.extent[3]))
+        cx = cy = 0.0
+        if self.what != "beam":
+            centre = self._source_position()
+            if centre is not None and (abs(centre[0]) > hx or abs(centre[1]) > hy):
+                cx, cy = centre
+        return (cx - hx, cx + hx), (cy - hy, cy + hy)
+
+    def _source_position(self):
+        """Where the source is, in mas east and north of the phase centre, or None if nothing says: the brightest model component, or without a model the peak of the residual map when it reaches `VIEW_PEAK_SNR` times the noise (not a noise spike)."""
+        obs = self.obs
+        model = obs.model
+        if model:
+            brightest = max(model, key=lambda c: c["flux"])
+            return float(brightest["x"]), float(brightest["y"])
+        (x, y), peak = obs.peak_offset()
+        rms = float(obs.noise_stats()["rms"])
+        if np.isfinite(peak) and np.isfinite(rms) and rms > 0.0 and peak >= self.VIEW_PEAK_SNR * rms:
+            return float(x), float(y)
+        return None
+
+    def reset_ranges(self, axis="both"):
+        """Go back to `default_view`, whichever `axis` is asked for: ``z`` and ``u`` both restore the whole view. The aspect ratio is locked, and pyqtgraph then keeps the axis just set and fits the other to it, so one axis on its own would not bring the field back. Returns how many panels were reset (1)."""
+        view = self.default_view()
+        if view is None:
+            return super().reset_ranges("both")
+        xr, yr = view
+        self.plot.vb.setRange(xRange=xr, yRange=yr, padding=0)
+        return 1
 
     def _tune_rounding(self):
         """Match the colour-bar handles' step size to the image.
@@ -889,9 +944,10 @@ class MapPlot(PlotWindow):
             ev.accept()
             return
         if ev.double():
-            # Default window: 10% of the displayed extent.
-            ex = abs(self.obs.extent[0])
-            half = 0.05 * 2 * ex
+            # Default window: 10% of the displayed extent (the view, not
+            # the whole map, which can be hundreds of beams across).
+            (vx0, vx1), (vy0, vy1) = self.plot.vb.viewRange()
+            half = 0.05 * min(abs(vx1 - vx0), abs(vy1 - vy0))
             self._add_roi(x - half, x + half, y - half, y + half)
             self._rois_to_obs()
             self._update_status()
@@ -913,7 +969,8 @@ class MapPlot(PlotWindow):
             ("k", "contours on the restored map: 3 sigma, x sqrt(2); "
                   "negative dashed"),
             ("drag the bar handles", "set the displayed range"),
-            ("z / u", "restore the y / x axis range"),
+            ("z / u", f"back to the default view ({self.VIEW_BEAMS:g} beams "
+                      "across)"),
             ("x", "close and report the image properties"),
         ]
 
@@ -1067,6 +1124,8 @@ def mapplot(obs, what="map", mapsize=None, cellsize=None, uvweight=None,
             block=None, verbose=True, scale="linear", cmap="color",
             uvrange=None, uvtaper=None, **clean_args):
     """The interactive map display (difmap `mapplot`), with CLEAN windows, model editing and model fitting. The title names the file the data came from; ``h`` lists every key.
+
+    The window opens on a field ten beams across, around the phase centre or the source when that lies further out (`MapPlot.default_view`), rather than on the whole map; the mouse wheel zooms out, and ``u``/``z`` come back to it.
 
     The "Weighting" box at the top of the window switches between difmap's own `uvweight` scheme and robust -2, -1, 0, +1, +2, and re-images at once; like `uvweight()`, the choice stays in effect after the window closes. As in difmap, the colours span the displayed map from its minimum to its peak.
 

@@ -213,6 +213,14 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
 - Stacked panels get one fixed left-axis width (`LEFT_AXIS_WIDTH`) and
   no right axis, so amplitude and phase plot areas coincide exactly; a
   right axis on one panel only narrows it.
+- mapplot opens on `MapPlot.default_view()`: `VIEW_BEAMS` (10) x the
+  beam's major axis, around the phase centre or, when it lies outside,
+  the brightest model component / a >= 6-sigma residual peak, clipped to
+  the valid quarter (the user asked for it, 2026-11-11: the auto-sized
+  map is ~400 beams wide). `refresh()` never touches the view. Its
+  `reset_ranges` restores *both* axes whichever of `z`/`u` is pressed:
+  with the aspect locked, pyqtgraph keeps the axis just set and fits the
+  other to it, so a one-axis reset cannot bring the field back.
 - mapplot's "Weighting" box (difmap uvweight / robust -2..2) has
   `NoFocus`: with keyboard focus a combo box eats the single-key
   shortcuts and changes the weighting on "c", "i", ... It re-syncs on

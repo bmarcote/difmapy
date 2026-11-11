@@ -333,7 +333,7 @@ Plots against time (`vplot`, `tplot`, `corplot`, `cpplot`) cut out any
 gap between integrations longer than 10% of the observation, so scans
 hours apart sit side by side instead of leaving most of the axis empty.
 The cuts are shaded, and the axis still reads real times. Every plot
-opens scaled to show all of its data.
+opens scaled to show all of its data, except the map (see below).
 
 Undo is exact: each edit stores the affected rows of the FLAG column
 before and after, so it restores what was there even where the edit
@@ -722,6 +722,15 @@ would leave it). Beside it, the UV range (min, max) and Taper (value,
 radius) fields set `uvrange` and `uvtaper` on Enter;
 `mapplot(uvrange=(5, 100), uvtaper=(0.5, 20))` sets them on opening.
 
+The window opens on a field **ten beams across** (the beam's major
+axis), not on the whole map, which at the automatic size is hundreds of
+beams wide: around the phase centre, or around the source when it lies
+further out - the brightest model component, or without a model the
+map peak if it reaches 6 times the noise. It never reaches past the
+valid inner quarter. The mouse wheel zooms out, `z` or `u` come back to
+it, and a CLEAN or re-image keeps whatever zoom you chose. A
+double-click window is a tenth of the displayed field across.
+
 `uvtaper(value, radius)` multiplies every visibility's gridding weight
 by `value ** ((r / radius) ** 2)` - 1 at the centre of the UV plane,
 `value` at `radius` - and `uvrange(uvmin, uvmax)` images only the
@@ -759,7 +768,7 @@ the colour bar when its range changes.
 | `l` | logarithmic or linear colour scale |
 | `g` | difmap's pseudo-colour table or its grey scale (black and white) |
 | `k` | contours on the restored map on / off |
-| `z` / `u` | restore the y / x axis range |
+| `z` / `u` | back to the default view (ten beams across) |
 | `r` | reload the plot from the data |
 | `x` | close and report the image properties |
 | `h` / `q` | key legend / close |

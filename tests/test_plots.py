@@ -832,6 +832,71 @@ def test_mapplot_overrides_the_imaging_setup(uvfits_file):
     p.close()
 
 
+def _shows(vb, view):
+    """Whether view box `vb` shows all of `view` and, along its tighter axis, no more (the aspect is locked, so the other axis can show more)."""
+    (x0, x1), (y0, y1) = vb.viewRange()
+    (vx0, vx1), (vy0, vy1) = view
+    tol = 1e-6 * (vx1 - vx0)
+    inside = x0 <= vx0 + tol and x1 >= vx1 - tol and y0 <= vy0 + tol and y1 >= vy1 - tol
+    tight = min((x1 - x0) / (vx1 - vx0), (y1 - y0) / (vy1 - vy0))
+    return inside and tight == pytest.approx(1.0, rel=1e-3)
+
+
+def test_mapplot_opens_ten_beams_across(uvfits_file):
+    """The auto-sized map is hundreds of beams wide; the window opens on ten of them around the phase centre (the source at (4, -2.5) mas is inside), not on the whole map, and u/z come back there after a pan, while a refresh keeps the zoom."""
+    o = difmapy.load(uvfits_file)
+    p = MapPlot(o, verbose=False)
+    bmaj = o.estimated_beam[0]
+    view = p.default_view()
+    assert view == (pytest.approx((-5 * bmaj, 5 * bmaj)), pytest.approx((-5 * bmaj, 5 * bmaj)))
+    assert 10 * bmaj < 0.1 * o.extent[0]          # far smaller than the map
+    vb = p.plot.vb
+    assert _shows(vb, view)
+    vb.setRange(xRange=(100.0, 120.0), yRange=(50.0, 60.0), padding=0)
+    zoomed = vb.viewRange()
+    p.refresh()                                     # CLEAN, re-image, ...
+    assert vb.viewRange() == zoomed
+    for axis in ("x", "y"):                         # u, z: the whole view
+        vb.setRange(xRange=(100.0, 120.0), yRange=(50.0, 60.0), padding=0)
+        p.reset_ranges(axis)
+        assert _shows(vb, view)
+    p.close()
+
+
+def test_mapplot_view_follows_a_source_off_centre(tmp_path):
+    """A source well outside the ten-beam field around the phase centre (a phase-referenced target) is where the window opens, from the dirty-map peak and then from the model; the dirty beam stays at the centre."""
+    from conftest import make_uvfits
+
+    o = difmapy.load(str(make_uvfits(tmp_path / "off.uvf", x0_mas=60.0, y0_mas=-40.0)))
+    p = MapPlot(o, verbose=False)
+    half = 5 * o.estimated_beam[0]
+    (x0, x1), (y0, y1) = p.default_view()
+    (px, py), _ = o.peak_offset()
+    assert (x0 + x1) / 2 == pytest.approx(px) and (y0 + y1) / 2 == pytest.approx(py)
+    assert x1 - x0 == pytest.approx(2 * half)
+    assert abs(px - 60.0) < 0.5 * half and abs(py + 40.0) < 0.5 * half
+    assert _shows(p.plot.vb, p.default_view())
+    o.add_window(50.0, 70.0, -50.0, -30.0)
+    o.clean(200, 0.1, verbose=False)
+    brightest = max(o.model, key=lambda c: c["flux"])
+    (x0, x1), (y0, y1) = p.default_view()
+    assert (x0 + x1) / 2 == pytest.approx(brightest["x"])
+    assert (y0 + y1) / 2 == pytest.approx(brightest["y"])
+    p.what = "beam"
+    (x0, x1), (y0, y1) = p.default_view()
+    assert (x0 + x1) / 2 == 0.0 and (y0 + y1) / 2 == 0.0
+    p.close()
+
+
+def test_mapplot_default_view_stays_in_the_valid_area(obs):
+    """On a map whose valid area is narrower than ten beams the view is that inner quarter, never the padding outside it."""
+    obs.mapsize(64, 0.5)                            # valid area +-8 mas
+    p = MapPlot(obs, verbose=False)
+    assert 10 * obs.estimated_beam[0] > 16.0
+    assert p.default_view() == ((-8.0, 8.0), (-8.0, 8.0))
+    p.close()
+
+
 def test_mapplot_auto_sizes_when_mapsize_was_never_set(uvfits_file):
     """With no mapsize() call, mapplot picks 4096 pixels of a tenth of
     the estimated resolution."""

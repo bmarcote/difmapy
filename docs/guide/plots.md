@@ -39,7 +39,7 @@ out altogether does not turn every other row orange.
 | key | action |
 | --- | --- |
 | ++z++ | restore the y axis range (phase panels return to ±180°) |
-| ++u++ | restore the x axis range: always the full extent of the data, on every panel of the page |
+| ++u++ | restore the x axis range: always the full extent of the data, on every panel of the page (in mapplot, ++z++ and ++u++ both return to its [default view](mapplot.md#the-view)) |
 | ++r++ | reload the plot from the data |
 | ++h++ | the key legend of the plot in front |
 | ++n++ / ++p++ | next / previous page, in paged plots |
