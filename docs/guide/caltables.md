@@ -96,5 +96,5 @@ difmapy's corrected visibilities to float32 precision.
 - The CLCAL route on a multi-source AIPS file has not been tested.
 
 [`save()`](saving.md) writes the calibration table automatically, and
-[`bayes_gscale`](bayes-gscale.md) writes one of its constant
+the [Bayesian `gscale`](bayes-gscale.md) writes one of its constant
 corrections.

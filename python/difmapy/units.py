@@ -4,7 +4,7 @@ Every difmapy argument that carries a time accepts a string with its unit - ``"3
 
 Plain numbers keep the unit each argument has always had (minutes for `selfcal`'s solint, seconds for time ranges), so existing code and scripts are unaffected; a string is how you say something else.
 
-The other direction - a number with its uncertainty and unit, as a report prints it - is `format_value` and `format_flux`.
+The other direction - a number with its uncertainty and unit, as a report prints it - is `format_value` and `format_flux`, and `format_ra`/`format_dec` for a sky position.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import re
 
 __all__ = ["TIME_UNITS", "FLUX_UNITS", "UV_UNITS", "parse_time", "parse_interval",
            "format_interval", "parse_uvdist", "format_uvdist", "flux_unit", "format_value",
-           "format_flux"]
+           "format_flux", "format_ra", "format_dec"]
 
 #: Recognised time units and their length in seconds.
 TIME_UNITS = {
@@ -219,3 +219,45 @@ def format_flux(jy, err=None) -> str:
         scale = max(scale, abs(float(err)))
     name, size = flux_unit(scale)
     return format_value(jy / size, None if err is None else err / size, name)
+
+
+def _sexagesimal(value, unit_places, err=None, default_places=5, max_places=9):
+    """`value` (hours or degrees, >= 0) as ``"dd:mm:ss.s..."``, its seconds to two significant figures of `err` (in seconds of the same unit; None or NaN for none: `default_places`)."""
+    if err is not None and math.isfinite(err) and err > 0:
+        places = min(max(1 - math.floor(math.log10(err)), unit_places), max_places)
+    else:
+        places = default_places
+    # Round the whole value in seconds first, so that 59.9999... carries into the minutes.
+    total = round(value * 3600.0, places)
+    whole, sec = divmod(total, 60.0)
+    deg, minutes = divmod(int(round(whole)), 60)
+    width = 3 + places if places else 2
+    return deg, minutes, f"{sec:0{width}.{places}f}"
+
+
+def format_ra(ra_rad, err_mas=None, dec_rad=0.0) -> str:
+    """A right ascension (radians) as ``hh:mm:ss.s...``, to the precision of its uncertainty `err_mas` - an arc on the sky, in mas, at declination `dec_rad` - when one is given.
+
+        format_ra(0.5235987755982988)                 -> "02:00:00.000000"
+        format_ra(0.5235987755982988, 0.05, 0.6981)  -> "02:00:00.0000000"
+    """
+    hours = (math.degrees(float(ra_rad)) / 15.0) % 24.0
+    err = None
+    if err_mas is not None and math.isfinite(err_mas):
+        # mas of arc on the sky -> seconds of time at this declination
+        err = float(err_mas) / 1000.0 / 15.0 / max(math.cos(float(dec_rad)), 1e-12)
+    h, m, sec = _sexagesimal(hours, 2, err, default_places=6)
+    return f"{h % 24:02d}:{m:02d}:{sec}"
+
+
+def format_dec(dec_rad, err_mas=None) -> str:
+    """A declination (radians) as ``+dd:mm:ss.s...``, to the precision of its uncertainty `err_mas` (mas) when one is given.
+
+        format_dec(0.6981317007977318)         -> "+40:00:00.00000"
+        format_dec(-0.0123, 0.5)               -> "-00:42:17.05712"
+    """
+    deg = math.degrees(float(dec_rad))
+    err = float(err_mas) / 1000.0 if err_mas is not None and math.isfinite(err_mas) else None
+    d, m, sec = _sexagesimal(abs(deg), 1, err, default_places=5)
+    return f"{'-' if deg < 0 else '+'}{d:02d}:{m:02d}:{sec}"
+

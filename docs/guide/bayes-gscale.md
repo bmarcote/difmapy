@@ -3,10 +3,10 @@
 `gscale` finds one amplitude correction per station against a model -
 but that model was built from the same data, so a station whose
 amplitude scale is wrong has already pulled the model towards its error.
-`bayes_gscale` breaks that circle and puts error bars on the result.
+`gscale(bayes=True)` breaks that circle and puts error bars on the result.
 
 ```python
-r = obs.bayes_gscale(prefix="3C345_bayes", quiet=False)  # runs, applies, writes the report
+r = obs.gscale(bayes=True, prefix="3C345_bayes", quiet=False)  # runs, applies, writes the report
 print(r)                                    # the summary again
 r.plot()                                    # the diagnostic figure
 r.factors                                   # [IF, station] corrections applied
@@ -81,7 +81,7 @@ self-calibration does with antennas fixed by `selfant`. They still take part in 
 
 ## The diagnostics
 
-![The bayes_gscale diagnostic figure](../images/bayes_gscale.png){ loading=lazy }
+![The diagnostic figure of the Bayesian gscale](../images/bayes_gscale.png){ loading=lazy }
 
 - **Station corrections**: the plain full-array `gscale` (orange), the
   leave-one-out estimate (green) and the value applied with its
@@ -133,11 +133,11 @@ With `prefix`:
 `apply`
 :   `False` to look at the result without changing the data.
 
-All the parameters are in the [reference](../reference/bayescal.md).
+All the parameters are in the reference of [`Observation.gscale`](../reference/observation.md); the result object is in the [Bayesian calibration reference](../reference/bayescal.md). Without `float_scale` (the default) the flux scale of every IF is kept by its median station (`norm="median"`); `float_scale=True` lets it follow the model's instead, as for the plain `gscale`.
 
 ## What it cannot correct
 
-`bayes_gscale` solves what `gscale` solves, with error bars, so it shares its blind spots:
+The Bayesian `gscale` solves what the plain one solves, with error bars, so it shares its blind spots:
 
 - **The two hands.** One gain per station serves RR and LL together, so an RCP/LCP amplitude offset (a wrong
   Tsys or DPFU of one receptor) is invisible to it. Level the hands before the data reach difmapy - vlbipy does

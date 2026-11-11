@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 import difmapy
-from difmapy.units import (flux_unit, format_flux, format_interval,
+from difmapy.units import (flux_unit, format_dec, format_flux, format_interval, format_ra,
                            format_value, parse_interval, parse_time)
 
 
@@ -255,3 +255,19 @@ def test_fplot_time_range_takes_units(uvfits_file):
     p = FPlot(o, nplot=1, tmin="0s", tmax="30min")
     assert (p.tmin, p.tmax) == (0.0, 1800.0)
     p.close()
+
+
+def test_format_ra_and_dec():
+    """Sexagesimal, to two significant figures of the uncertainty (an arc in mas; for RA, at the declination given), and carrying a rounded 60 s into the minutes."""
+    ra, dec = np.radians(30.0), np.radians(40.0)
+    assert format_ra(ra) == "02:00:00.000000"
+    assert format_dec(dec) == "+40:00:00.00000"
+    # 0.05 mas at Dec 40: 4.4e-6 s of time -> 7 places; 0.05 mas = 5e-5 arcsec -> 6 places.
+    assert format_ra(ra, 0.05, dec) == "02:00:00.0000000"
+    assert format_dec(dec, 0.05) == "+40:00:00.000000"
+    assert format_ra(ra, float("nan"), dec) == "02:00:00.000000"
+    assert format_ra(np.radians(15 * (1 + 59 / 60 + 59.99999999 / 3600))) == "02:00:00.000000"
+    assert format_ra(np.radians(359.99999999999)) == "00:00:00.000000"
+    assert format_dec(np.radians(-(10 + 59 / 60 + 59.999999999 / 3600))) == "-11:00:00.00000"
+    assert format_dec(np.radians(-0.5 / 3600), 10.0) == "-00:00:00.500"
+

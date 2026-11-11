@@ -230,6 +230,11 @@ impl CoreObservation {
     fn dec(&self) -> f64 {
         self.ob.source.dec
     }
+    /// Equinox of `ra`/`dec` (2000.0 for J2000).
+    #[getter]
+    fn epoch(&self) -> f64 {
+        self.ob.source.epoch
+    }
     #[getter]
     fn nrow(&self) -> usize {
         self.ob.nrow

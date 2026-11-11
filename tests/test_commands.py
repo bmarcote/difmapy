@@ -370,7 +370,8 @@ def test_outfile_creates_missing_directories(obs, tmp_path):
 
 def test_modelfit_prints_each_component(obs, capsys):
     """The report names each fitted component and gives its flux
-    density, position and size on lines of their own, with errors."""
+    density, offset, absolute position and size on lines of their own,
+    with errors."""
     obs.addcmp(FLUX, X0_MAS + 0.1, Y0_MAS, type="gauss", major=1.0,
                free=["flux", "pos"])
     res = obs.modelfit(niter=5, quiet=False)
@@ -381,11 +382,12 @@ def test_modelfit_prints_each_component(obs, capsys):
     lines = out.splitlines()
     at = lines.index("Component 0 (gauss):")
     assert lines[at - 1] == ""
-    flux, pos, size = lines[at + 1:at + 4]
+    flux, pos, sky, size = lines[at + 1:at + 5]
     assert flux.startswith("  Flux density:") and pos.startswith("  Centroid position:")
+    assert sky.startswith("  Position (ICRS):") and sky.count(" ± ") == 2
     assert size.startswith("  Size:")
     # The values sit in one column.
-    assert len({ln.index(ln.split(":", 1)[1].lstrip()) for ln in (flux, pos, size)}) == 1
+    assert len({ln.index(ln.split(":", 1)[1].lstrip()) for ln in (flux, pos, sky, size)}) == 1
     assert " ± " in flux and flux.endswith(" Jy")
     assert pos.count(" ± ") == 2 and "mas East, " in pos and pos.endswith("mas North")
     # The width was not fitted, so it has no error and says why.
@@ -486,3 +488,35 @@ def test_station_names_are_case_insensitive_in_plots(obs):
     f = FPlot(obs, reftel="an1")
     assert all(1 in bl for bl in f._items)
     f.close()
+
+def test_modelfit_reports_absolute_positions(uvfits_file, capsys):
+    """Each fitted component's RA and Dec: the phase centre plus its offset, deprojected exactly (SIN), with the offsets' errors as theirs - and the same after a `shift`, which moves the offsets but not the source. A position that was not fitted has no uncertainty."""
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+
+    from conftest import DEC_DEG, RA_DEG, X0_MAS, Y0_MAS
+
+    truth = SkyCoord(RA_DEG * u.deg, DEC_DEG * u.deg).spherical_offsets_by(X0_MAS * u.mas, Y0_MAS * u.mas)
+    o = difmapy.load(uvfits_file)
+    o.mapsize(256, 0.25)
+    res = o.modelfit(quiet=False)
+    p = res["positions"][0]
+    e = res["errors"][0]
+    assert SkyCoord(p["ra_deg"] * u.deg, p["dec_deg"] * u.deg).separation(truth).to(u.uas).value < 1e-2
+    assert (p["ra_err_mas"], p["dec_err_mas"], p["frame"], p["equinox"]) == (e["x"], e["y"], "ICRS", 2000.0)
+    ra, dec = truth.to_string("hmsdms", sep=":", precision=6).split()
+    assert p["ra"].startswith(ra[:-1]) and p["dec"].startswith(dec[:-1])
+    assert f"Position (ICRS):   RA {p['ra']} ± " in capsys.readouterr().out
+
+    shifted = difmapy.load(uvfits_file)
+    shifted.mapsize(256, 0.25)
+    shifted.shift(10.0, -5.0)
+    s = shifted.modelfit(quiet=False, verbose=False)
+    assert s["components"][0]["x"] == pytest.approx(X0_MAS + 10.0, abs=1e-6)
+    q = s["positions"][0]
+    assert SkyCoord(q["ra_deg"] * u.deg, q["dec_deg"] * u.deg).separation(truth).to(u.uas).value < 1e-2
+
+    held = o.modelfit(free="flux", quiet=False)
+    assert np.isnan(held["positions"][0]["ra_err_mas"]) and np.isnan(held["positions"][0]["dec_err_mas"])
+    out = capsys.readouterr().out
+    assert "Position (ICRS):" in out and "(fixed)" in out.split("Position (ICRS):")[1].splitlines()[0]

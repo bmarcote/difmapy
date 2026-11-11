@@ -153,8 +153,8 @@ the original correction.
 
 The raw visibilities are never modified, for Measurement Sets and UVFITS
 files alike: calibration is always applied to them afresh, which is what
-makes this possible without keeping a copy. A new `selfcal`, `gscale`,
-`bayes_gscale` or `uncalib` works on the corrections as they then are,
+makes this possible without keeping a copy. A new `selfcal`, `gscale`
+or `uncalib` works on the corrections as they then are,
 and the edits can no longer be undone.
 
 ## Amplitude scale per station
@@ -177,7 +177,7 @@ whole observation, and applies it.
     show that they were applied.
 
 For amplitude corrections with error bars, and protection against a
-station that has biased the model, see
+station that has biased the model, `gscale(bayes=True)`: see
 [Bayesian amplitude calibration](bayes-gscale.md).
 
 ## Constraining stations

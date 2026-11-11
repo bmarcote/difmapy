@@ -37,7 +37,7 @@ Differences from the original by design:
   and can be written straight back into the MS with `save_flags()`
   instead of having to write out a new UV file.
 * **Calibration tables can be exported for CASA and AIPS** via `savecaltable()`: a CASA "G Jones" table and/or an AIPS SN table in a TASAV FITS file (by default whichever matches the data you loaded). The table compiles all calibration corrections performed to the data in the Difmapy session, so it can be applied inside CASA or AIPS to other data sets, such as the other sources of the observation.
-* **Bayesian station amplitude calibration** with `bayes_gscale()`: `gscale` with each station left out of the source model in turn, several source models compared, and the corrections shrunk towards the a-priori calibration, with a JSON report, a diagnostic figure and a calibration table (see below).
+* **Bayesian station amplitude calibration** with `gscale(bayes=True)`: `gscale` with each station left out of the source model in turn, several source models compared, and the corrections shrunk towards the a-priori calibration, with a JSON report, a diagnostic figure and a calibration table (see below).
 * native **multi-IF / multi-channel** handling: all subbands (IFs /
   SPWs) are gridded together (multi-frequency synthesis), and each may
   have a different number of channels
@@ -61,7 +61,7 @@ not.
 
 ```sh
 pip install maturin
-maturin develop --release --extras plot,ms   # + bayes_gscale figure + MS support
+maturin develop --release --extras plot,ms   # + Bayesian gscale figure + MS support
 ```
 
 (Do not follow it with a plain `pip install .`: that replaces the
@@ -172,7 +172,7 @@ nothing else:
   `obs.select("I", quiet=False).mapsize(...)` still chains).
 - `verbose=True`, the default on every command that prints a report
   (`invert`, `clean`, `restore`, `modelfit`, `selfcal`, `gscale`,
-  `bayes_gscale`, `selfant`, `startmod`, `header`, `savecaltable`,
+  `selfant`, `startmod`, `header`, `savecaltable`,
   `wflags`, `save`), prints it; `verbose=False` prints nothing.
 
 Queries whose whole point is their value (`imstat`, `mapinfo`,
@@ -578,10 +578,10 @@ corrected visibilities to float32 precision.
 `gscale` finds one amplitude correction per station against a model -
 but that model was built from the same data, so a station whose
 amplitude scale is wrong has already pulled the model towards its error.
-`bayes_gscale` breaks that circle and puts error bars on the result:
+`gscale(bayes=True)` breaks that circle and puts error bars on the result:
 
 ```python
-r = obs.bayes_gscale(prefix="3C345_bayes", quiet=False)  # runs, applies, writes report
+r = obs.gscale(bayes=True, prefix="3C345_bayes", quiet=False)  # runs, applies, writes report
 print(r)                                    # the summary again
 r.plot()                                    # the diagnostic figure
 r.factors                                   # [IF, station] corrections applied
@@ -687,12 +687,19 @@ as in `res["components"]`:
 Component 0 (gauss):
   Flux density:      1.5021 ± 0.0034 Jy
   Centroid position: 2.0031 ± 0.0042 mas East, -1.0012 ± 0.0051 mas North
+  Position (ICRS):   RA 16:42:58.81014044 ± 0.0042 mas, Dec +39:48:36.9929848 ± 0.0051 mas
   Size:              3.012 ± 0.021 mas FWHM, axial ratio 0.702 ± 0.008, PA 30.14 ± 0.83 deg
 ```
 
 A flux density is given in whichever of Jy, mJy and µJy puts the number
 between 0.1 and 100, and a parameter that was not fitted is marked
-`(fixed)`.
+`(fixed)`. The absolute position is the phase centre plus the offset
+(whatever `shift` there is), with the offsets' errors as those of RA and
+Dec; `res["positions"]` returns it for every fitted component (`ra`,
+`dec`, `ra_deg`, `dec_deg`, `ra_err_mas`, `dec_err_mas`, `frame`,
+`equinox`). The FITS images say `RADESYS = 'ICRS'` (FK4 for B1950 data).
+These are the fit's formal errors: the phase centre's own uncertainty is
+not included.
 
 `niter=-1` (the default) iterates until successive Levenberg-Marquardt
 steps stop improving the reduced chi-squared; pass a positive `niter`
@@ -830,14 +837,14 @@ one - a flag edit, a CLEAN, a fit - reloads the others, as `r` would
 **Main** is a column of cards, each command's options under its
 button: **File...** (the platform's own open dialog: a UVFITS file, or a
 Measurement Set - entering its folder picks it) with optional
-`timeavg`/`freqavg` and **Load**; **Smart flag** (`smartflag` over all
-the data, testing the phases unless unticked, at the antenna sigma
-typed); **Selfcal** (phase and/or amplitude,
+`timeavg`/`freqavg` and **Load**; **Selfcal** (phase and/or amplitude,
 at a solution interval; by default converging with `modelfit`, as
 `selfcal(converge=True)`, when the model has components to fit),
-**Gscale** (float scale on by default) and
-**Bayes** (`bayes_gscale` over the source models ticked; the Gaussians
-by default); **UV range** and **Taper**. **Output** shows everything the
+**Gscale** (float scale off by default, as for the command; with **Bayes** ticked it runs
+`gscale(bayes=True)` over the source models ticked under it, the
+Gaussians by default) and **Smart flag** (`smartflag` over all the data, testing the
+phases unless unticked, at the antenna sigma typed); **UV range** and
+**Taper**. **Output** shows everything the
 session prints, and under **Save:** buttons for the restored and dirty
 maps, the dirty beam, the model, the visibilities, the calibration and
 flag tables, and the whole session. A file loaded from the dashboard
@@ -864,17 +871,24 @@ needed. With no solution left, the data behind it are flagged. A new
 ### The macOS app
 
 `python packaging/macos/build_app.py` builds `dist/difmapy.app` and a
-drag-to-Applications disk image, `dist/difmapy-<version>.dmg`. The app
-carries its own Python (a copy of uv's relocatable CPython with difmapy,
-PySide6-Essentials, casatools and the rest installed into it), opens
-the dashboard, and on first launch offers to link `/usr/local/bin/difmapy`
-to the `difmapy` command inside it (macOS asks for the password). Its
-main executable is a small launcher compiled against the current macOS
-SDK that embeds Python - macOS gives an app the Liquid Glass look of the
-SDK its main executable was built with. `--no-ms` leaves out casatools (and with it the macOS 15
-minimum); the default ad hoc signature runs on the Mac that built it,
-and `--sign "Developer ID Application: ..." --notarize <profile>` makes
-a disk image other Macs accept.
+drag-to-Applications disk image, `dist/difmapy-<version>.dmg`. The app is
+a native SwiftUI program: its window, toolbar, menus, inspector of
+commands (data, self-calibration, gain scale with its Bayes switch,
+flagging, imaging), open/save panels and Settings window are the
+system's own.
+Of its four panes, three host difmapy's interactive plots
+(vplot/tplot/possm, radplot/projplot/corplot, mapplot), keys and mouse
+flagging included, and the fourth shows the session's output. Loading, calibrating and saving run in the
+background while the window stays live. It embeds its own Python (a
+copy of uv's relocatable CPython with difmapy, PySide6-Essentials,
+casatools and the rest installed into it) and on first launch offers to
+link `/usr/local/bin/difmapy` to the `difmapy` command inside it (macOS
+asks for the password). Building needs Xcode. `--dev` builds
+`dist/difmapy-dev.app` on the current venv and checkout in seconds, for
+working on the app. `--no-ms` leaves out casatools (and with it the
+macOS 15 minimum; the app needs 14); the default ad hoc signature runs on
+the Mac that built it, and `--sign "Developer ID Application: ..."
+--notarize <profile>` makes a disk image other Macs accept.
 
 ### The colour bar
 

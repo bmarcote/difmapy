@@ -2,9 +2,12 @@
 
     python packaging/macos/build_app.py                 # dist/difmapy.app + dist/difmapy-<version>.dmg
     python packaging/macos/build_app.py --no-ms         # without casatools (no Measurement Sets)
+    python packaging/macos/build_app.py --dev           # dist/difmapy-dev.app on this venv, in seconds
     python packaging/macos/build_app.py --sign "Developer ID Application: ..." --notarize <profile>
 
-The app carries its own Python: a copy of a relocatable CPython (python-build-standalone, which is what uv installs - by default the one running this script) with difmapy and its dependencies installed into it, so it needs nothing on the Mac it is copied to. Its main executable is a small launcher (``launcher.c``) compiled here against the current macOS SDK, which embeds that Python: macOS gives an app the Liquid Glass look of its SDK by its main executable, and the Python binary itself is built against an older one. The optional window glass background (``$DIFMAPY_GLASS=1``) is ``glass.m`` (``_glass.dylib``).
+The app is a SwiftUI program (``app/*.swift``): its window, toolbar, menus, inspector of controls, output, file panels and settings are native, and it hosts difmapy's interactive pyqtgraph plots in its panes (Qt runs as a guest of the app, see ``difmapy.macapp``). It embeds Python through ``app/pybridge.c`` and carries its own: a copy of a relocatable CPython (python-build-standalone, which is what uv installs - by default the one running this script) with difmapy and its dependencies installed into it, so it needs nothing on the Mac it is copied to. It is compiled here with ``swiftc`` against the current macOS SDK, which is also what gives it that SDK's look.
+
+``--dev`` builds ``dist/difmapy-dev.app`` instead: the same executable, but running this checkout with the Python running this script (its venv, difmapy installed editable) rather than a bundled copy - seconds to rebuild, for working on the app; it runs on this Mac only.
 
 On first open the app offers to link ``/usr/local/bin/difmapy`` to the command inside it (``difmapy.app_main``), so the Terminal session runs on the same Python.
 
@@ -14,7 +17,9 @@ Signing: ad hoc by default, which runs on this Mac; a Mac that downloads the dis
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import platform
 import plistlib
 import shutil
 import subprocess
@@ -94,12 +99,26 @@ def install_difmapy(site: Path, version: str):
     (info / "entry_points.txt").write_text("[console_scripts]\ndifmapy = difmapy.cli:main\n")
 
 
-def build_launcher(contents: Path, python: Path):
+#: The SwiftUI sources and the C bridge to Python.
+APP_SOURCES = HERE / "app"
+#: The oldest macOS the app runs on: SwiftUI's inspector and Observation need 14 (casatools' wheels need 15).
+APP_MIN_MACOS = "14.0"
+
+
+def build_executable(contents: Path, python: Path, rpath: str, min_macos=APP_MIN_MACOS) -> Path:
+    """Compile the app's main executable: the C bridge (``pybridge.c``) against `python`'s headers, then the SwiftUI sources, linked to its ``libpython`` found through `rpath`. For the machine's architecture, which is the one of the Python it embeds."""
     ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    target = f"{platform.machine()}-apple-macos{min_macos}"
     out = contents / "MacOS" / "difmapy"
-    run(["clang", "-O2", "-mmacosx-version-min=12.0", str(HERE / "launcher.c"),
-         "-I", python / "include" / ver, "-L", python / "lib", f"-l{ver}",
-         "-Wl,-rpath,@executable_path/../Resources/python/lib", "-o", out])
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        bridge = Path(tmp) / "pybridge.o"
+        run(["xcrun", "clang", "-c", "-O2", "-target", target, APP_SOURCES / "pybridge.c",
+             "-I", python / "include" / ver, "-o", bridge])
+        run(["xcrun", "swiftc", "-O", "-parse-as-library", "-target", target,
+             "-import-objc-header", APP_SOURCES / "pybridge.h", *sorted(APP_SOURCES.glob("*.swift")), bridge,
+             "-L", python / "lib", f"-l{ver}", "-Xlinker", "-rpath", "-Xlinker", rpath,
+             "-module-cache-path", Path(tmp) / "modules", "-o", out])
     return out
 
 
@@ -161,11 +180,12 @@ def compile_icon(resources: Path) -> dict:
             return plistlib.load(f)
 
 
-def write_plist(contents: Path, version: str, min_macos="13.0", icon_keys=None):
+def write_plist(contents: Path, version: str, min_macos=APP_MIN_MACOS, icon_keys=None, name="difmapy",
+                bundle_id=BUNDLE_ID):
     plist = {
-        "CFBundleName": "difmapy",
-        "CFBundleDisplayName": "difmapy",
-        "CFBundleIdentifier": BUNDLE_ID,
+        "CFBundleName": name,
+        "CFBundleDisplayName": name,
+        "CFBundleIdentifier": bundle_id,
         "CFBundleExecutable": "difmapy",
         "CFBundleIconFile": "difmapy.icns",
         **(icon_keys or {}),
@@ -176,6 +196,8 @@ def write_plist(contents: Path, version: str, min_macos="13.0", icon_keys=None):
         "LSApplicationCategoryType": "public.app-category.education",
         "NSHighResolutionCapable": True,
         "NSPrincipalClass": "NSApplication",
+        "NSSupportsAutomaticTermination": False,
+        "NSSupportsSuddenTermination": False,
         "NSHumanReadableCopyright": "difmapy, AGPL-3.0",
         "CFBundleDocumentTypes": [{
             "CFBundleTypeName": "UVFITS visibility data",
@@ -212,6 +234,32 @@ def make_dmg(app: Path, out: Path, volname="difmapy"):
     return out
 
 
+def build_dev(out: Path, version: str, selftest=False) -> Path:
+    """``dist/difmapy-dev.app``: the app's executable, running this checkout with the Python that runs this script (named in ``Contents/Resources/python-dev.json``) - for working on the app. Runs on this Mac only."""
+    app = out / "difmapy-dev.app"
+    if app.exists():
+        shutil.rmtree(app)
+    contents = app / "Contents"
+    (contents / "Resources").mkdir(parents=True)
+    build_native.build()
+    base = python_root()
+    build_executable(contents, base, rpath=str(base / "lib"))
+    (contents / "Resources" / "python-dev.json").write_text(json.dumps({
+        "home": str(base), "executable": sys.executable,
+        "site": [sysconfig.get_paths()["purelib"]]}, indent=1))
+    icon_keys = compile_icon(contents / "Resources")
+    if not icon_keys:
+        make_icon(contents / "Resources" / "difmapy.icns")
+    write_plist(contents, version, icon_keys=icon_keys, name="difmapy-dev", bundle_id=BUNDLE_ID + ".dev")
+    sign(app, "-")
+    print(f"built {app}")
+    if selftest:
+        env = dict(os.environ, DIFMAPY_APP_SELFTEST="4")
+        env.pop("QT_QPA_PLATFORM", None)
+        run([contents / "MacOS" / "difmapy"], env=env, timeout=120)
+    return app
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--python", help="root of the relocatable CPython to bundle (default: the one running this)")
@@ -222,6 +270,8 @@ def main(argv=None) -> int:
     ap.add_argument("--notarize", metavar="PROFILE", help="notarytool keychain profile: notarize and staple the DMG")
     ap.add_argument("--no-dmg", action="store_true", help="build the .app only")
     ap.add_argument("--selftest", action="store_true", help="start the built app for a few seconds to check it runs")
+    ap.add_argument("--dev", action="store_true",
+                    help="build dist/difmapy-dev.app on this venv and checkout instead (seconds; this Mac only)")
     args = ap.parse_args(argv)
     if sys.platform != "darwin":
         sys.exit("difmapy.app can only be built on macOS")
@@ -229,6 +279,9 @@ def main(argv=None) -> int:
     version = project_version()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    if args.dev:
+        build_dev(out, version, selftest=args.selftest)
+        return 0
     app = out / "difmapy.app"
     if app.exists():
         shutil.rmtree(app)
@@ -240,19 +293,20 @@ def main(argv=None) -> int:
     site = copy_python(python_root(args.python), python)
     install_packages(site, python, with_ms=not args.no_ms)
     install_difmapy(site, version)
-    build_launcher(contents, python)
+    build_executable(contents, python, rpath="@executable_path/../Resources/python/lib",
+                     min_macos=APP_MIN_MACOS if args.no_ms else "15.0")
     write_command(contents)
     icon_keys = compile_icon(contents / "Resources")
     if not icon_keys:
         make_icon(contents / "Resources" / "difmapy.icns")
-    # casatools' macOS wheels need macOS 15; without it, PySide6's 13.
-    write_plist(contents, version, min_macos="13.0" if args.no_ms else "15.0", icon_keys=icon_keys)
+    # casatools' macOS wheels need macOS 15; without it, the app's SwiftUI needs 14.
+    write_plist(contents, version, min_macos=APP_MIN_MACOS if args.no_ms else "15.0", icon_keys=icon_keys)
     sign(app, args.sign)
     size = subprocess.run(["du", "-sh", str(app)], capture_output=True, text=True).stdout.split()[0]
     print(f"built {app} ({size})")
 
     if args.selftest:
-        env = dict(os.environ, DIFMAPY_APP_SELFTEST="3")
+        env = dict(os.environ, DIFMAPY_APP_SELFTEST="4")
         env.pop("QT_QPA_PLATFORM", None)
         run([contents / "MacOS" / "difmapy"], env=env, timeout=120)
         run([contents / "Resources" / "bin" / "difmapy", "--version"])

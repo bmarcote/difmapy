@@ -172,7 +172,7 @@ def save_caltable(obs, path, ms=None, spw_ids=None, flag_uncalibrated=False,
     since : gain snapshot | None
         If given (from `Observation.gain_snapshot()`), export only the calibration accumulated *since* that point. Applying the resulting chain of tables together, as CASA does with ``gaintable=[t1, t2, ...]``, is equivalent to applying one cumulative table.
     solutions : difmapy.io.solutions.GainSolutions | None
-        Write these instead of the observation's gain table (for instance the constant gains of `bayes_gscale`).
+        Write these instead of the observation's gain table (for instance the constant gains of the Bayesian `gscale`).
     """
     try:
         import casatools

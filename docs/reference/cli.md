@@ -71,7 +71,7 @@ Imaging
     `mapinfo`, `add_window`, `clear_windows`
 
 Calibration
-:   `selfcal`, `gscale`, `bayes_gscale`, `station_gains`, `uncalib`,
+:   `selfcal`, `gscale`, `station_gains`, `uncalib`,
     `selfant`, `startmod`, `resoff`, `clroff`
 
 Models

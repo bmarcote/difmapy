@@ -112,7 +112,7 @@ reports and nothing else:
   `obs.select("I", quiet=False).mapsize(512, 0.2)` still chains.
 - `verbose=True`, the default, prints the report of the commands that
   have one (`invert`, `clean`, `restore`, `modelfit`, `selfcal`,
-  `gscale`, `bayes_gscale`, `selfant`, `startmod`, `header`,
+  `gscale`, `selfant`, `startmod`, `header`,
   `savecaltable`, `wflags`, `save`); `verbose=False` prints nothing.
 
 Queries whose whole point is their value - `imstat`, `mapinfo`,

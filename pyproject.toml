@@ -41,7 +41,7 @@ difmapy = "difmapy.cli:main"
 # Measurement Set support. casatools ships wheels only for some
 # platforms/Python versions, which is why it is not a hard dependency.
 ms = ["casatools"]
-# matplotlib for the static report figures (bayes_gscale). The
+# matplotlib for the static report figures (gscale(bayes=True)). The
 # interactive plots are a hard dependency.
 plot = ["matplotlib>=3.7"]
 dev = ["pytest>=7", "maturin>=1.7"]

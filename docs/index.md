@@ -56,7 +56,7 @@ flagging - therefore runs in real time and is fully reversible.
   has solved, as a CASA "G Jones" table or an AIPS SN table, to apply
   to other data such as the other sources of the observation.
 - **Bayesian station amplitude calibration**
-  ([`bayes_gscale`](guide/bayes-gscale.md)): `gscale` with every station
+  ([`gscale(bayes=True)`](guide/bayes-gscale.md)): `gscale` with every station
   left out of the model in turn, source models compared, and error bars
   on the result.
 - Native **multi-IF, multi-channel** handling: all subbands are gridded

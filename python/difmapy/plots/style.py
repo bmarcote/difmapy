@@ -2,7 +2,7 @@
 
 Everywhere but the macOS app, a style sheet draws every control the way a well-designed web page would: a clean sans-serif typeface, white rounded fields with a soft border and a blue focus ring, solid blue action buttons and outlined secondary ones, custom check boxes, underlined tabs, field captions in a lighter grey, cards with a soft shadow, and a dark console for the session output. It follows the system's light or dark appearance.
 
-In the macOS app (``difmapy.app``) the controls are left to the native style instead - Liquid Glass, given the SDK its launcher is built with - and only the containers (cards, section titles, the output) are styled. ``$DIFMAPY_STYLE`` (``web`` or ``native``) overrides the choice.
+In the macOS app (``difmapy.app``, a SwiftUI program whose own controls are native) the few Qt controls left - those inside the hosted plots, such as mapplot's weighting box - are left to the native style instead, and only the containers (cards, section titles, the output) are styled. ``$DIFMAPY_STYLE`` (``web`` or ``native``) overrides the choice.
 
 `apply` installs the style sheet on the application; it is called when the Qt application is created (`difmapy.plots.base.ensure_app`) and again when the system switches between light and dark.
 """

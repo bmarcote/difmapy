@@ -30,7 +30,7 @@ other packages.
   exactly what difmapy has flagged.
 - **Averaged Measurement Sets** written by `save()` read back as exactly
   what the session holds, and CASA's `listobs` accepts them.
-- **`bayes_gscale`** recovers injected per-station, per-IF gain errors,
+- **`gscale(bayes=True)`** recovers injected per-station, per-IF gain errors,
   and gives the same answer whatever the number of threads.
 
 ```sh

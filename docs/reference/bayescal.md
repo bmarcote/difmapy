@@ -1,10 +1,10 @@
 # Bayesian calibration
 
 The method is explained in the
-[user guide](../guide/bayes-gscale.md); `Observation.bayes_gscale` calls
-the function below.
-
-::: difmapy.bayescal.bayes_gscale
+[user guide](../guide/bayes-gscale.md). It is run by
+`Observation.gscale(bayes=True, ...)`, whose parameters are in the
+[Observation reference](observation.md); with `quiet=False` it returns
+the result below.
 
 ::: difmapy.bayescal.BayesGainResult
     options:

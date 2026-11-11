@@ -41,25 +41,26 @@ def test_install_command_outside_the_app(monkeypatch):
     assert not ok and "not running from difmapy.app" in msg
 
 
-def test_the_question_is_asked_once(bundle, monkeypatch):
-    """The first launch asks; whatever the answer, the next does not."""
-    from pyqtgraph.Qt import QtWidgets
-
-    from difmapy.plots.base import ensure_app
-
-    ensure_app()
-    asked = []
-
-    def fake_exec(box):
-        asked.append(box.text())
-        return 0
-
-    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", fake_exec)
-    app_main._offer_command()
-    app_main._offer_command()
-    assert len(asked) == 1 and "Terminal" in asked[0]
+def test_the_question_is_asked_once(bundle):
+    """The first launch asks (the app shows the question); whatever the answer, the next does not."""
+    assert app_main.command_offer_pending()
+    ok, msg = app_main.answer_command_offer(False)
+    assert not ok and "install_command" in msg
     assert app_main._settings()["command_offered"]
-    assert not app_main.command_installed()          # "Not Now" by default here
+    assert not app_main.command_offer_pending()
+    assert not app_main.command_installed()
+
+
+def test_answering_yes_installs(bundle):
+    app, cmd = bundle
+    ok, msg = app_main.answer_command_offer(True)
+    assert ok, msg
+    assert app_main.command_installed() and not app_main.command_offer_pending()
+
+
+def test_no_question_outside_the_app(monkeypatch):
+    monkeypatch.delenv("DIFMAPY_APP_BUNDLE", raising=False)
+    assert not app_main.command_offer_pending()
 
 
 def test_glass_is_off_where_it_cannot_work(monkeypatch):

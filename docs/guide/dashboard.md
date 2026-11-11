@@ -38,10 +38,9 @@ itself) catches up with changes made from the prompt.
 | **File...**, path | the file to load; the button opens the platform's own dialog, for a UVFITS file or a Measurement Set (entering the MS folder picks it, as does its `table.dat`) |
 | timeavg, freqavg | optional averaging on load, as `load(timeavg=, freqavg=)` takes it: a time with a unit (`10s`, `2min`), and a channel count or `all` |
 | **Load** | loads the file and rebuilds every plot for it; at the prompt the new data becomes `obs` |
-| **Smart flag** | [`smartflag`](flagging.md#smart-flagging) over all the data: testing the phases too unless **Test phases** is unticked, at the antenna sigma typed (5 when empty). A box in a plot after ++shift+s++ does the same for a selection |
 | **Selfcal** | `selfcal` with phase and/or amplitude, as ticked (phase by default), at the solution interval typed: minutes as a bare number, a string with a unit (`30s`), `scan`, or empty for one solution per integration. With **Converge with modelfit** (on by default) it alternates with `modelfit` until the fit stops improving, as `selfcal(converge=True)`; a model of CLEAN components alone has nothing to fit, and gets one selfcal round |
-| **Gscale** | `gscale`, with `float_scale` as ticked (on by default) |
-| **Bayes** | `bayes_gscale` over the source models ticked: `clean`, `gauss1`, `gauss2`, `gauss3` (the Gaussians by default) |
+| **Gscale** | `gscale`, with `float_scale` as ticked (off by default, as the command's own default: only tick it for a model whose flux density you trust more than the a-priori calibration). With **Bayes** ticked (off by default) it runs `gscale(bayes=True)` instead, over the source models ticked under it - `clean`, `gauss1`, `gauss2`, `gauss3`, the Gaussians by default - with `float_scale` as ticked too |
+| **Smart flag** | [`smartflag`](flagging.md#smart-flagging) over all the data: testing the phases too unless **Test phases** is unticked, at the antenna sigma typed (5 when empty). A box in a plot after ++shift+s++ does the same for a selection |
 | **UV range** | `uvrange` between min and max (an empty max is no limit), and re-image |
 | **Taper** | `uvtaper` with value and radius (an empty value is no taper), and re-image |
 
@@ -49,14 +48,14 @@ UV distances are in M-lambda, or a number with a unit (`500k`). Enter in
 a field applies its row too. The fields always show what is in effect,
 also when it was set in the map panel or at the prompt.
 
-Selfcal, Gscale and Bayes refuse to run before there is a model -
+Selfcal and Gscale (Bayes or not) refuse to run before there is a model -
 self-calibrating against nothing would fill the gain table with NaN.
 CLEAN or fit one in the map first.
 
 ## Output
 
 Everything the session prints - the reports of `clean`, `modelfit`,
-`selfcal`, `gscale`, `bayes_gscale`, the dashboard's own messages, and
+`selfcal`, `gscale`, the dashboard's own messages, and
 whatever is typed at the prompt meanwhile - also goes to this tab.
 Under **Save:**, its buttons save, each to a file it asks for with the
 platform's own dialog:
@@ -84,29 +83,48 @@ first of Cantarell, Ubuntu, Noto Sans... that is installed), white
 rounded fields with a blue focus ring, solid blue action buttons and
 outlined secondary ones, custom check boxes, underlined tabs, field
 captions in a lighter grey, cards with a soft shadow and a dark console
-for the output. The macOS app keeps the native controls instead -
-Liquid Glass buttons and fields, the segmented tabs and overlay scroll
-bars of macOS - on one uniform surface, with the actions in the system
-accent colour (`$DIFMAPY_GLASS=1` puts the window on a glass
-background). `$DIFMAPY_STYLE=web` or `native` overrides the choice. The
+for the output (`$DIFMAPY_GLASS=1` puts the window on a glass background
+on macOS). `$DIFMAPY_STYLE=web` or `native` overrides the choice. The
 UV range and taper are set in the Main tab only: the map panel goes
-without the fields a standalone `mapplot()` has above its image.
+without the fields a standalone `mapplot()` has above its image. The
+macOS app is a native window instead (see below).
 
 ## The macOS app
 
 ```sh
 python packaging/macos/build_app.py            # dist/difmapy.app and dist/difmapy-<version>.dmg
+python packaging/macos/build_app.py --dev      # dist/difmapy-dev.app on this venv, in seconds
 ```
 
 The disk image holds `difmapy.app` beside a link to Applications: drag
-one onto the other. The app opens the dashboard, carries its own Python
-(nothing else needs installing) and, on its first launch, offers to link
-`/usr/local/bin/difmapy` to the `difmapy` command inside it, so the
-Terminal session runs on the same Python; `difmapy.app_main.install_command()`
-does it later. Files dropped on its icon are loaded.
+one onto the other. The app is the dashboard as a native macOS program,
+written in SwiftUI: the window, its toolbar (Open, Save, the
+inspector), the menus, the inspector on the right with the commands and
+their options, the open and save panels and the Settings window are all
+the system's own, and follow its appearance. The inspector orders the
+commands as the Main tab does - Data, Self-calibration, Gain scale (with
+its Bayes switch), Flagging, Imaging - and a spinner beside a command's
+button shows it at work. It keeps the four panes:
+three hold the same interactive plots as above - a segmented control
+over each picks the plot - with their keys, mouse flagging and status
+lines, and the bottom-right one shows everything the session prints. Long commands (loading, calibrating,
+saving) run in the background, and the window stays live meanwhile;
+View > Reload All Plots (++cmd+r++) catches up with changes made in the
+Terminal.
+
+The app carries its own Python (nothing else needs installing) and, on
+its first launch, offers to link `/usr/local/bin/difmapy` to the
+`difmapy` command inside it, so the Terminal session runs on the same
+Python; its Settings window (or `difmapy.app_main.install_command()`)
+does it later. Files dropped on its icon or on its window are loaded.
+
+`--dev` builds `difmapy-dev.app`, the same app running this checkout with
+the Python that runs the build script (a venv with difmapy installed
+editable) instead of a bundled copy: it takes seconds, for working on
+the app, and runs on that Mac only. Building needs Xcode (`swiftc`).
 
 Built as above the app is signed ad hoc, which is enough on the Mac that
 built it. For other Macs, sign it with a Developer ID certificate and
 notarize it: `--sign "Developer ID Application: <name> (<team>)"
 --notarize <notarytool keychain profile>`. `--no-ms` leaves casatools
-out, which also lowers the minimum macOS from 15 (casatools' wheels) to 13.
+out, which also lowers the minimum macOS from 15 (casatools' wheels) to 14.

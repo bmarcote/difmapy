@@ -1,4 +1,4 @@
-"""The diagnostic figure of `bayes_gscale`, drawn with matplotlib.
+"""The diagnostic figure of ``gscale(bayes=True)``, drawn with matplotlib.
 
 It is a static report figure (saved next to the JSON report), not one of the interactive pyqtgraph windows, so it needs neither Qt nor a display. Five panels:
 
@@ -83,7 +83,7 @@ def _draw(res, path, show):
         from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
     except ImportError as exc:  # pragma: no cover
         raise ImportError(
-            "the bayes_gscale figure needs matplotlib (pip install matplotlib)"
+            "the Bayesian gscale figure needs matplotlib (pip install matplotlib)"
         ) from exc
 
     has = np.isfinite(res.applied_log).any(axis=0)
@@ -101,7 +101,7 @@ def _draw(res, path, show):
                           wspace=0.24, left=0.07, right=0.97, top=0.93,
                           bottom=0.06)
     fig.suptitle(
-        f"bayes_gscale - {res.source}: best model {res.best_model} "
+        f"Bayesian gscale - {res.source}: best model {res.best_model} "
         f"(P = {res.model_prob[bi]:.3f}), prior sigma "
         f"{100 * res.settings['prior_sigma']:.0f}%",
         color=INK, fontsize=12, x=0.07, ha="left")

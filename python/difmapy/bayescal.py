@@ -1,6 +1,6 @@
-"""Bayesian amplitude calibration of the stations (`bayes_gscale`).
+"""Bayesian amplitude calibration of the stations (``gscale(bayes=True)``).
 
-`gscale` solves one amplitude correction per station and IF for the whole observation, against *a* model - and that model was built from the very data being calibrated, so a station with a wrong amplitude scale has already pulled the model towards its own error. `bayes_gscale` removes that circularity and puts error bars on the answer:
+`gscale` solves one amplitude correction per station and IF for the whole observation, against *a* model - and that model was built from the very data being calibrated, so a station with a wrong amplitude scale has already pulled the model towards its own error. ``gscale(bayes=True)`` removes that circularity and puts error bars on the answer:
 
 1. **Leave one station out.** For every station `a` (and once with the full array) the source model is rebuilt with `a` ignored, phase self-calibrating as it goes. `a` is then brought back, phase self-calibrated against that fixed model, and the whole array `gscale`d. The correction this gives `a` comes from a model it had no say in. The runs that leave out the *other* stations give a jackknife spread for it; and where leaving `a` out moves its own estimate, that shift is counted as systematic uncertainty too, since it can mean either that the full-array model had absorbed the station's error or that the station's baselines reach spatial frequencies no other station constrains.
 2. **Compare source models.** The same is done for several model families - one to a few Gaussians or point sources fitted with `modelfit` (the default: one to three Gaussians), or CLEAN - and the full-array runs are weighed against each other by the Bayesian information criterion, ``BIC = chisq / s^2 + k ln(n)``, with `k` the model's parameter count and `s^2` the reduced chi-squared of the best of them (the data weights of VLBI are rarely on an absolute scale, and this is the usual way of not trusting them for it). ``exp(-BIC/2)``, normalised, is each model's posterior probability, and the corrections are averaged over models with those weights.
@@ -26,7 +26,7 @@ import numpy as np
 
 from difmapy.report import write_json
 
-__all__ = ["bayes_gscale", "BayesGainResult", "DEFAULT_MODELS"]
+__all__ = ["BayesGainResult", "DEFAULT_MODELS"]
 
 #: The source-model families compared by default. CLEAN is left out:
 #: with its many degrees of freedom it was often favoured by the model
@@ -193,7 +193,7 @@ def _antenna_mismatch(o):
 
 def _median_normalised(logg, anchor=None):
     """Log-gains ``[nif, nant]`` shifted so that the median station of each IF has no correction - the median of
-    the `anchor` stations (indices; `bayes_gscale`'s ``fixed``) where any of them has an estimate in that IF.
+    the `anchor` stations (indices; `gscale`'s ``fixed``) where any of them has an estimate in that IF.
 
     gscale keeps the data's flux scale by setting the *mean* gain amplitude of every IF to one (difmap's ``norm_cors``), so a single station that is far off - one that needs x4 in the two IFs it has data in - pulls every other station of those IFs down with it (to x0.57 for eight stations), and leaving it out of the model does not help: it is still in the normalisation. The median station is not moved by it.
     """
@@ -207,7 +207,7 @@ def _median_normalised(logg, anchor=None):
 
 
 def _model_variance(model_sigma, names, nif):
-    """``[nif, nant]`` variances from `bayes_gscale`'s ``model_sigma`` (zero where a station has none)."""
+    """``[nif, nant]`` variances from `gscale`'s ``model_sigma`` (zero where a station has none)."""
     extra = np.zeros((nif, len(names)))
     for name, value in (model_sigma or {}).items():
         if name not in names or value is None:
@@ -305,7 +305,7 @@ def _model_posterior(full_runs, model_names):
 
 @dataclass
 class BayesGainResult:
-    """What `bayes_gscale` found; see the module docstring for the method. Log-gain arrays are natural logs of the amplitude corrections (which multiply the data), ``[nif, nant]`` unless said otherwise."""
+    """What ``gscale(bayes=True)`` found; see the module docstring for the method. Log-gain arrays are natural logs of the amplitude corrections (which multiply the data), ``[nif, nant]`` unless said otherwise."""
 
     source: str
     antennas: list
@@ -520,7 +520,7 @@ class BayesGainResult:
     def summary(self) -> str:
         """A plain-text report of the findings: the model comparison, each station's correction in every IF, and the findings."""
         lines = [
-            f"bayes_gscale: {self.source}, {len(self.antennas)} stations, "
+            f"gscale (Bayes): {self.source}, {len(self.antennas)} stations, "
             f"{len(self.if_freqs)} IFs; {len(self.runs)} runs in "
             f"{self.elapsed:.1f} s",
             "",
@@ -644,7 +644,7 @@ class BayesGainResult:
         """Everything, as plain data (what `write` saves as JSON)."""
         return {
             "source": self.source,
-            "method": "bayes_gscale (leave-one-station-out gscale, BIC "
+            "method": "Bayesian gscale (leave-one-station-out gscale, BIC "
                       "model averaging, Gaussian log-gain prior)",
             "settings": self.settings,
             "antennas": self.antennas,
@@ -699,7 +699,7 @@ class BayesGainResult:
             files["plot"] = f"{prefix}.png"
         except Exception as exc:  # noqa: BLE001 - a figure that cannot be drawn must not lose the report or table
             if verbose:
-                print(f"bayes_gscale: no diagnostic plot ({exc})")
+                print(f"gscale (Bayes): no diagnostic plot ({exc})")
         # The report first, so that a table that cannot be written (no
         # MS for a CASA table, say) does not lose it.
         files["json"] = f"{prefix}.json"
@@ -765,13 +765,13 @@ def _combine_ifs(mean, var):
 # ----------------------------------------------------------------------
 
 
-def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0, jackknife=True,
-                 per_if=True, if_sigma=None, fixed=None, float_scale=False, norm="median", nloop=2,
-                 solint=0.0, clean_gain=0.05, sigma_floor=0.01, model_sigma=None, timeavg=None,
-                 workers=None, apply=True, prefix=None, outformat=None,
-                 ms=None, uvfits=None, plot=None,
-                 quiet=True, verbose=True) -> BayesGainResult:
-    """Bayesian whole-observation amplitude calibration of every station; the method is described in `difmapy.bayescal`.
+def _run(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0, jackknife=True,
+         per_if=True, if_sigma=None, fixed=None, float_scale=False, norm="median", nloop=2,
+         solint=0.0, clean_gain=0.05, sigma_floor=0.01, model_sigma=None, timeavg=None,
+         workers=None, apply=True, prefix=None, outformat=None,
+         ms=None, uvfits=None, plot=None,
+         quiet=True, verbose=True) -> BayesGainResult:
+    """Bayesian whole-observation amplitude calibration of every station - what ``Observation.gscale(bayes=True)`` runs (the parameters are described there); the method is described in `difmapy.bayescal`.
 
     Parameters
     ----------
@@ -872,7 +872,7 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
     jobs = [(s, e) for s in specs for e in subsets]
     nworkers = max(1, min(int(workers or os.cpu_count() or 1), len(jobs)))
     if verbose:
-        print(f"bayes_gscale: {len(jobs)} runs ({len(specs)} models x "
+        print(f"gscale (Bayes): {len(jobs)} runs ({len(specs)} models x "
               f"{len(subsets)} station subsets) on {nworkers} threads")
     results = []
     with ThreadPoolExecutor(max_workers=nworkers) as pool:
@@ -1044,5 +1044,5 @@ def bayes_gscale(obs, models=DEFAULT_MODELS, prior_sigma=0.10, outlier_sigma=1.0
             res.plot(show=True)
         except (ImportError, ValueError) as exc:
             if verbose:
-                print(f"bayes_gscale: no diagnostic plot ({exc})")
+                print(f"gscale (Bayes): no diagnostic plot ({exc})")
     return None if quiet else res

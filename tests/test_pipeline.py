@@ -85,6 +85,46 @@ def test_clean_restore_wmap(obs, tmp_path):
         assert abs((sky.ra.deg - exp_ra) * np.cos(np.deg2rad(DEC_DEG))) * 3.6e6 < CELL
 
 
+def test_fits_coordinates_survive_a_shift(uvfits_file, tmp_path):
+    """After `shift` the map shows the source elsewhere, but the image's coordinates must still put it at its sky position: the reference pixel follows the phase centre (the header used to keep it at the map centre, off by the shift)."""
+    from astropy.io import fits
+    from astropy.wcs import WCS
+
+    o = difmapy.load(uvfits_file)
+    o.mapsize(256, 0.25)
+    o.shift(10.0, -5.0)
+    o.invert(verbose=False)
+    path = tmp_path / "shifted.fits"
+    o.wdmap(str(path))
+    with fits.open(path) as hdul:
+        img = hdul[0].data.squeeze()
+        sky = WCS(hdul[0].header).celestial.pixel_to_world(*np.unravel_index(np.argmax(img), img.shape)[::-1])
+    assert abs(sky.dec.deg - (DEC_DEG + Y0_MAS / 3.6e6)) * 3.6e6 < 0.25
+    assert abs((sky.ra.deg - RA_DEG) * np.cos(np.deg2rad(DEC_DEG)) * 3.6e6 - X0_MAS) < 0.25
+
+
+def test_fits_images_are_icrs(uvfits_file, tmp_path):
+    """The image header names the frame: ICRS (what VLBI positions are). With EQUINOX 2000 alone, astropy took it for FK5 and put the source ~30 mas away from its ICRS position."""
+    from astropy.coordinates import ICRS, SkyCoord
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    import astropy.units as u
+
+    o = difmapy.load(uvfits_file)
+    o.mapsize(256, 0.25)
+    o.invert(verbose=False)
+    path = tmp_path / "dirty.fits"
+    o.wdmap(str(path))
+    with fits.open(path) as hdul:
+        hdr = hdul[0].header
+        img = hdul[0].data.squeeze()
+        sky = WCS(hdr).celestial.pixel_to_world(*np.unravel_index(np.argmax(img), img.shape)[::-1])
+    assert (hdr["RADESYS"], hdr["EQUINOX"]) == ("ICRS", 2000.0)
+    assert isinstance(sky.frame, ICRS)
+    truth = SkyCoord(RA_DEG * u.deg, DEC_DEG * u.deg).spherical_offsets_by(X0_MAS * u.mas, Y0_MAS * u.mas)
+    assert sky.separation(truth).to(u.mas).value < 0.25
+
+
 def test_model_io(obs, tmp_path):
     obs.add_window(X0_MAS - 2, X0_MAS + 2, Y0_MAS - 2, Y0_MAS + 2)
     obs.clean(300, 0.1)

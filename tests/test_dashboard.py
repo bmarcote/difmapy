@@ -54,7 +54,8 @@ def test_panels_hold_the_plots_in_tabs(dash):
 
 def test_defaults_of_the_controls(dash):
     assert dash.phase_check.isChecked() and not dash.amp_check.isChecked()
-    assert dash.float_check.isChecked()
+    assert not dash.float_check.isChecked()      # gscale's own default
+    assert not dash.bayes_check.isChecked()
     assert {k: cb.isChecked() for k, cb in dash.model_checks.items()} == {
         "clean": False, "gauss1": True, "gauss2": True, "gauss3": True}
 
@@ -91,9 +92,9 @@ def test_clean_in_the_map_updates_the_model_elsewhere(dash, obs):
 
 
 def test_calibration_buttons(dash, obs):
-    """Selfcal, Gscale and Bayes refuse to run without a model (it would
-    poison the gains), and run with what the rows say once there is one;
-    everything printed shows in the Output tab."""
+    """Selfcal and Gscale (Bayes or not) refuse to run without a model (it
+    would poison the gains), and run with what the cards say once there is
+    one; everything printed shows in the Output tab."""
     dash.run_selfcal()
     assert "no model yet" in dash.output.toPlainText()
     assert not np.asarray(obs._core.gains_used()).any()
@@ -108,10 +109,14 @@ def test_calibration_buttons(dash, obs):
     assert "tick phase, amplitude or both" in dash.output.toPlainText()
     res = dash.run_gscale()
     assert set(res["gains"]) == set(obs.antennas)
+    # The source models are Bayes options: off with it, on once it is ticked.
+    assert not any(cb.isEnabled() for cb in dash.model_checks.values())
+    dash.bayes_check.setChecked(True)
+    assert all(cb.isEnabled() for cb in dash.model_checks.values())
     for cb in dash.model_checks.values():
         cb.setChecked(False)
-    assert dash.run_bayes() is None
-    assert "at least one source model" in dash.output.toPlainText()
+    assert dash.run_gscale() is None
+    assert "gscale: tick at least one source model for Bayes" in dash.output.toPlainText()
 
 
 def test_load_rebuilds_every_plot(dash, uvfits_file, scanned_uvfits_file):
@@ -204,16 +209,22 @@ def test_controls_are_cards_and_output_has_a_save_heading(dash):
     from pyqtgraph.Qt import QtWidgets
 
     cards = dash.tabs.findChildren(QtWidgets.QFrame, "card")
-    # data, smart flag, selfcal, gscale, bayes, uv range, taper, and the save buttons
-    assert len(cards) == 8
-    for button in (dash.smartflag_button, dash.selfcal_button, dash.gscale_button, dash.bayes_button,
+    # data, selfcal, gscale (Bayes in it), smart flag, uv range, taper, and the save buttons
+    assert len(cards) == 7
+    for button in (dash.selfcal_button, dash.gscale_button, dash.smartflag_button,
                    dash.uvrange_button, dash.uvtaper_button):
         card = button.parentWidget()
         assert card.objectName() == "card"
         # The button heads its card, the options are under it.
         assert card.layout().itemAt(0).widget() is button
     titles = [l.text() for l in dash.tabs.findChildren(QtWidgets.QLabel, "sectionTitle")]
-    assert "SAVE:" in titles and "FLAGGING" in titles
+    assert "SAVE:" in titles and "CALIBRATION AND FLAGGING" in titles
+    # Smart flag sits in the calibration row, after Gscale.
+    row = dash.selfcal_button.parentWidget().parentWidget().layout()
+    cal = [l for l in (row.itemAt(i).layout() for i in range(row.count())) if l is not None
+           and any(l.itemAt(j).widget() is dash.gscale_button.parentWidget() for j in range(l.count()))][0]
+    assert [cal.itemAt(j).widget() for j in range(cal.count())] == [
+        b.parentWidget() for b in (dash.selfcal_button, dash.gscale_button, dash.smartflag_button)]
     from pyqtgraph.Qt import QtWidgets as W
 
     assert "QFrame#card" in W.QApplication.instance().styleSheet()   # styled

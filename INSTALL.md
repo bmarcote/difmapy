@@ -15,7 +15,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # In the difmapy checkout, inside the environment you want to use:
 pip install maturin
 maturin develop --release            # builds the Rust core, installs editable
-pip install ".[plot]"                # matplotlib, for the bayes_gscale figure
+pip install ".[plot]"                # matplotlib, for the Bayesian gscale figure
 pip install ".[ms]"                  # Measurement Set support (casatools)
 ```
 
@@ -34,8 +34,10 @@ through `maturin develop`. `cargo` stays useful for the Rust-only loop
 ### Versioning
 
 The release version lives in **one** place, `pyproject.toml`, and
-`difmapy.__version__` reads it back from the installed distribution
-metadata. The Rust workspace version in `Cargo.toml` is independent and
+`difmapy.__version__` reads it back: from the checkout's own
+`pyproject.toml` in an editable install (whose metadata is only as new as
+its last `maturin develop` - `build_native.py` does not refresh it), from
+the installed distribution metadata anywhere else. The Rust workspace version in `Cargo.toml` is independent and
 surfaces as `difmapy._core.__core_version__`; do not re-export it as
 `__version__`, or a version bump in `pyproject.toml` will silently fail
 to show up.
@@ -102,7 +104,7 @@ pip install --index-url https://test.pypi.org/simple/ \
 ### Automated releases (recommended)
 
 `.github/workflows/wheels.yml` builds Linux (x86_64 + aarch64, glibc
-2.17), macOS (Intel + Apple Silicon), Windows and the sdist, smoke-tests
+2.17), macOS (Intel + Apple Silicon) and the sdist, smoke-tests
 a wheel, and publishes on a `v*` tag using PyPI **trusted publishing**
 (no API token stored anywhere). To enable it:
 

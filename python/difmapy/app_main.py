@@ -1,8 +1,6 @@
-"""The entry point of difmapy.app, the macOS application: the dashboard as a desktop app.
+"""Support for difmapy.app, the macOS application: the ``difmapy`` command it offers to install for the Terminal.
 
-The app's launcher (``packaging/macos/launcher.c``) runs this module in the bundled Python. It opens the dashboard - empty, or on the files the app was opened with (dropped on its icon, "Open With") - and on the first launch offers to install the ``difmapy`` command for the Terminal: a link in ``/usr/local/bin`` to ``Contents/Resources/bin/difmapy`` inside the app, which starts the usual IPython session with the app's own Python. Whatever the answer, it is not asked again; ``difmapy.app_main.install_command()`` does it later.
-
-``$DIFMAPY_APP_SELFTEST=<seconds>`` skips the question, prints what the app found (glass, Python, the command) and quits after that many seconds - the build script's check that a bundle starts; with ``$DIFMAPY_APP_SNAPSHOT=<file.png>`` it also saves a picture of the window just before.
+The app itself is a SwiftUI program (``packaging/macos/app/``) whose Python side is `difmapy.macapp`. On its first launch it asks (`command_offer_pending`, `answer_command_offer`) whether to install the ``difmapy`` command for the Terminal: a link in ``/usr/local/bin`` to ``Contents/Resources/bin/difmapy`` inside the app, which starts the usual IPython session with the app's own Python. Whatever the answer, it is not asked again; ``difmapy.app_main.install_command()`` (or the app's Settings window) does it later.
 """
 
 from __future__ import annotations
@@ -11,10 +9,10 @@ import json
 import os
 import shlex
 import subprocess
-import sys
 from pathlib import Path
 
-__all__ = ["main", "install_command", "COMMAND_LINK"]
+__all__ = ["install_command", "command_installed", "command_target", "command_offer_pending",
+           "answer_command_offer", "COMMAND_LINK"]
 
 #: Where the Terminal command is linked: on the default PATH of every macOS shell.
 COMMAND_LINK = Path("/usr/local/bin/difmapy")
@@ -88,88 +86,25 @@ def install_command(bundle=None) -> tuple[bool, str]:
     return False, (r.stderr.strip() or "cancelled")
 
 
-def _offer_command(parent=None):
-    """First launch: ask once whether to install the Terminal command."""
-    from pyqtgraph.Qt import QtWidgets
+def command_offer_pending(bundle=None) -> bool:
+    """True when the app should ask whether to install the Terminal command: it runs from difmapy.app (whose command exists), the question was never answered, and the command is not installed already."""
+    target = command_target(bundle)
+    if target is None or not target.exists():
+        return False
+    return not _settings().get("command_offered") and not command_installed(bundle)
 
+
+def answer_command_offer(install: bool, bundle=None) -> tuple[bool, str]:
+    """Record the answer to the first-launch question, so that it is not asked again, and install the command if `install`.
+
+    Returns
+    -------
+    (bool, str)
+        Whether the command was installed, and a message saying what happened.
+    """
     settings = _settings()
-    if settings.get("command_offered") or command_installed():
-        return
-    box = QtWidgets.QMessageBox(parent)
-    box.setIcon(QtWidgets.QMessageBox.Icon.Question)
-    box.setWindowTitle("difmapy")
-    box.setText("Install the difmapy command for the Terminal?")
-    box.setInformativeText(
-        f"This links {COMMAND_LINK} to this app, so that typing difmapy in a Terminal starts the "
-        "interactive session (macOS may ask for your password). You can do it later with "
-        "difmapy.app_main.install_command().")
-    install = box.addButton("Install", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
-    box.addButton("Not Now", QtWidgets.QMessageBox.ButtonRole.RejectRole)
-    box.setDefaultButton(install)
-    box.exec()
     settings["command_offered"] = True
     _save_settings(settings)
-    if box.clickedButton() is install:
-        ok, msg = install_command()
-        print(f"difmapy: {msg}")
-        if not ok:
-            QtWidgets.QMessageBox.warning(parent, "difmapy", f"The command was not installed: {msg}")
-
-
-def main(argv=None) -> int:
-    """Start the app: the dashboard, on the files given (if any)."""
-    argv = list(sys.argv[1:] if argv is None else argv)
-    # Finder adds a process serial number argument on old systems.
-    files = [a for a in argv if not a.startswith("-psn_")]
-    from pyqtgraph.Qt import QtCore, QtWidgets
-
-    from difmapy.plots.base import ensure_app, set_mode
-
-    app = ensure_app()
-    app.setApplicationName("difmapy")
-    app.setApplicationDisplayName("difmapy")
-    set_mode("window")
-    from difmapy.plots.dashboard import Dashboard
-
-    dash = Dashboard(None)
-    dash.show()
-
-    class _Opener(QtCore.QObject):
-        """Files opened with the app (dropped on its icon, "Open With")."""
-
-        def eventFilter(self, obj, ev):
-            if ev.type() == QtCore.QEvent.Type.FileOpen:
-                dash.load(ev.file())
-                return True
-            return False
-
-    opener = _Opener()
-    app.installEventFilter(opener)
-    if files:
-        dash.load(files[0])
-
-    selftest = os.environ.get("DIFMAPY_APP_SELFTEST")
-    if selftest:
-        import difmapy
-        from difmapy.plots import style
-
-        print(f"difmapy {difmapy.__version__} app self-test: python {sys.version.split()[0]} "
-              f"at {sys.prefix}; stdout {sys.stdout.encoding} (± λ); bundle {_bundle()}; glass {dash.glass}; "
-              f"native controls {style.native_controls()} (style {app.property('difmapy_base_style')}); "
-              f"command {command_target()}")
-        snapshot = os.environ.get("DIFMAPY_APP_SNAPSHOT")
-        if snapshot:
-            # What the app draws (native controls included), for checking
-            # its look without screen-recording permission.
-            QtCore.QTimer.singleShot(int(float(selftest) * 1000) - 300,
-                                     lambda: dash.grab().save(snapshot))
-        QtCore.QTimer.singleShot(int(float(selftest) * 1000), app.quit)
-    else:
-        QtCore.QTimer.singleShot(300, lambda: _offer_command(dash))
-    code = app.exec()
-    app.removeEventFilter(opener)
-    return int(code)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    if not install:
+        return False, "not installed; difmapy.app_main.install_command() does it later"
+    return install_command(bundle)

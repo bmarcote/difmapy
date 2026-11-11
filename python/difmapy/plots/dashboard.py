@@ -1,6 +1,6 @@
 """The dashboard: every view of a session in one window, kept in step.
 
-Four panels: the time and frequency views of the visibilities (vplot, tplot, possm) top left, the uv-distance views and the gain corrections (radplot, projplot, corplot) top right, the map (mapplot) bottom left, and the controls bottom right - loading a file, the smart flagger, the calibration commands, and an output tab that shows everything the session prints, with buttons to save its products.
+Four panels: the time and frequency views of the visibilities (vplot, tplot, possm) top left, the uv-distance views and the gain corrections (radplot, projplot, corplot) top right, the map (mapplot) bottom left, and the controls bottom right - loading a file, the calibration commands and the smart flagger, the UV range and taper, and an output tab that shows everything the session prints, with buttons to save its products.
 
 The plots are the ordinary plot windows, embedded: they keep their keys, flagging and status lines. Whatever changes the data or the model in one of them - a flag edit, a CLEAN, a fit - or from the controls reloads the others, as ``r`` would; a plot in a tab that is not shown is reloaded when its tab is next opened.
 """
@@ -18,8 +18,8 @@ from difmapy.plots.base import PlotWindow, run_if_needed
 
 __all__ = ["Dashboard", "dashboard"]
 
-#: Source models `bayes_gscale` may compare, as the Bayes row offers
-#: them, and which of them are ticked to begin with.
+#: Source models the Bayesian `gscale` may compare, as the Gscale card offers
+#: them (with Bayes ticked), and which of them are ticked to begin with.
 BAYES_MODELS = (("clean", False), ("gauss1", True), ("gauss2", True), ("gauss3", True))
 #: Taper value the Taper card offers while no taper is set (the taper at the radius typed next to it).
 DEFAULT_TAPER_VALUE = 0.5
@@ -294,31 +294,8 @@ class Dashboard(PlotWindow):
         lay.addLayout(row)
         col.addWidget(data)
 
-        # -- flagging: the smart flagger over all the data (a box in a
-        # plot, after Shift+S, does it for a selection) --
-        col.addWidget(_section("FLAGGING"))
-        card, lay, self.smartflag_button = _action_card("Smart flag", self.run_smartflag)
-        self.smartflag_button.setToolTip(
-            "smartflag: find the antennas (and baselines) whose data depart from the rest, in all the data, "
-            "and flag them over the time of the fault")
-        row = QtWidgets.QHBoxLayout()
-        self.smart_phase_check = QtWidgets.QCheckBox("Test phases")
-        self.smart_phase_check.setChecked(True)
-        self.smart_phase_check.setToolTip("test the phases as well as the amplitudes (untick for amplitudes only)")
-        row.addWidget(self.smart_phase_check, 0, QtCore.Qt.AlignmentFlag.AlignBottom)
-        self.smart_sigma_edit = QtWidgets.QLineEdit()
-        self.smart_sigma_edit.setPlaceholderText("5")
-        self.smart_sigma_edit.setToolTip("threshold of an antenna's combined statistic, in Gaussian sigmas")
-        self.smart_sigma_edit.returnPressed.connect(lambda: self.run_smartflag())
-        row.addLayout(_labelled("Antenna sigma", self.smart_sigma_edit), 1)
-        lay.addLayout(row)
-        hint = QtWidgets.QLabel("all the data; Shift+S and a box in vplot or radplot flags a selection")
-        hint.setObjectName("hint")
-        lay.addWidget(hint)
-        col.addWidget(card)
-
-        # -- calibration: one card per command, its options under it --
-        col.addWidget(_section("CALIBRATION"))
+        # -- calibration and flagging: one card per command, its options under it --
+        col.addWidget(_section("CALIBRATION AND FLAGGING"))
         cal = QtWidgets.QHBoxLayout()
         cal.setSpacing(10)
         card, lay, self.selfcal_button = _action_card("Selfcal", self.run_selfcal)
@@ -347,22 +324,53 @@ class Dashboard(PlotWindow):
         lay.addLayout(_labelled("Solution interval", self.solint_edit))
         lay.addStretch(1)
         cal.addWidget(card, 1)
+        # Gscale; with Bayes ticked, the Bayesian gscale over the source models ticked under it.
         card, lay, self.gscale_button = _action_card("Gscale", self.run_gscale)
+        # Off by default, as gscale's own default (difmap's): with a model made from these data, a floating
+        # scale lets any flux the model misses pull the data down.
         self.float_check = QtWidgets.QCheckBox("Float scale")
-        self.float_check.setChecked(True)
+        self.float_check.setChecked(False)
+        self.float_check.setToolTip("let the flux scale float onto the model's instead of keeping the data's "
+                                    "(only for a model whose flux density you trust more than the a-priori calibration)")
         lay.addWidget(self.float_check)
-        lay.addStretch(1)
-        cal.addWidget(card, 1)
-        card, lay, self.bayes_button = _action_card("Bayes", self.run_bayes)
-        self.bayes_button.setToolTip("Bayesian gscale (bayes_gscale) over the source models ticked")
+        self.bayes_check = QtWidgets.QCheckBox("Bayes")
+        self.bayes_check.setToolTip(
+            "Bayesian gscale (gscale(bayes=True)): each station left out of the source model in turn, the source "
+            "models ticked below compared, and the corrections shrunk towards the a-priori calibration")
+        lay.addWidget(self.bayes_check)
         grid = QtWidgets.QGridLayout()
+        grid.setContentsMargins(18, 0, 0, 0)
         self.model_checks = {}
         for i, (name, on) in enumerate(BAYES_MODELS):
             cb = QtWidgets.QCheckBox(name.capitalize().replace("Gauss", "Gauss "))
             cb.setChecked(on)
+            cb.setEnabled(False)
             grid.addWidget(cb, i // 2, i % 2)
             self.model_checks[name] = cb
+        self.bayes_check.toggled.connect(
+            lambda on: [cb.setEnabled(on) for cb in self.model_checks.values()])
         lay.addLayout(grid)
+        lay.addStretch(1)
+        cal.addWidget(card, 1)
+
+        # Smart flag: all the data (a box in a plot, after Shift+S, does it for a selection).
+        card, lay, self.smartflag_button = _action_card("Smart flag", self.run_smartflag)
+        self.smartflag_button.setToolTip(
+            "smartflag: find the antennas (and baselines) whose data depart from the rest, in all the data, "
+            "and flag them over the time of the fault")
+        self.smart_phase_check = QtWidgets.QCheckBox("Test phases")
+        self.smart_phase_check.setChecked(True)
+        self.smart_phase_check.setToolTip("test the phases as well as the amplitudes (untick for amplitudes only)")
+        lay.addWidget(self.smart_phase_check)
+        self.smart_sigma_edit = QtWidgets.QLineEdit()
+        self.smart_sigma_edit.setPlaceholderText("5")
+        self.smart_sigma_edit.setToolTip("threshold of an antenna's combined statistic, in Gaussian sigmas")
+        self.smart_sigma_edit.returnPressed.connect(lambda: self.run_smartflag())
+        lay.addLayout(_labelled("Antenna sigma", self.smart_sigma_edit))
+        hint = QtWidgets.QLabel("all the data; Shift+S and a box in vplot or radplot flags a selection")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
         lay.addStretch(1)
         cal.addWidget(card, 1)
         col.addLayout(cal)
@@ -643,17 +651,7 @@ class Dashboard(PlotWindow):
         return self._run("uvtaper", go, data_changed=False)
 
     def _uv_report(self, what):
-        """Re-image and print the beam that the UV range and taper now give."""
-        from difmapy.units import format_uvdist
-
-        obs = self.obs
-        obs.invert(verbose=False)
-        bmaj, bmin, bpa = obs.estimated_beam
-        hi = f"{format_uvdist(obs._uvmax)} M-lambda" if obs._uvmax else "no limit"
-        taper = (f"taper {obs._gauval:g} at {format_uvdist(obs._gaurad)} M-lambda"
-                 if 0.0 < obs._gauval < 1.0 and obs._gaurad > 0.0 else "no taper")
-        print(f"{what}: uv range {format_uvdist(obs._uvmin)} M-lambda to {hi}, {taper}; "
-              f"beam {bmaj:.4g} x {bmin:.4g} mas at {bpa:.4g} deg")
+        print_uv_report(self.obs, what)
 
     def run_smartflag(self):
         """Run `smartflag` over all the data, testing the phases if "Test phases" is ticked, with the antenna sigma typed (empty: 5)."""
@@ -689,22 +687,20 @@ class Dashboard(PlotWindow):
             amp=amp, phase=phase, solint=solint, converge=converge, quiet=False))
 
     def run_gscale(self):
-        """Run `gscale`, floating the flux scale if the box is ticked."""
+        """Run `gscale`, floating the flux scale if "Float scale" is ticked; with "Bayes" ticked, the Bayesian gscale (``gscale(bayes=True)``) over the source models ticked under it (floating the scale likewise)."""
+        bayes = self.bayes_check.isChecked()
+        what = "gscale (Bayes)" if bayes else "gscale"
         if not self._need_model("gscale"):
             return None
-        return self._run("gscale", lambda: self.obs.gscale(
-            float_scale=self.float_check.isChecked(), quiet=False))
-
-    def run_bayes(self):
-        """Run `bayes_gscale` with the source models ticked in the Bayes row."""
-        if not self._need_model("bayes_gscale"):
-            return None
+        float_scale = self.float_check.isChecked()
+        if not bayes:
+            return self._run(what, lambda: self.obs.gscale(float_scale=float_scale, quiet=False))
         models = [name for name, cb in self.model_checks.items() if cb.isChecked()]
         if not models:
-            print("bayes_gscale: tick at least one source model")
+            print("gscale: tick at least one source model for Bayes")
             return None
-        return self._run("bayes_gscale", lambda: self.obs.bayes_gscale(
-            models=tuple(models), plot=False, quiet=False))
+        return self._run(what, lambda: self.obs.gscale(
+            float_scale=float_scale, bayes=True, models=tuple(models), plot=False, quiet=False))
 
     def save_file(self, kind, path=None):
         """Save one product of the session (`kind` is a key of `SAVERS`). Without a `path` the platform's file dialog asks for one, and the file is written once it is chosen (None is returned then). Returns the path written, or None."""
@@ -777,6 +773,19 @@ class Dashboard(PlotWindow):
         for plot in self.plots():
             plot.on_change = None
         super().closeEvent(ev)
+
+
+def print_uv_report(obs, what):
+    """Re-image `obs` and print the beam that its UV range and taper now give (after `uvrange` or `uvtaper`, named by `what`)."""
+    from difmapy.units import format_uvdist
+
+    obs.invert(verbose=False)
+    bmaj, bmin, bpa = obs.estimated_beam
+    hi = f"{format_uvdist(obs._uvmax)} M-lambda" if obs._uvmax else "no limit"
+    taper = (f"taper {obs._gauval:g} at {format_uvdist(obs._gaurad)} M-lambda"
+             if 0.0 < obs._gauval < 1.0 and obs._gaurad > 0.0 else "no taper")
+    print(f"{what}: uv range {format_uvdist(obs._uvmin)} M-lambda to {hi}, {taper}; "
+          f"beam {bmaj:.4g} x {bmin:.4g} mas at {bpa:.4g} deg")
 
 
 def _is_ms(path) -> bool:

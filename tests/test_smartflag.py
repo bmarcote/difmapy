@@ -127,6 +127,21 @@ def test_smartflag_command_flags_and_reports(obs, capsys):
     assert "no outliers found" in capsys.readouterr().out
 
 
+def test_smartflag_low_thresholds_take_the_edge_down(obs, monkeypatch):
+    """A threshold below the default edge_sigma (1.5) lowers the edge with it - it used to fail OutlierSettings' check - while an edge_sigma given in `settings` is kept, and a non-positive threshold is refused."""
+    import difmapy.smartflag as smartflag
+
+    seen = []
+    real = smartflag.smart_flag_ops
+    monkeypatch.setattr(smartflag, "smart_flag_ops", lambda o, **kw: (seen.append(kw["settings"]), real(o, **kw))[1])
+    obs.smartflag(use_phases=False, antenna_sigma=1.0, verbose=False)
+    obs.smartflag(use_phases=False, sigma=1.2, verbose=False)
+    obs.smartflag(use_phases=False, verbose=False, settings={"edge_sigma": 2.0})
+    assert [s["edge_sigma"] for s in seen] == [1.0, 1.2, 2.0]
+    with pytest.raises(ValueError, match="must be positive"):
+        obs.smartflag(antenna_sigma=0)
+
+
 def test_smartflag_keeps_ignored_stations_ignored(obs):
     obs.ignore("AN2")
     report = obs.smartflag(use_phases=False, quiet=False, verbose=False)

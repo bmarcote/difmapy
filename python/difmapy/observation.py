@@ -17,6 +17,7 @@ All user-facing positions/sizes are in milliarcseconds (mas), angles in degrees 
 
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 
@@ -24,8 +25,8 @@ import numpy as np
 
 from difmapy._core import CoreObservation
 from difmapy.report import write_json
-from difmapy.units import (format_flux, format_interval, format_uvdist, format_value,
-                           parse_interval, parse_time, parse_uvdist)
+from difmapy.units import (format_dec, format_flux, format_interval, format_ra, format_uvdist,
+                           format_value, parse_interval, parse_time, parse_uvdist)
 
 MAS = np.pi / (180.0 * 3600.0 * 1000.0)  # mas -> radians
 DEG = np.pi / 180.0
@@ -96,6 +97,21 @@ def _free_mask(free) -> int:
     if mask & (FREE_BITS["ratio"] | FREE_BITS["phi"]):
         mask |= SHAPE_BITS
     return mask
+
+
+def _frame(epoch):
+    """The celestial frame and equinox of data whose coordinates are given at `epoch`: ``("ICRS", 2000.0)`` - VLBI positions are ICRF, which is what J2000 means in practice - or ``("FK4", 1950.0)`` for B1950."""
+    return ("FK4", 1950.0) if abs(float(epoch) - 1950.0) < 1e-6 else ("ICRS", 2000.0)
+
+
+def _differs(value, default) -> bool:
+    """Whether an argument was given a value other than its default (anything not comparable counts as given)."""
+    if value is default:
+        return False
+    try:
+        return bool(value != default)
+    except Exception:  # an array, say
+        return True
 
 
 def _bold(text) -> str:
@@ -173,7 +189,7 @@ class Observation:
         self._flags_at_load = None
         #: Width in seconds of the time-averaging bins, if averaged.
         self._aver_time = None
-        #: The last `bayes_gscale` result whose corrections were applied (written by `wcorrections`), or None.
+        #: The last Bayesian `gscale` result (``bayes=True``) whose corrections were applied (written by `wcorrections`), or None.
         self._bayes_result = None
         #: After channel averaging: the first and last *original* global
         #: channel behind each channel, and the original channel counts.
@@ -1318,7 +1334,7 @@ class Observation:
         Returns
         -------
         dict | None
-            With ``quiet=False``: `rchisq`, `chisq`, `ndfree`, `nvis` and `nfree` of the fit, whether it `converged` and after how many iterations (`niter`), the fitted `components` (as `model` lists them), their 1-sigma `errors` (same units), the number fitted (`ncomp`) and the whole model's `total_ncomp` and `total_flux` (Jy).
+            With ``quiet=False``: `rchisq`, `chisq`, `ndfree`, `nvis` and `nfree` of the fit, whether it `converged` and after how many iterations (`niter`), the fitted `components` (as `model` lists them), their 1-sigma `errors` (same units), their absolute `positions`, the number fitted (`ncomp`) and the whole model's `total_ncomp` and `total_flux` (Jy). Each entry of `positions` has the right ascension and declination as text (`ra`, ``"hh:mm:ss.s..."``, and `dec`, ``"+dd:mm:ss.s..."``, to the precision of their uncertainties) and in degrees (`ra_deg`, `dec_deg`), their 1-sigma uncertainties as arcs on the sky in mas (`ra_err_mas`, `dec_err_mas`: the errors of `x` and `y`; NaN for a position that was not fitted), and the `frame` and `equinox` (``"ICRS"`` and 2000, as the FITS images say; ``"FK4"`` and 1950 for B1950 data). The position is the data's phase centre plus the component's offset - less any `shift`, so it does not depend on one - and the uncertainties are the fit's formal ones: the uncertainty of the phase centre itself (the phase-reference source's position, say) is not in them.
 
         Raises
         ------
@@ -1387,12 +1403,33 @@ class Observation:
         model = self.model
         nfitted = int(res.pop("nfitted"))
         res["components"] = model[len(model) - nfitted:]
+        res["positions"] = [self._position_report(c["x"], c["y"], e["x"], e["y"])
+                            for c, e in zip(res["components"], res["errors"])]
         res["ncomp"] = len(res["components"])
         res["total_ncomp"] = len(self.model)
         res["total_flux"] = self.model_flux
         if verbose:
             self._print_modelfit(res)
         return self._done(res, quiet, outfile)
+
+    def _sky_position(self, x_mas, y_mas):
+        """The sky position ``(ra, dec)`` in radians of the point at (`x_mas` east, `y_mas` north) in the map: the accumulated `shift` taken off, then the offsets - direction cosines from the data's phase centre (SIN projection) - deprojected exactly."""
+        east, north = self.total_shift
+        l = (float(x_mas) - east) * MAS
+        m = (float(y_mas) - north) * MAS
+        ra0, dec0 = float(self._core.ra), float(self._core.dec)
+        n = np.sqrt(max(0.0, 1.0 - l * l - m * m))
+        dec = np.arcsin(m * np.cos(dec0) + n * np.sin(dec0))
+        ra = ra0 + np.arctan2(l, n * np.cos(dec0) - m * np.sin(dec0))
+        return float(ra % (2.0 * np.pi)), float(dec)
+
+    def _position_report(self, x_mas, y_mas, x_err, y_err):
+        """One entry of modelfit's `positions`: the absolute position of a component at (`x_mas`, `y_mas`), with the uncertainties of those offsets as those of its right ascension and declination (mas on the sky)."""
+        ra, dec = self._sky_position(x_mas, y_mas)
+        frame, equinox = _frame(self._core.epoch)
+        return {"ra": format_ra(ra, x_err, dec), "dec": format_dec(dec, y_err),
+                "ra_deg": float(np.degrees(ra)), "dec_deg": float(np.degrees(dec)),
+                "ra_err_mas": float(x_err), "dec_err_mas": float(y_err), "frame": frame, "equinox": equinox}
 
     @staticmethod
     def _print_modelfit(res):
@@ -1404,7 +1441,8 @@ class Observation:
         )
         print(f"  fitted {res['ncomp']} of {res['total_ncomp']} components; "
               f"{format_flux(res['total_flux'])} in the model")
-        for i, (c, e) in enumerate(zip(res["components"], res["errors"])):
+        positions = res.get("positions") or [None] * len(res["components"])
+        for i, (c, e, p) in enumerate(zip(res["components"], res["errors"], positions)):
             # A parameter the fit did not vary has no uncertainty, and
             # says so rather than passing for an exact measurement.
             def fixed(name):
@@ -1427,8 +1465,16 @@ class Observation:
                 ("Centroid position",
                  f"{format_value(c['x'], e['x'], 'mas')} East, "
                  f"{format_value(c['y'], e['y'], 'mas')} North" + fixed("pos")),
-                ("Size", size),
             ]
+            if p is not None:
+                def err(v):
+                    return f" ± {v:.2g} mas" if np.isfinite(v) else ""
+
+                frame = "B1950" if p["frame"] == "FK4" else p["frame"]
+                lines.append((f"Position ({frame})",
+                              f"RA {p['ra']}{err(p['ra_err_mas'])}, Dec {p['dec']}{err(p['dec_err_mas'])}"
+                              + fixed("pos")))
+            lines.append(("Size", size))
             if c["freq0"] or c["freepar"] & FREE_BITS["spcind"]:
                 lines.append((
                     "Spectral index",
@@ -1673,29 +1719,90 @@ class Observation:
                 print(f"  map {when:<6}: peak {m['max']:.5g}, "
                       f"min {m['min']:.5g}, rms {m['rms']:.5g} Jy/beam")
 
-    def gscale(self, float_scale=False, quiet=True, verbose=True, mapstats=None, outfile=None):
+    def gscale(self, float_scale=False, bayes=False, models=("gauss1", "gauss2", "gauss3"), prior_sigma=0.10, outlier_sigma=1.0, jackknife=True, per_if=True, if_sigma=None, fixed=None, norm="median", nloop=2, solint=0.0, clean_gain=0.05, sigma_floor=0.01, model_sigma=None, timeavg=None, workers=None, apply=True, prefix=None, outformat=None, ms=None, uvfits=None, plot=None, mapstats=None, outfile=None, quiet=True, verbose=True):
         """Solve for one overall amplitude correction per telescope and IF over the whole observation, and apply it (difmap `gscale`). Like `selfcal`, this changes the data the rest of the session sees.
 
         With ``float_scale=False`` (the default, as in difmap) the gains are renormalised to preserve the data's flux scale rather than pull it onto the model, so the corrections can be large while the map peak barely moves; the fit statistics are what show the improvement.
 
+        With ``bayes=True`` it is the Bayesian amplitude calibration instead: `gscale` with each station left out of the source model in turn, several source models (`models`) weighed against each other, and the result shrunk towards the a-priori calibration. A station within its a-priori accuracy (`prior_sigma`) is left alone; one clearly off it gets its correction almost in full (`outlier_sigma`). Without `float_scale` the flux scale of each IF is kept by its median station (`norm`), not by the mean gain as the plain `gscale` does, which one station far off its calibration drags. See `difmapy.bayescal` for the method. The options from `models` to `plot` are the Bayesian calibration's, and are refused without ``bayes=True``; `mapstats` and `outfile` are the plain gscale's.
+
         Parameters
         ----------
         float_scale : bool, default False
-            Let the overall flux scale float onto the model's.
-        quiet : bool, default True
-            Return None. ``False`` returns the result dict.
-        verbose : bool, default True
-            Print each station's correction and the fit before and after.
+            Let the overall flux scale float onto the model's instead of keeping the data's.
+        bayes : bool, default False
+            Run the Bayesian amplitude calibration (the options below up to `plot`).
+        models : sequence of str, default ("gauss1", "gauss2", "gauss3")
+            With `bayes`: the source-model families to compare: ``"gaussN"``/``"pointN"`` (N circular Gaussians or point sources, seeded at the residual peak and fitted with `modelfit`), ``"clean"`` (``"clean500"`` for 500 iterations a round) and ``"current"`` (the model in the observation now, refitted where it has free parameters; being built from all stations, its leave-one-out estimates are not independent). CLEAN is not in the default: the comparison often favoured it where it should not have.
+        prior_sigma : float, default 0.10
+            With `bayes`: the fractional accuracy of the a-priori amplitude calibration - the width of the log-amplitude errors of a station *as calibrated*, which are left alone.
+        outlier_sigma : float, default 1.0
+            With `bayes`: the width of the log-amplitude errors of a station that is *off* (1.0: a factor of a few), which are corrected almost in full.
+        jackknife : bool, default True
+            With `bayes`: do the leave-one-station-out runs. Without them each station's estimate comes from the full-array model and its uncertainty from the spread between models only.
+        per_if : bool, default True
+            With `bayes`: one correction per station and IF, each with its own uncertainty and P(needed); ``False`` combines the IFs' estimates into one correction per station, applied to every IF.
+        if_sigma : float | None, default None
+            With `bayes` and `per_if`: decide each station's level on its IF-combined estimate (as ``per_if=False`` does), then add each IF's departure from it, shrunk by a Gaussian prior of this width (0.1: subbands within ~10% of each other) - levels the subbands of well-measured stations, keeps one level for weak ones. ``None`` judges every IF on its own.
+        fixed : list of str | None, default None
+            With `bayes`: stations whose amplitudes are already right: no correction for them, and each IF's flux scale is held by them instead of the median station (`norm` and `float_scale` give way), so the others are scaled to them (difmap's amplitude self-calibration with `selfant`-fixed antennas). They are still in the source models and the leave-one-out runs.
+        norm : str, default "median"
+            With `bayes`: how the flux scale is kept without `float_scale`: "median" (the median station of each IF gets no correction) or "mean" (difmap's mean gain of one, as the plain gscale keeps it).
+        nloop : int, default 2
+            With `bayes`: rounds of model building and phase self-calibration per run.
+        solint : float | str, default 0.0
+            With `bayes`: the phase self-calibration interval of those rounds, as for `selfcal`.
+        clean_gain : float, default 0.05
+            With `bayes`: CLEAN loop gain for the ``"clean"`` models.
+        sigma_floor : float, default 0.01
+            With `bayes`: the smallest uncertainty assumed for a log-gain (systematics the jackknife cannot see).
+        model_sigma : dict | None, default None
+            With `bayes`: station -> extra uncertainty of its log-gain coming from the source model (one value, or one per IF), added in quadrature - for a model brought from elsewhere (``"current"``), which the jackknife cannot measure.
+        timeavg : float | str | None, default None
+            With `bayes`: average the working data in time first, as `uvaver` (the corrections are constant, so this costs little).
+        workers : int | None, default None
+            With `bayes`: threads to run on; ``None`` uses every CPU.
+        apply : bool, default True
+            With `bayes`: apply the corrections to this observation; ``False`` only reports them.
+        prefix : str | None, default None
+            With `bayes`: write ``<prefix>.json``, ``<prefix>.png`` and a calibration table of the corrections.
+        outformat : str | None, default None
+            With `bayes`: format of that table, as for `savecaltable`.
+        ms : str | None, default None
+            With `bayes`: Measurement Set a CASA table refers to, as for `savecaltable`.
+        uvfits : str | None, default None
+            With `bayes`: UVFITS file an AIPS table is numbered for, as for `savecaltable`.
+        plot : bool | None, default None
+            With `bayes`: show the diagnostic figure; ``None`` shows it when nothing is written and `verbose` is on.
         mapstats : bool | None, default None
-            Also measure the residual map before and after; ``None`` does so whenever a map already exists.
+            Without `bayes`: also measure the residual map before and after; ``None`` does so whenever a map already exists.
         outfile : str | None, default None
-            Also write the result to this file as JSON.
+            Without `bayes`: also write the result to this file as JSON (with `bayes`, `prefix` writes the report).
+        quiet : bool, default True
+            Return None. ``False`` returns the result.
+        verbose : bool, default True
+            Print each station's correction and the fit before and after (with `bayes`: the progress and the summary).
 
         Returns
         -------
-        dict | None
-            With ``quiet=False``: `gains`, station name -> the correction this call applied (median over IFs), `gains_per_if`, station -> one value per IF, the per-(subarray, IF) renormalisation factors `norms` (empty with `float_scale`), `nbins`, `nbadtel`, and `fit_before`/`fit_after` (and `map_before`/`map_after`) as for `selfcal`.
+        dict | BayesGainResult | None
+            With ``quiet=False``: without `bayes` a dict - `gains`, station name -> the correction this call applied (median over IFs), `gains_per_if`, station -> one value per IF, the per-(subarray, IF) renormalisation factors `norms` (empty with `float_scale`), `nbins`, `nbadtel`, and `fit_before`/`fit_after` (and `map_before`/`map_after`) as for `selfcal`; with `bayes` the `BayesGainResult` (print it for the summary, ``.plot()`` for the diagnostics).
         """
+        options = dict(models=models, prior_sigma=prior_sigma, outlier_sigma=outlier_sigma, jackknife=jackknife,
+                       per_if=per_if, if_sigma=if_sigma, fixed=fixed, norm=norm, nloop=nloop, solint=solint,
+                       clean_gain=clean_gain, sigma_floor=sigma_floor, model_sigma=model_sigma, timeavg=timeavg,
+                       workers=workers, apply=apply, prefix=prefix, outformat=outformat, ms=ms, uvfits=uvfits,
+                       plot=plot)
+        if bayes:
+            if mapstats is not None or outfile is not None:
+                raise TypeError("gscale: mapstats and outfile are not for bayes=True (prefix writes its report)")
+            from difmapy.bayescal import _run
+
+            return _run(self, float_scale=float_scale, quiet=quiet, verbose=verbose, **options)
+        defaults = inspect.signature(Observation.gscale).parameters
+        given = [name for name, value in options.items() if _differs(value, defaults[name].default)]
+        if given:
+            raise TypeError(f"gscale: {', '.join(given)} only appl{'ies' if len(given) == 1 else 'y'} with bayes=True")
         if mapstats is None:
             mapstats = self._invert_result is not None
         fit_before = self.moddif()
@@ -1751,74 +1858,6 @@ class Observation:
             self._print_fit(res)
         return self._done(res, quiet, outfile)
 
-    def bayes_gscale(self, models=("gauss1", "gauss2", "gauss3"), prior_sigma=0.10, outlier_sigma=1.0, jackknife=True, per_if=True, if_sigma=None, fixed=None, float_scale=False, norm="median", nloop=2, solint=0.0, clean_gain=0.05, sigma_floor=0.01, model_sigma=None, timeavg=None, workers=None, apply=True, prefix=None, outformat=None, ms=None, uvfits=None, plot=None, quiet=True, verbose=True):
-        """Bayesian amplitude calibration of every station: `gscale` with each station left out of the source model in turn, several source models weighed against each other, and the result shrunk towards the a-priori calibration. A station within its a-priori accuracy (`prior_sigma`) is left alone; one clearly off it gets its correction almost in full (`outlier_sigma`). The flux scale of each IF is kept by its median station, not by the mean gain as `gscale` does, which one station far off its calibration drags. See `difmapy.bayescal` for the method.
-
-        Parameters
-        ----------
-        models : sequence of str, default ("gauss1", "gauss2", "gauss3")
-            The source-model families to compare: ``"gaussN"``/``"pointN"`` (N circular Gaussians or point sources, seeded at the residual peak and fitted), ``"clean"`` (``"clean500"`` for 500 iterations a round) and ``"current"`` (the model in the observation now). CLEAN is not in the default: the comparison often favoured it where it should not have.
-        prior_sigma : float, default 0.10
-            The fractional accuracy of the a-priori amplitude calibration.
-        outlier_sigma : float, default 1.0
-            The width of the log-amplitude errors of a station that is off (1.0: a factor of a few).
-        jackknife : bool, default True
-            Do the leave-one-station-out runs.
-        per_if : bool, default True
-            One correction per station and IF; ``False`` combines the IFs into one per station.
-        if_sigma : float | None, default None
-            With `per_if`: decide each station's level on its IF-combined estimate and add each IF's departure from it, shrunk by a Gaussian prior of this width (0.1: subbands within ~10% of each other) - levels the subbands of well-measured stations, keeps one level for weak ones. ``None`` judges every IF on its own.
-        fixed : list of str | None, default None
-            Stations whose amplitudes are already right: no correction for them, and each IF's flux scale is held by them instead of the median station, so the others are scaled to them (difmap's amplitude self-calibration with `selfant`-fixed antennas).
-        float_scale : bool, default False
-            Let the flux scale float onto the model's instead of keeping the data's.
-        norm : str, default "median"
-            How the flux scale is kept without `float_scale`: "median" (the median station of each IF gets no correction) or "mean" (difmap's mean gain of one).
-        nloop : int, default 2
-            Rounds of model building and phase self-calibration per run.
-        solint : float | str, default 0.0
-            Phase self-calibration interval, as for `selfcal`.
-        clean_gain : float, default 0.05
-            CLEAN loop gain for the ``"clean"`` models.
-        sigma_floor : float, default 0.01
-            The smallest uncertainty assumed for a log-gain.
-        model_sigma : dict | None, default None
-            Station -> extra uncertainty of its log-gain coming from the source model (one value, or one per IF).
-        timeavg : float | str | None, default None
-            Average the working data in time first, as `uvaver`.
-        workers : int | None, default None
-            Threads to run on; ``None`` uses every CPU.
-        apply : bool, default True
-            Apply the corrections to this observation, as `gscale` would.
-        prefix : str | None, default None
-            Write ``<prefix>.json``, ``<prefix>.png`` and a calibration table of the corrections.
-        outformat : str | None, default None
-            Format of that table, as for `savecaltable`.
-        ms : str | None, default None
-            Measurement Set a CASA table refers to, as for `savecaltable`.
-        uvfits : str | None, default None
-            UVFITS file an AIPS table is numbered for, as for `savecaltable`.
-        plot : bool | None, default None
-            Show the diagnostic figure; ``None`` shows it when nothing is written and `verbose` is on.
-        quiet : bool, default True
-            Return None. ``False`` returns the `BayesGainResult`.
-        verbose : bool, default True
-            Print the progress and the summary.
-
-        Returns
-        -------
-        BayesGainResult | None
-            With ``quiet=False``: the result; print it for the summary, ``.plot()`` for the diagnostics.
-        """
-        from difmapy.bayescal import bayes_gscale
-
-        return bayes_gscale(
-            self, models=models, prior_sigma=prior_sigma, outlier_sigma=outlier_sigma, jackknife=jackknife,
-            per_if=per_if, if_sigma=if_sigma, fixed=fixed, float_scale=float_scale, norm=norm, nloop=nloop, solint=solint,
-            clean_gain=clean_gain, sigma_floor=sigma_floor, model_sigma=model_sigma, timeavg=timeavg,
-            workers=workers, apply=apply, prefix=prefix, outformat=outformat,
-            ms=ms, uvfits=uvfits, plot=plot, quiet=quiet, verbose=verbose)
-
     def _gain_amps(self, fill=np.nan):
         """The gain-table amplitudes and their "solved" mask, both [ntimes, nif, nant]; `fill` replaces unsolved entries."""
         amp, _, _ = self._core.gains()
@@ -1828,7 +1867,7 @@ class Observation:
         return np.where(used, amp, fill), used
 
     def wcorrections(self, path, quiet=True):
-        """Write the amplitude corrections per station and IF to a JSON file: the accumulated gains (`station_gains` with ``per_if=True``: the factors the data are multiplied by, 1.0 without a solution) and, after a `bayes_gscale` that applied its corrections, what it applied (``"bayes_gscale"``: one factor per IF, null without a solution; see `BayesGainResult.corrections_record`).
+        """Write the amplitude corrections per station and IF to a JSON file: the accumulated gains (`station_gains` with ``per_if=True``: the factors the data are multiplied by, 1.0 without a solution) and, after a Bayesian `gscale` (``bayes=True``) that applied its corrections, what it applied (``"bayes_gscale"``, the key of earlier versions: one factor per IF, null without a solution; see `BayesGainResult.corrections_record`).
 
         Parameters
         ----------
@@ -1977,7 +2016,7 @@ class Observation:
     def flag_solutions(self, station=None, tmin=None, tmax=None, if_index=None, quiet=True):
         """Flag self-calibration solutions and re-calibrate from the remaining ones (the editing of difmap's `corplot`, which `corplot()` does with the mouse).
 
-        A flagged correction is not used: it is re-derived by interpolating, in time, the solutions that remain for the same antenna and IF (see `set_solution_flags`); where none remain, the data behind it are flagged instead. `unflag_solutions` puts the original corrections back. The raw data are never modified, for Measurement Sets and UVFITS files alike, so the calibration is re-applied to them each time. A new `selfcal`, `gscale`, `bayes_gscale` or `uncalib` works on the corrections as they then are, and the edits can no longer be undone.
+        A flagged correction is not used: it is re-derived by interpolating, in time, the solutions that remain for the same antenna and IF (see `set_solution_flags`); where none remain, the data behind it are flagged instead. `unflag_solutions` puts the original corrections back. The raw data are never modified, for Measurement Sets and UVFITS files alike, so the calibration is re-applied to them each time. A new `selfcal`, `gscale` or `uncalib` works on the corrections as they then are, and the edits can no longer be undone.
 
         Parameters
         ----------
@@ -2415,7 +2454,7 @@ class Observation:
         core._ms_avg_origin = new
 
     def copy(self) -> "Observation":
-        """An independent copy of this observation: data, flags, gains, model, selection, map and every imaging setting. Changing one never affects the other, which is what lets calibration experiments run side by side (see `bayes_gscale`).
+        """An independent copy of this observation: data, flags, gains, model, selection, map and every imaging setting. Changing one never affects the other, which is what lets calibration experiments run side by side (see `gscale` with ``bayes=True``).
 
         Returns
         -------
@@ -2552,7 +2591,7 @@ class Observation:
         baseline_sigma : float, default 5.0
             Departure flagged on its own baseline when no antenna explains it; 0 never flags a baseline alone.
         settings : dict | None, default None
-            Further settings of `difmapy.outliers.OutlierSettings` (``edge_sigma``, ``floor``, ``phase_floor``, ``trend_minutes``, ...).
+            Further settings of `difmapy.outliers.OutlierSettings` (``edge_sigma``, ``floor``, ``phase_floor``, ``trend_minutes``, ...). Without ``edge_sigma`` the default (1.5) is used, or `sigma` or `antenna_sigma` when one is lower.
         quiet : bool, default True
             Return None. ``False`` returns the summary dict.
         verbose : bool, default True
@@ -2563,10 +2602,17 @@ class Observation:
         dict | None
             With ``quiet=False``: `samples` (visibilities newly flagged, one per row and IF), `antennas` (station name -> samples flagged on its baselines because the station was at fault) and `alone` (samples flagged on their own baseline).
         """
+        from difmapy.outliers import OutlierSettings
         from difmapy.smartflag import apply_ops, describe, smart_flag_ops
 
         options = {"sigma": float(sigma), "antenna_sigma": float(antenna_sigma),
                    "baseline_sigma": float(baseline_sigma), **dict(settings or {})}
+        if not (options["sigma"] > 0 and options["antenna_sigma"] > 0):
+            raise ValueError(f"smartflag: sigma and antenna_sigma must be positive, not {options['sigma']:g} and "
+                             f"{options['antenna_sigma']:g}")
+        # A flagged region grows down to edge_sigma, which cannot be above the thresholds that start it: a low
+        # antenna_sigma (or sigma) takes the default edge down with it rather than being refused.
+        options.setdefault("edge_sigma", min(OutlierSettings.edge_sigma, options["sigma"], options["antenna_sigma"]))
         ops, summary = smart_flag_ops(self, use_phases=use_phases, settings=options)
         if ops:
             apply_ops(self, ops)
@@ -2812,7 +2858,7 @@ class Observation:
         since : dict | None, default None
             A `gain_snapshot()` taken earlier: write only the calibration accumulated since then, giving one table per self-cal round. Applying the chain is equivalent to applying one cumulative table.
         solutions : dict | None, default None
-            Write this set of gains instead of the gain table (`bayes_gscale` uses it).
+            Write this set of gains instead of the gain table (the Bayesian `gscale` uses it).
 
         Returns
         -------
@@ -3209,7 +3255,7 @@ class Observation:
     def dashboard(self, block=None):
         """Every view of the session in one window, kept in step: vplot, tplot and possm (top left, in tabs), radplot, projplot and corplot (top right), mapplot (bottom left), and the controls (bottom right).
 
-        The plots are the usual interactive ones, with their keys and flagging; whatever changes the data or the model in one - a flag edit, a CLEAN, a fit - or from the controls reloads the others, as ``r`` would in each. The Main tab loads another file (with optional time and frequency averaging) and runs `selfcal` (phase and/or amplitude, at a solution interval), `gscale` (with or without a floating scale) and `bayes_gscale` (over the source models ticked); the Output tab shows everything the session prints and has buttons to save the maps, the beam, the model, the visibilities, the calibration and flag tables, and the whole session. `difmapy.dashboard()` opens one with no data loaded.
+        The plots are the usual interactive ones, with their keys and flagging; whatever changes the data or the model in one - a flag edit, a CLEAN, a fit - or from the controls reloads the others, as ``r`` would in each. The Main tab loads another file (with optional time and frequency averaging) and runs `selfcal` (phase and/or amplitude, at a solution interval), `gscale` (with or without a floating scale, and with Bayes ticked the Bayesian gscale over the source models ticked) and `smartflag`; the Output tab shows everything the session prints and has buttons to save the maps, the beam, the model, the visibilities, the calibration and flag tables, and the whole session. `difmapy.dashboard()` opens one with no data loaded.
 
         Parameters
         ----------
@@ -3324,15 +3370,24 @@ class Observation:
         hdr = fits.Header()
         hdr["OBJECT"] = c.source_name
         hdr["BUNIT"] = bunit
-        hdr["EQUINOX"] = 2000.0
+        # VLBI positions are ICRF, and the header says so: with EQUINOX 2000 alone a reader takes the frame for
+        # FK5 (astropy does), some 20-30 mas away. The loaders rarely find a frame to go by (an MS says "J2000",
+        # meaning the same thing). Data in B1950 - the one other equinox they report - are FK4.
+        frame, equinox = _frame(c.epoch)
+        hdr["RADESYS"] = frame
+        hdr["EQUINOX"] = equinox
+        # The reference pixel is the data's phase centre, wherever `shift` has put it in the map: at (east, north) =
+        # the accumulated shift. Without a shift that is the map centre (x = y = 0), pixel nx/2 (1-based, after the
+        # flip) and ny/2 + 1.
+        east, north = self.total_shift
         hdr["CTYPE1"] = "RA---SIN"
         hdr["CRVAL1"] = np.rad2deg(c.ra)
         hdr["CDELT1"] = -self._xinc / DEG
-        hdr["CRPIX1"] = nx / 2.0  # 1-based: pixel nx/2 after flip
+        hdr["CRPIX1"] = nx / 2.0 - east * MAS / self._xinc
         hdr["CTYPE2"] = "DEC--SIN"
         hdr["CRVAL2"] = np.rad2deg(c.dec)
         hdr["CDELT2"] = self._yinc / DEG
-        hdr["CRPIX2"] = ny / 2.0 + 1.0
+        hdr["CRPIX2"] = ny / 2.0 + 1.0 + north * MAS / self._yinc
         # FREQ and STOKES axes, as radio images conventionally carry. The
         # stokes code is that of the selection, so a legacy "pi"
         # selection is written as Stokes I - which is what it is.
@@ -3599,7 +3654,7 @@ class Observation:
         * ``<prefix>.ms`` - for an observation that came from a Measurement Set, so a session that started from CASA can go back to it. Unaveraged data go into a copy of the originating MS (calibrated visibilities in CORRECTED_DATA, current flags in FLAG). Data averaged in time or frequency, on load or later, get a new MS with the averaged rows and, if channels were averaged, updated spectral windows (see `difmapy.io.ms.save_averaged_ms`).
         * ``<prefix>.G`` or ``<prefix>.TASAV.FITS`` - the calibration table of the gains accumulated in the session, as `savecaltable` writes it for the data's own format (CASA for a Measurement Set, AIPS for UVFITS), once any self-calibration has been applied.
         * ``<prefix>.flagcmd`` or ``<prefix>.FG.TASAV.FITS`` - the flags added in the session, as `wflags` writes them for the data's own format (a CASA flag-command list for a Measurement Set, an AIPS FG table for UVFITS), once any have been.
-        * ``<prefix>.corrections.json`` - the amplitude corrections per station and IF (`wcorrections`), once any self-calibration or `bayes_gscale` has been applied.
+        * ``<prefix>.corrections.json`` - the amplitude corrections per station and IF (`wcorrections`), once any self-calibration or `gscale` has been applied.
         * ``<prefix>.fits`` - the restored CLEAN map (`wmap`), once there is a model; it is restored with the current beam if it has not been yet.
         * ``<prefix>.robust-2.fits`` ... ``<prefix>.robust+2.fits`` - the restored map once for each robustness mapplot offers (-2, -1, 0, +1, +2), each with that weighting's own estimated beam, written alongside ``<prefix>.fits``. They are imaged on a copy, so the session's weighting and maps are untouched.
 

@@ -24,7 +24,7 @@ shows on large maps. The extras are optional:
 
 | extra | what it adds |
 |---|---|
-| `plot` | matplotlib, for the `bayes_gscale` figure |
+| `plot` | matplotlib, for the figure of the Bayesian `gscale` |
 | `ms` | Measurement Set support (casatools) |
 | `dev` | pytest and maturin |
 
@@ -55,7 +55,7 @@ python -c "import difmapy; print(difmapy.__version__)"
   [Plots](guide/plots.md#notebooks-and-pipelines).
 - **casatools** to read and write Measurement Sets and CASA calibration
   tables. UVFITS needs nothing extra.
-- **matplotlib** (the `plot` extra) for the `bayes_gscale` figure.
+- **matplotlib** (the `plot` extra) for the figure of the Bayesian `gscale`.
 
 Building redistributable wheels and publishing are described in
 `INSTALL.md` in the repository.

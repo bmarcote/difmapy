@@ -15,14 +15,10 @@ def build() -> Path:
     if sys.platform == "darwin":
         command += ["--", "-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
     subprocess.run(command, cwd=root, env=env, check=True)
-    if sys.platform == "darwin":
-        artifact, suffix = "lib_core.dylib", ".abi3.so"
-    elif sys.platform == "win32":
-        artifact, suffix = "_core.dll", ".pyd"
-    else:
-        artifact, suffix = "lib_core.so", ".abi3.so"
+    # difmapy supports macOS and Linux only.
+    artifact = "lib_core.dylib" if sys.platform == "darwin" else "lib_core.so"
     source = Path(env.get("CARGO_TARGET_DIR", root / "target")) / "release" / artifact
-    target = root / "python" / "difmapy" / ("_core" + suffix)
+    target = root / "python" / "difmapy" / "_core.abi3.so"
     with tempfile.NamedTemporaryFile(dir=target.parent, prefix="_core-build-", delete=False) as handle:
         staged = Path(handle.name)
     try:

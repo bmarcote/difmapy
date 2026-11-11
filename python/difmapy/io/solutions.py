@@ -6,7 +6,7 @@ Both the CASA ("G Jones") and the AIPS (SN) writers export the same thing: a set
 
 - and each writer converts to its package's convention on the way out.
 
-`from_gain_table` takes the solutions from the observation's accumulated gain table (what `selfcal`/`gscale` built up); `constant` builds a time-independent set, which is what a whole-observation amplitude calibration such as `bayes_gscale` produces and what can be carried over to other sources of the same observation.
+`from_gain_table` takes the solutions from the observation's accumulated gain table (what `selfcal`/`gscale` built up); `constant` builds a time-independent set, which is what a whole-observation amplitude calibration such as `gscale` with ``bayes=True`` produces and what can be carried over to other sources of the same observation.
 """
 
 from __future__ import annotations

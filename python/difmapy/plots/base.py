@@ -133,14 +133,36 @@ def fit_to_screen(width, height, margin=0.92):
     return (int(width), int(height))
 
 
-def ensure_app():
+#: The QApplication made by `ensure_app(plugin=True)`, kept alive here.
+_GUEST_APP = None
+
+
+def ensure_app(plugin=False):
+    """The Qt application, created on first use.
+
+    Parameters
+    ----------
+    plugin : bool, default False
+        Qt is a guest in a native application (difmapy.app, a SwiftUI program): with ``Qt.AA_PluginApplication`` it leaves the menu bar, the application delegate and the Dock icon to the host, and its events are delivered by the host's run loop, without ``exec()``. Only the first call, the one that creates the application, decides.
+
+    Returns
+    -------
+    QApplication
+        The application.
+    """
+    global _GUEST_APP
     app = QtWidgets.QApplication.instance()
     if app is None:
-        if not os.environ.get("QT_QPA_PLATFORM") and _no_display_server():
+        if not plugin and not os.environ.get("QT_QPA_PLATFORM") and _no_display_server():
             # A server or CI job with no X/Wayland display: Qt would abort
             # trying to connect to one. Draw off-screen instead, which is
             # all a headless pipeline can use anyway.
             os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        if plugin:
+            QtCore.QCoreApplication.setAttribute(QtCore.Qt.ApplicationAttribute.AA_PluginApplication, True)
+            # Made here, not by mkQApp, which would put pyqtgraph's icon
+            # on the host's Dock tile.
+            _GUEST_APP = QtWidgets.QApplication(["difmapy"])
         app = pg.mkQApp("difmapy")
         from difmapy.plots import style
 
@@ -156,7 +178,7 @@ def ensure_app():
         # app.style() is Qt's sheet wrapper and has none.
         app.setProperty("difmapy_base_style", app.style().name())
         style.apply(app)
-        if app.platformName() not in ("offscreen", "minimal"):
+        if not plugin and app.platformName() not in ("offscreen", "minimal"):
             from difmapy.plots.icon import app_icon
 
             app.setWindowIcon(app_icon())
@@ -386,7 +408,7 @@ class SelectViewBox(pg.ViewBox):
 def run_if_needed(widget, block):
     """Present a plot the way the current mode says (see `set_mode`).
 
-    "window": show it, and enter the Qt event loop only if nothing else will pump it. Under IPython or Jupyter the loop is hooked into the session instead (what ``%gui qt`` does), so the prompt stays usable; a plain script blocks until the window is closed. `block` overrides that choice.
+    "window": show it, and enter the Qt event loop only if nothing else will pump it. Under IPython or Jupyter the loop is hooked into the session instead (what ``%gui qt`` does), so the prompt stays usable; a plain script blocks until the window is closed. `block` overrides that choice - except in the macOS app, where Qt is a guest (`ensure_app` with ``plugin=True``): the app's own run loop pumps it, and ``exec()`` would never return.
 
     "inline": draw it off-screen and never block; under Jupyter the image goes into the cell's output. The plot is returned either way, for `savefig` and further calls.
     """
@@ -394,10 +416,17 @@ def run_if_needed(widget, block):
         _present_inline(widget)
         return
     widget.show()
+    if _qt_is_guest():
+        return
     if block is None:
         block = not _hook_qt_loop()
     if block:
         pg.exec()
+
+
+def _qt_is_guest() -> bool:
+    """True when Qt runs as a guest of a native application (the macOS app), which pumps its events."""
+    return QtCore.QCoreApplication.testAttribute(QtCore.Qt.ApplicationAttribute.AA_PluginApplication)
 
 
 def _qt_loop_hooked() -> bool:

@@ -31,7 +31,7 @@ COMMANDS = (
     "peak_offset", "noise_stats", "mapinfo", "print_mapinfo",
     "add_window", "clear_windows",
     # calibration
-    "selfcal", "gscale", "bayes_gscale", "station_gains", "uncalib",
+    "selfcal", "gscale", "station_gains", "uncalib",
     "selfant", "startmod", "flag_solutions", "unflag_solutions",
     "resoff", "clroff",
     # models

@@ -2,7 +2,7 @@
 
 ## Build & test
 
-- `python build_native.py` builds the release extension for an existing editable checkout and publishes it with an atomic inode replacement, so processes already using the old extension remain safe. On macOS the build supplies Python's dynamic-lookup linker arguments. Restart a process to pick up the new binary.
+- `python build_native.py` builds the release extension for an existing editable checkout and publishes it with an atomic inode replacement, so processes already using the old extension remain safe. On macOS the build supplies Python's dynamic-lookup linker arguments. Restart a process to pick up the new binary. It does not refresh the editable install's metadata, which is why `difmapy.__version__` reads the checkout's `pyproject.toml` when there is one. macOS and Linux only - no Windows support. The macOS app is built by `packaging/macos/build_app.py`, not by this script.
 - Högbom CLEAN parallelizes row-wise peak searches and beam subtraction with Rayon for areas of at least 65,536 pixels. Iterations and window priority remain serial; peak ties retain first-pixel ordering. `cargo test -p difmap-core --release --test clean_parallel` checks bit-identical results; add `clean_thread_scaling -- --ignored --nocapture` for the 8192-pixel scaling benchmark.
 
 - If pytest dies at start-up with ``numpy.dtypes has no attribute
@@ -300,6 +300,17 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
   colour scale is a re-positioning of the colour map's stops
   (`log_stretch`), never a transform of the pixel values: the levels and
   the bar axis must stay in Jy/beam, and residual maps have negatives.
+- modelfit's `positions` (and the report's "Position (ICRS)" line) are
+  absolute: `Observation._sky_position` takes the accumulated `shift`
+  off the offset and deprojects it exactly (SIN direction cosines) from
+  the phase centre; the errors are those of x and y (mas on the sky),
+  `units.format_ra`/`format_dec` round the digits to them. The FITS
+  images put CRPIX on the phase centre, wherever the shift moved it (it
+  stayed at the map centre until 2026-11-11, off by the shift). They say
+  `RADESYS = 'ICRS'` (the user, 2026-11-11: VLBI positions are ICRF; an
+  MS says "J2000" and a UVFITS file usually nothing, meaning the same),
+  `observation._frame` gives FK4/1950 for B1950 data only. Without it,
+  `EQUINOX 2000` alone reads as FK5 in astropy, ~30 mas off ICRS.
 - The printed modelfit report goes through `units.format_value` (error
   to two significant figures, value to the same decimal place) and
   `format_flux` (Jy, mJy or µJy, whichever puts the number in 0.1-100).
@@ -353,9 +364,10 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
   (`plots/style.py`, `style.apply`) and drawn icon (`plots/icon.py`).
   The user wants the *web-like* style (typeface, rounded fields, blue
   buttons, underlined tabs, lighter field captions) everywhere except
-  the macOS app, which keeps the native "macos" style (Liquid Glass) -
+  inside the macOS app, whose Qt controls (only those in the hosted
+  plots now) keep the native "macos" style -
   `style.native_controls()` decides, by `$DIFMAPY_APP_BUNDLE` (set by
-  the app launcher) or `$DIFMAPY_STYLE`. In native mode never style
+  the SwiftUI app) or `$DIFMAPY_STYLE`. In native mode never style
   QPushButton/QLineEdit/QTabBar, nor *any* rule matching a QScrollArea
   (Qt then draws its scroll bars non-natively, with arrows); tab widgets
   are not in document mode (that is a grey flat bar on macOS, not the
@@ -364,15 +376,14 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
   system); cards are hairline outlines; action buttons are default
   buttons, which macOS draws in the accent colour (only while the window
   is active, so a `grab()` of an inactive window shows them grey).
-  `DIFMAPY_APP_SELFTEST=<s> DIFMAPY_APP_SNAPSHOT=<png>` saves what the
-  app draws. Light
+  Light
   and dark follow `styleHints().colorSchemeChanged` (connected once in
   `apply`) - not a palette-change event handler, which re-fires on the
   palette the sheet itself sets.
 - **Printing must never fail a computation.** The dashboard's stdout tee
   writes to the Output tab first and escapes what the real stream cannot
   encode: an ASCII stdout (app from Finder; the isolated embedded Python
-  had no UTF-8 mode until the launcher set it) made a modelfit report's
+  had no UTF-8 mode until the app's bridge set it) made a modelfit report's
   "±" raise UnicodeEncodeError, a ValueError, which mapplot's fit took
   for a failed fit and undid.
 - **Never use the static QFileDialog helpers** (`getOpenFileName` ...).
@@ -386,15 +397,83 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
   it on. It is `_glass.dylib` (`packaging/macos/glass.m`,
   built by `build_native.py` and the app build), loaded by ctypes in
   `plots/macglass.py` - no PyObjC. It needs WA_TranslucentBackground set
-  before the native window exists. Liquid Glass *controls* depend on the
-  SDK of the process's main executable: the uv Python is built with SDK
-  14, so only the app (its launcher, `packaging/macos/launcher.c`, built
-  with the current SDK, embeds Python) gets them.
+  before the native window exists. It is for Qt windows from the
+  Terminal; the macOS app has no use for it.
 - `packaging/macos/build_app.py` makes `dist/difmapy.app` + DMG: a copy
   of the standalone CPython with deps installed via `uv pip --target`
   resolved by the bundled interpreter (casatools has macOS 15+ wheels
   only), PySide6-Essentials (not PySide6: the add-ons are ~1 GB),
-  difmapy copied in with a minimal dist-info. `--selftest` runs it.
+  difmapy copied in with a minimal dist-info. `--selftest` runs it;
+  `--dev` makes `dist/difmapy-dev.app` on the current venv in seconds
+  (`Contents/Resources/python-dev.json` names that Python).
+  `DIFMAPY_APP_SELFTEST=<s> DIFMAPY_APP_SNAPSHOT=<png>` prints what the
+  app found, saves what it draws (plots included) and quits; a file
+  given on the command line is loaded first.
+- **The macOS app is SwiftUI** (the user asked for fully native windows,
+  2026-11-11): `packaging/macos/app/*.swift` (window, toolbar, menus,
+  inspector Form of commands, four panes - three plots and an
+  NSTextView output, bottom right, as the user asked -
+  NSOpenPanel/NSSavePanel, Settings) plus `pybridge.c`, which embeds Python (isolated config,
+  UTF-8 mode, unbuffered stdio) and exposes `dpy_call(name, json)` ->
+  `difmapy.macapp.dispatch`. Only the plots stay Qt, hosted in the
+  panes. Load-bearing details:
+  - Qt is a **guest**: `ensure_app(plugin=True)` sets
+    `AA_PluginApplication` (Qt leaves the menu bar and the app delegate
+    alone; its events arrive through the app's run loop, no `exec()`)
+    and creates the QApplication itself - `pg.mkQApp` would put
+    pyqtgraph's icon on the Dock tile.
+  - Each pane is a dashboard `_PlotPanel` (tab bar hidden; the SwiftUI
+    segmented control calls `select`) in Qt's **embedded** mode: the
+    panel stays a top-level Qt window, `attach` returns its NSView
+    (`winId()`), Swift adds that as a subview of the pane's
+    `QtContainerView` and only *then* calls `show` (shown while still
+    the content view of the QNSWindow Qt made for it, that window comes
+    up on its own). The container keeps Qt's view at its bounds
+    (autoresizing + `layout`), and Qt follows the frame. **Never parent
+    the panel to `QWindow.fromWinId(pane view)`** (the first version
+    did): QNSView sends every key to `topLevelWindow`, which for a
+    widget window walks up its QWindow parents to the foreign window -
+    no widgets there, so no plot key worked, and the focus/active
+    window was the foreign one (checked with a synthetic NSEvent
+    keyDown through a plain NSWindow via ctypes/libobjc: foreign
+    parent, no keys; embedded, keys and `activeWindow()` right).
+    `detach` (hide, then Swift removes the view) must run before
+    SwiftUI drops the NSView (`dismantleNSView`); at quit Swift detaches
+    every live container, then calls `shutdown`.
+  - The inspector's command order is Data, Self-calibration, Gain scale
+    (Bayes is a switch in it: `gscale(bayes=True, models=...)`, with
+    the same `float_scale`), Flagging, Imaging -
+    the Qt dashboard's calibration row is likewise Selfcal | Gscale |
+    Smart flag (the user's request, 2026-11-11). **Float scale is off**
+    by default in both, as `gscale`'s own default (the user, 2026-11-11):
+    with a model made from the same data, a floating scale lets missing
+    flux pull the data down. No status text or
+    Reload button in the toolbar (asked for); a running command shows a
+    spinner beside its button (`Session.busyCommand`).
+  - `macapp.WORKER_COMMANDS` (load, calibrate, save, the Terminal
+    command) run on a GCD worker so the window stays live and must
+    never touch Qt; `dispatch` refuses any other command off the main
+    thread. The app brackets each with `begin` (plots disabled) and
+    `finish` (new observation adopted, plots reloaded, state returned).
+  - Python talks back through a C function pointer handed to
+    `macapp.connect`: `output` (a tee of stdout and stderr) and
+    `changed` (a hosted plot edited the data); Swift hops to the main
+    queue, never `main.sync` (the worker may hold the GIL).
+  - `NSTreatUnknownArgumentsAsOpen` is false: otherwise a file named
+    on the command line makes it an "open document" launch and SwiftUI
+    shows no window. It must be **registered** (`register(defaults:)`),
+    never stored: saved in the app's preferences it stops NSOpenPanel
+    from appearing at all ("listener 'com.apple.view-bridge': Connection
+    interrupted", the panel service is out of process) - which shipped
+    once, so the app also deletes a stored copy at launch. Files from
+    the Finder go through `application(_:open:)`, which brings the
+    `Window` scene up with an `openWindow` action captured in the
+    Commands.
+  - Give the inspector a header over its Form (`PaneHeader`): a Form at
+    the top of the inspector scrolls under the toolbar, and a
+    `DIFMAPY_APP_SNAPSHOT` of it is solid black (the glass is drawn by
+    the window server). No screen capture is possible from the agent's
+    terminal, so the snapshot is the only check of the look.
 - `selfcal` reports difmap's `moddif` fit before and after the solution,
   and the residual-map statistics too when a map already exists. The
   extra invert that costs is the one the next `clean` would have done,
@@ -524,7 +603,10 @@ CASA flag-command list. Both are verified in the packages themselves.
 
 ## Bayesian gain calibration
 
-`bayescal.bayes_gscale` runs one job per (source model, station left
+`gscale(bayes=True)` (there is no `bayes_gscale` any more: merged into
+`gscale` at the user's request, 2026-11-11; the engine is the private
+`bayescal._run`, and its options are refused without `bayes=True`)
+runs one job per (source model, station left
 out), each on `Observation.copy()` (a Rust clone), in threads - the
 heavy bindings release the GIL, and the result must not depend on the
 number of workers (a test pins it). Things that look odd but are meant:
@@ -554,12 +636,12 @@ number of workers (a test pins it). Things that look odd but are meant:
 vlbipy's AI mode (`vlbipy.ai`, see vlbipy's `docs/usage/ai.md`) reduced the EVN experiment EB104G end to end and
 traced every residual amplitude problem of the calibrated calibrators to its cause. What it means for difmapy:
 
-- **difmap gains are per station, not per hand.** `selfcal`/`gscale`/`bayes_gscale` solve one gain for RR and
+- **difmap gains are per station, not per hand.** `selfcal`/`gscale` (Bayesian or not) solve one gain for RR and
   LL together (Stokes I), so an RCP/LCP amplitude offset (EB104G after the a-priori calibration: UR -12%, O8
   -6%, SR -5%, from a wrong DPFU/Tsys of one receptor) is invisible to them and survives every self-cal round.
   It has to be corrected before the data reach difmapy (vlbipy levels the hands in its scalar bandpass,
   `level_hands`). Do not "fix" difmapy to solve per hand: the model is Stokes I.
-- **`bayes_gscale(per_if=True)` on a weak station is noise.** T6 on a fringe finder with 5 scans got 5.3-7.6
+- **`gscale(bayes=True, per_if=True)` on a weak station is noise.** T6 on a fringe finder with 5 scans got 5.3-7.6
   across 8 IFs; carried to every field, that is up to 18% subband steps. When the subbands are levelled
   upstream at high SNR (vlbipy's scalar bandpass), call it with `per_if=False` (vlbipy's default since this
   date, `[selfcal].bayes_per_if`).
@@ -567,11 +649,11 @@ traced every residual amplitude problem of the calibrated calibrators to its cau
   that low is "as calibrated" for the model, which is why a low lowest subband was never corrected by it. That is
   the scalar bandpass's job, not gscale's.
 - **`selfcal(amp=True)` with the default `float_scale=False` breaks on one far-off station.** The scale is held
-  by the *mean* gain of each IF (`norm_cors`), the same flaw `bayes_gscale` works around for `gscale`: on EB104G
+  by the *mean* gain of each IF (`norm_cors`), the same flaw the Bayesian `gscale` works around (median norm) for the plain one: on EB104G
   T6 asked for x2.8 (up to x12.7) and pulled every other station to x0.65-0.8 - the weighted chi-squared went up
   60x, at any solint, amp-only or amp+phase. With `float_scale=True` the same solve lowers it by 46%. Anything that
   solves time-dependent amplitudes and normalises per station afterwards should float the scale.
-- **`bayes_gscale` is constant in time.** A station whose sensitivity changes during the run (EB104G: T6 fell x4
+- **The Bayesian `gscale` is constant in time.** A station whose sensitivity changes during the run (EB104G: T6 fell x4
   on both calibrators, JB +-30% with 9-11% scan-to-scan jumps, both with nominal Tsys) keeps that time
   dependence. vlbipy now follows it with `selfcal(amp=True, phase=False, solint="scan")` against the converged
   model, accepted when the fit improves by 1%, reduced to one curve per station (median over IFs) divided by its
