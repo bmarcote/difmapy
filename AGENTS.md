@@ -672,8 +672,13 @@ traced every residual amplitude problem of the calibrated calibrators to its cau
   blamed beyond `antenna_sigma` (5: ~1 false seed per million antenna cells, so the refits converge); greedy, a
   blamed antenna's baselines leave its partners' statistics. Growth by hysteresis (`edge_sigma`), so a strong
   fault also takes about one bin either side.
-- `use_phases=False` (raw data, phase-referenced targets without phase self-cal): the radial part is
-  `|V| - |M|` and the noise its MAD; a projection would turn phase wander into amplitude loss.
+- Each departure is split along the reference (the projection: unbiased and Gaussian at any SNR) and across it,
+  and EACH PART HAS ITS OWN robust noise (`_parts`, `_bin_noise`, two spreads in `_local_trend`): raw or
+  phase-referenced phases scatter more than their amplitudes (atmosphere), and one shared noise let that hide
+  3/4 of a 20% amplitude drop. So raw data are tested on the complex values too (vlbipy's precal pass).
+  `use_phases=False` (phases that cannot be followed even within a scan; vlbipy's target pass by default, an
+  amplitude panel here): the radial part is `|V| - |M|` and the noise its MAD; results unchanged bit for bit.
+  Checks and numbers: vlbipy `docs/smart_outliers_appendix.md`.
 - `floor` (5%), `phase_floor` (10 deg), `scan_floor` (20%) keep bright sources' residual calibration errors out;
   noise-free data (noise 0) are judged by the floors alone.
 - GUI: `_VisPlot` (radplot/vplot/projplot) Shift+S arms `SelectViewBox.armed`; the next drag (any modifier) goes
