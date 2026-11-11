@@ -155,8 +155,9 @@ struct PlotPane: View {
 
 /// An NSView the plots of one pane live in: the pane's Qt panel stays a top-level Qt window, and its own NSView
 /// (difmapy.macapp.Session.attach hands it over) is put in here and kept at this view's size - Qt's "embedded" mode.
-/// Not a child of a foreign QWindow made from this view: Qt sends the keys typed into a widget window to the top of
-/// its QWindow parents, which would be that foreign window, and the plots' keys would go nowhere.
+/// The panel is a Qt.SubWindow, so Qt never makes an NSWindow for it (from Qt 6.12, showing any other top level puts
+/// its view back into one). Not a child of a foreign QWindow made from this view: Qt sends the keys typed into a
+/// widget window to the top of its QWindow parents, which would be that foreign window, and the keys would go nowhere.
 struct QtHost: NSViewRepresentable {
     let pane: String
 
@@ -188,7 +189,7 @@ final class QtContainerView: NSView {
         if window != nil { attach() } else { detach() }
     }
 
-    /// Put the pane's Qt view in here, then let Qt show it (shown first, it would come up in a window of its own).
+    /// Put the pane's Qt view in here, then let Qt show it.
     private func attach() {
         guard qtView == nil, let address = Session.shared.call("attach", ["pane": pane]) as? Int,
               let pointer = UnsafeMutableRawPointer(bitPattern: address) else { return }

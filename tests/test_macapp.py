@@ -19,6 +19,7 @@ from difmapy import macapp
 from difmapy.plots import base
 from difmapy.plots.mapplot import MapPlot
 from difmapy.plots.points import RadPlot, VPlot
+from pyqtgraph.Qt import QtCore
 
 
 # An ordinary Qt application for the whole test session: `macapp` would make it a guest of the app
@@ -129,11 +130,13 @@ def test_panes_hold_the_plots_and_follow_the_selection(session, uvfits_file):
 
 
 def test_panes_are_embedded_not_parented(session, uvfits_file):
-    """`attach` hands over the panel's native view without showing it (shown while it is still the content of the window Qt made for it, that window would come up on its own); `show` shows it, `detach` hides it. The panel stays a top-level window: parented to a foreign QWindow, it would lose every key typed into it."""
+    """`attach` hands over the panel's native view without showing it; `show` shows it, `detach` hides it. The panel stays a top-level window: parented to a foreign QWindow, it would lose every key typed into it. It is a sub-window, which Qt gives no NSWindow: from Qt 6.12, showing any other top level puts its view back into a window of its own, out of the pane."""
     load(session, uvfits_file)
     view = call("attach", pane="map")["ok"]
     panel = session.panels["map"]
     assert isinstance(view, int) and view == int(panel.winId())
+    sub = QtCore.Qt.WindowType.SubWindow
+    assert panel.windowFlags() & sub == sub and panel.windowHandle().flags() & sub == sub
     assert not panel.isVisible() and "map" not in session.hosts
     assert call("show", pane="map", width=400, height=300)["ok"]
     assert panel.isVisible() and panel.isWindow() and panel.windowHandle().parent() is None

@@ -2,7 +2,7 @@
 
 The app is a SwiftUI program (``packaging/macos/app/``): its window, toolbar, menus, inspector of controls, output console, file panels and settings are native. It embeds this Python through ``pybridge.c`` and hosts the interactive plots - the ordinary pyqtgraph plot windows, which keep their keys, flagging, CLEAN windows and status lines - in its panes.
 
-Qt runs there as a guest (`difmapy.plots.base.ensure_app` with ``plugin=True``, i.e. ``Qt.AA_PluginApplication``): it leaves the menu bar, the application delegate and the Dock icon to the app, and its events are delivered by the app's own run loop, with no ``exec()``. Each pane is a dashboard plot panel (`difmapy.plots.dashboard._PlotPanel`) with its tab bar hidden - the pane's segmented control picks the plot. The panel stays a top-level Qt window, and the app puts its ``NSView`` (`Session.attach` hands it over) into an ``NSView`` of the SwiftUI window: Qt's *embedded* mode, in which the plot follows that view's size and takes the keys typed into it. It is not parented to a foreign ``QWindow`` (``QWindow.fromWinId``): Qt's Cocoa plugin sends every key to the top of a widget window's ``QWindow`` parents, which would then be that foreign window - and the keys would go nowhere.
+Qt runs there as a guest (`difmapy.plots.base.ensure_app` with ``plugin=True``, i.e. ``Qt.AA_PluginApplication``): it leaves the menu bar, the application delegate and the Dock icon to the app, and its events are delivered by the app's own run loop, with no ``exec()``. Each pane is a dashboard plot panel (`difmapy.plots.dashboard._PlotPanel`) with its tab bar hidden - the pane's segmented control picks the plot. The panel stays a top-level Qt window, and the app puts its ``NSView`` (`Session.attach` hands it over) into an ``NSView`` of the SwiftUI window: Qt's *embedded* mode, in which the plot follows that view's size and takes the keys typed into it. The panel carries ``Qt.SubWindow``, a top level that Qt does not give an ``NSWindow``: from Qt 6.12 on, any other top level's view is put back into a window of its own on every ``show()``. It is not parented to a foreign ``QWindow`` (``QWindow.fromWinId``): Qt's Cocoa plugin sends every key to the top of a widget window's ``QWindow`` parents, which would then be that foreign window - and the keys would go nowhere.
 
 The app calls `dispatch` with a command name and its arguments in JSON and gets JSON back: ``{"ok": result}`` or ``{"error": message}``. The commands in `WORKER_COMMANDS` compute (load, calibrate, save) and the app runs them on a worker thread, so that its window stays live; they must not touch Qt. The app brackets each with `Session.begin` (the plots stop taking input) and `Session.finish` (the plots catch up, take input again, and the new state comes back), both on the main thread, where every other command runs. This module talks back through `emit`: ``output`` (what the session prints, for the Output tab) and ``changed`` (a plot changed the data or the model).
 """
@@ -127,9 +127,16 @@ class Session:
         panel = self.panels.get(pane)
         if panel is None:
             from difmapy.plots.dashboard import _PlotPanel, _plot_factories
+            from pyqtgraph.Qt import QtCore
 
             self.start()
             panel = _PlotPanel(self, _plot_factories()[pane])
+            # Before its native view exists: a sub-window is a top level without an NSWindow of its own. Qt 6.12
+            # puts any other top level's view back into an NSWindow it makes for it on every show(), which took
+            # each plot out of its pane into a window of its own. Qt Widgets turns a parentless Qt.SubWindow into
+            # SubWindow | Window, so the panel is still a top-level widget with no QWindow parent, and the keys
+            # typed into it still reach it.
+            panel.setWindowFlags(QtCore.Qt.WindowType.SubWindow)
             # The SwiftUI pane's segmented control picks the plot.
             panel.setTabBarAutoHide(False)
             panel.tabBar().hide()
@@ -142,7 +149,7 @@ class Session:
         return panel
 
     def attach(self, pane):
-        """The native view of the plots of `pane` - the address of the panel's ``NSView`` - for the app to put into the pane's view; `show` then shows them. The panel is not shown yet: shown while its view is still the content of the window Qt made for it, that window would come up on its own."""
+        """The native view of the plots of `pane` - the address of the panel's ``NSView`` - for the app to put into the pane's view; `show` then shows them. The panel is a ``Qt.SubWindow``, so Qt makes no ``NSWindow`` for that view: it is shown only inside the pane."""
         panel = self._panel(pane)
         return int(panel.winId())
 

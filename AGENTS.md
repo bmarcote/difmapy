@@ -426,9 +426,17 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
     segmented control calls `select`) in Qt's **embedded** mode: the
     panel stays a top-level Qt window, `attach` returns its NSView
     (`winId()`), Swift adds that as a subview of the pane's
-    `QtContainerView` and only *then* calls `show` (shown while still
-    the content view of the QNSWindow Qt made for it, that window comes
-    up on its own). The container keeps Qt's view at its bounds
+    `QtContainerView` and only *then* calls `show`. **The panel must be
+    a `Qt.SubWindow`** (set in `Session._panel` before `winId()`; Qt
+    Widgets makes a parentless one SubWindow | Window, still a top
+    level): from Qt 6.12, `QCocoaWindow::recreateWindowIfNeeded` puts
+    the view of any other parentless top level back into an NSWindow
+    of its own on every `show()`, so each plot came up in a separate
+    window and the panes stayed blank. 6.11 still honoured the view's
+    foreign window, so the dev app (venv Qt) looked right while the
+    bundled app (Qt 6.12 resolved at build time) did not - check the
+    app build, not only `--dev`. A sub-window gets no NSWindow in
+    either version. The container keeps Qt's view at its bounds
     (autoresizing + `layout`), and Qt follows the frame. **Never parent
     the panel to `QWindow.fromWinId(pane view)`** (the first version
     did): QNSView sends every key to `topLevelWindow`, which for a
@@ -436,7 +444,10 @@ edit.rs; obshift.c/resoff.c → geom.rs; clphs.c → closure.rs.
     no widgets there, so no plot key worked, and the focus/active
     window was the foreign one (checked with a synthetic NSEvent
     keyDown through a plain NSWindow via ctypes/libobjc: foreign
-    parent, no keys; embedded, keys and `activeWindow()` right).
+    parent, no keys; embedded, keys and `activeWindow()` right -
+    repeated for the SubWindow panel on Qt 6.11 and 6.12; Qt activates
+    the panel only if the NSWindow is key when the view becomes first
+    responder, so such a script must activate its NSApp first).
     `detach` (hide, then Swift removes the view) must run before
     SwiftUI drops the NSView (`dismantleNSView`); at quit Swift detaches
     every live container, then calls `shutdown`.
